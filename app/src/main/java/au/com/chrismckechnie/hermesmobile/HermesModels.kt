@@ -20,6 +20,9 @@ data class HostProfile(
         require(apiKey.isNotBlank()) { "Hermes API key is required." }
         return copy(name = normalizedName, baseUrl = normalizedUrl, apiKey = apiKey.trim())
     }
+
+    // Never leak the bearer key through logs or debug output.
+    override fun toString(): String = "HostProfile(id=$id, name=$name, baseUrl=$baseUrl)"
 }
 
 fun normalizeHermesBaseUrl(raw: String): String {
@@ -47,7 +50,18 @@ data class HermesCapabilities(
     val model: String,
     val platform: String,
     val features: Set<String>,
-)
+) {
+    // The full Run-control bundle; anything less recreates the silent-approval
+    // hang the /v1/runs transport exists to fix (docs/adr/0001).
+    val supportsRuns: Boolean
+        get() = features.containsAll(
+            listOf("run_submission", "run_events_sse", "run_stop", "approval_events", "run_approval_response")
+        )
+    val supportsSkills: Boolean get() = "skills_api" in features
+    val supportsReasoningEffort: Boolean get() = "run_reasoning_effort" in features
+    val supportsSessionEdit: Boolean get() = "session_resources" in features
+    val supportsSessionFork: Boolean get() = "session_fork" in features
+}
 
 data class HermesSession(
     val id: String,
@@ -67,6 +81,11 @@ data class HermesMessage(
     val timestamp: String? = null,
 )
 
+data class HermesMessagesPage(
+    val sessionId: String,
+    val messages: List<HermesMessage>,
+)
+
 data class HermesJob(
     val id: String,
     val name: String,
@@ -75,14 +94,33 @@ data class HermesJob(
     val deliver: String?,
 )
 
-sealed interface HermesStreamEvent {
-    data class RunStarted(val runId: String?) : HermesStreamEvent
-    data class AssistantDelta(val text: String) : HermesStreamEvent
-    data class ToolStarted(val toolName: String, val preview: String?) : HermesStreamEvent
-    data class ToolCompleted(val toolName: String, val preview: String?, val failed: Boolean = false) : HermesStreamEvent
-    data class Completed(val content: String, val sessionId: String?) : HermesStreamEvent
-    data class Failed(val message: String) : HermesStreamEvent
-    data object Done : HermesStreamEvent
+data class HermesSkill(
+    val name: String,
+    val description: String?,
+)
+
+data class HermesRunStatus(
+    val runId: String,
+    val status: String,
+) {
+    val isTerminal: Boolean get() = status in TERMINAL
+    val isWaitingForApproval: Boolean get() = status == "waiting_for_approval"
+
+    private companion object {
+        val TERMINAL = setOf("completed", "failed", "cancelled")
+    }
+}
+
+/** Events on `GET /v1/runs/{run_id}/events` — data-only SSE, name in the JSON `event` field. */
+sealed interface HermesRunEvent {
+    data class MessageDelta(val delta: String) : HermesRunEvent
+    data class ToolStarted(val tool: String, val preview: String?) : HermesRunEvent
+    data class ToolCompleted(val tool: String, val failed: Boolean) : HermesRunEvent
+    data class ApprovalRequested(val command: String?) : HermesRunEvent
+    data class ApprovalResponded(val choice: String?) : HermesRunEvent
+    data class Completed(val output: String) : HermesRunEvent
+    data class Failed(val error: String) : HermesRunEvent
+    data object Cancelled : HermesRunEvent
 }
 
 class HermesApiException(
@@ -94,12 +132,23 @@ interface HermesGateway {
     suspend fun probe(host: HostProfile): HermesCapabilities
     suspend fun listSessions(host: HostProfile, limit: Int = 50): List<HermesSession>
     suspend fun createSession(host: HostProfile, title: String? = null): HermesSession
-    suspend fun loadMessages(host: HostProfile, sessionId: String): List<HermesMessage>
+    suspend fun loadMessages(host: HostProfile, sessionId: String): HermesMessagesPage
     suspend fun listJobs(host: HostProfile): List<HermesJob>
-    suspend fun streamSessionChat(
+    suspend fun listSkills(host: HostProfile): List<HermesSkill>
+    suspend fun listModels(host: HostProfile): List<String>
+    suspend fun submitRun(
         host: HostProfile,
         sessionId: String,
         input: String,
-        onEvent: (HermesStreamEvent) -> Unit,
-    )
+        history: List<HermesMessage>,
+        model: String? = null,
+        reasoningEffort: String? = null,
+    ): String
+    suspend fun streamRunEvents(host: HostProfile, runId: String, onEvent: (HermesRunEvent) -> Unit)
+    suspend fun getRunStatus(host: HostProfile, runId: String): HermesRunStatus
+    suspend fun respondApproval(host: HostProfile, runId: String, choice: String)
+    suspend fun stopRun(host: HostProfile, runId: String)
+    suspend fun renameSession(host: HostProfile, sessionId: String, title: String): HermesSession
+    suspend fun deleteSession(host: HostProfile, sessionId: String)
+    suspend fun forkSession(host: HostProfile, sessionId: String): HermesSession
 }

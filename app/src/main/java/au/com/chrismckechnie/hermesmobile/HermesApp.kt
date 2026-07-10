@@ -8,8 +8,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,15 +56,21 @@ import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.automirrored.outlined.CallSplit
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Shield
+import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material.icons.outlined.WorkOutline
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -137,6 +146,7 @@ fun HermesMobileApp(state: HermesUiState, viewModel: HermesViewModel) {
                         onManage = viewModel::showHostPicker,
                         onDismissError = viewModel::dismissError,
                     )
+                    RunBanner(state, viewModel)
                     AnimatedContent(
                         targetState = state.screen,
                         transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(110)) },
@@ -160,6 +170,23 @@ fun HermesMobileApp(state: HermesUiState, viewModel: HermesViewModel) {
                         onSelect = viewModel::selectHost,
                         onSave = viewModel::saveHost,
                         onDelete = viewModel::deleteHost,
+                    )
+                }
+
+                state.sessionActionsFor?.let { sessionId ->
+                    val session = state.sessions.firstOrNull { it.id == sessionId }
+                    if (session != null) SessionActionsSheet(session, viewModel) else viewModel.dismissSessionActions()
+                }
+
+                state.confirmDeleteSessionId?.let { sessionId ->
+                    val title = state.sessions.firstOrNull { it.id == sessionId }?.title?.takeIf { it.isNotBlank() } ?: "this session"
+                    AlertDialog(
+                        onDismissRequest = viewModel::dismissDeleteSession,
+                        containerColor = InkRaised,
+                        title = { Text("Delete session?", fontSize = 15.sp, fontWeight = FontWeight.SemiBold) },
+                        text = { Text("“$title” and its transcript are removed from the host. This cannot be undone.", color = SoftText, fontSize = 11.sp, lineHeight = 16.sp) },
+                        confirmButton = { TextButton(onClick = viewModel::confirmDeleteSession) { Text("Delete", color = Red, fontSize = 11.sp, fontWeight = FontWeight.Bold) } },
+                        dismissButton = { TextButton(onClick = viewModel::dismissDeleteSession) { Text("Cancel", color = SoftText, fontSize = 11.sp) } },
                     )
                 }
             }
@@ -256,10 +283,39 @@ private fun ConnectionNotice(
 }
 
 @Composable
+private fun RunBanner(state: HermesUiState, viewModel: HermesViewModel) {
+    AnimatedVisibility(visible = state.runBannerVisible) {
+        val run = state.activeRun ?: return@AnimatedVisibility
+        Row(
+            Modifier.fillMaxWidth().background(Cyan.copy(alpha = 0.06f)).padding(start = 14.dp, end = 5.dp, top = 7.dp, bottom = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(13.dp), color = Cyan, strokeWidth = 1.5.dp)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                buildString {
+                    append(if (run.awaitingApproval) "Waiting for approval" else if (run.stopping) "Stopping run" else "Run active")
+                    append(" — ")
+                    append(run.sessionTitle?.takeIf { it.isNotBlank() } ?: run.sessionId)
+                },
+                color = Cyan,
+                fontSize = 9.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = viewModel::returnToRunSession) { Text("Return", color = MintSoft, fontSize = 9.sp) }
+            TextButton(onClick = viewModel::stopActiveRun, enabled = !run.stopping) { Text("Stop", color = Red, fontSize = 9.sp) }
+        }
+    }
+}
+
+@Composable
 private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val listState = rememberLazyListState()
-    LaunchedEffect(state.messages.size) {
-        if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
+    val displayed = state.displayedMessages
+    LaunchedEffect(displayed.size) {
+        if (displayed.isNotEmpty()) listState.animateScrollToItem(displayed.lastIndex)
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -279,6 +335,8 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            ModelChip(state, viewModel)
+            Spacer(Modifier.width(8.dp))
             IconButton(
                 onClick = viewModel::createSession,
                 enabled = state.connectionPhase == HostConnectionPhase.Connected,
@@ -286,7 +344,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
             ) { Icon(Icons.Outlined.Add, "New session", tint = if (state.connectionPhase == HostConnectionPhase.Connected) Mint else Muted) }
         }
 
-        if (state.messages.isEmpty()) {
+        if (displayed.isEmpty()) {
             EmptyConversation(state, Modifier.weight(1f))
         } else {
             LazyColumn(
@@ -295,16 +353,119 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 15.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(13.dp),
             ) {
-                items(state.messages, key = { it.id }) { item ->
+                items(displayed, key = { it.id }) { item ->
                     when (item) {
                         is ChatUiItem.User -> UserBubble(item.text)
                         is ChatUiItem.Assistant -> AssistantMessage(item.text, item.streaming)
                         is ChatUiItem.Tool -> LiveToolCard(item)
+                        is ChatUiItem.Approval -> ApprovalCard(item, viewModel)
                     }
                 }
             }
         }
         Composer(state, viewModel)
+    }
+}
+
+@Composable
+private fun ModelChip(state: HermesUiState, viewModel: HermesViewModel) {
+    if (state.models.isEmpty()) return
+    var open by remember { mutableStateOf(false) }
+    val defaultModel = state.models.firstOrNull()
+    val modelLabel = state.selectedModel ?: defaultModel ?: return
+    val supportsReasoning = state.capabilities?.supportsReasoningEffort == true
+    val chipLabel = state.selectedReasoningEffort?.takeIf { supportsReasoning }?.let { "$modelLabel · $it" } ?: modelLabel
+    Row(
+        modifier = Modifier.clip(CircleShape).background(Cyan.copy(alpha = 0.06f)).clickable { open = true }.padding(start = 10.dp, end = 6.dp, top = 7.dp, bottom = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            chipLabel,
+            color = Cyan,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.width(72.dp),
+        )
+        Icon(Icons.Outlined.ExpandMore, "Model settings", tint = Muted, modifier = Modifier.size(15.dp))
+    }
+    if (open) ModelSettingsSheet(state, viewModel, supportsReasoning) { open = false }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModelSettingsSheet(
+    state: HermesUiState,
+    viewModel: HermesViewModel,
+    supportsReasoning: Boolean,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val defaultModel = state.models.firstOrNull()
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = InkRaised,
+        scrimColor = Color.Black.copy(alpha = 0.72f),
+        dragHandle = { Box(Modifier.padding(top = 9.dp, bottom = 4.dp).size(width = 38.dp, height = 4.dp).clip(CircleShape).background(LineStrong)) },
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+            Text("Model settings", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+            Text("Applies to new runs on ${state.activeHost?.name ?: "this host"}.", color = Muted, fontSize = 9.sp, modifier = Modifier.padding(top = 3.dp, bottom = 14.dp))
+
+            SelectorField(
+                label = "MODEL",
+                value = state.selectedModel ?: defaultModel?.let { "$it (host default)" } ?: "—",
+                options = state.models.mapIndexed { index, model -> (if (index == 0) null else model) to (if (index == 0) "$model (host default)" else model) },
+                selectedKey = state.selectedModel,
+            ) { viewModel.selectModel(it) }
+
+            if (supportsReasoning) {
+                Spacer(Modifier.height(12.dp))
+                SelectorField(
+                    label = "REASONING EFFORT",
+                    value = state.selectedReasoningEffort ?: "host default",
+                    options = (listOf<String?>(null) + REASONING_EFFORTS).map { it to (it ?: "host default") },
+                    selectedKey = state.selectedReasoningEffort,
+                ) { viewModel.selectReasoningEffort(it) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectorField(
+    label: String,
+    value: String,
+    options: List<Pair<String?, String>>,
+    selectedKey: String?,
+    onSelect: (String?) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Text(label, color = Muted, fontSize = 8.sp, letterSpacing = 1.15.sp, modifier = Modifier.padding(bottom = 7.dp))
+    Box {
+        Row(
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF091310)).border(BorderStroke(1.dp, LineStrong), RoundedCornerShape(14.dp)).clickable { expanded = true }.padding(horizontal = 13.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(value, color = Color(0xFFEAF4EF), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Icon(Icons.Outlined.ExpandMore, null, tint = Muted, modifier = Modifier.size(17.dp))
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = InkRaised) {
+            options.forEach { (key, display) ->
+                val selected = key == selectedKey
+                DropdownMenuItem(
+                    text = { Text(display, fontSize = 11.sp, color = if (selected) Mint else SoftText, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal) },
+                    trailingIcon = { if (selected) Icon(Icons.Outlined.Check, null, tint = Mint, modifier = Modifier.size(14.dp)) },
+                    onClick = {
+                        expanded = false
+                        onSelect(key)
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -406,43 +567,157 @@ private fun LiveToolCard(item: ChatUiItem.Tool) {
 }
 
 @Composable
-private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
-    val enabled = state.connectionPhase == HostConnectionPhase.Connected && !state.isSending
-    val focusManager = LocalFocusManager.current
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 8.dp).clip(RoundedCornerShape(18.dp)).background(SurfaceOne).padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
+private fun ApprovalCard(item: ChatUiItem.Approval, viewModel: HermesViewModel) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(15.dp),
+        colors = CardDefaults.cardColors(containerColor = Amber.copy(alpha = 0.06f)),
+        border = BorderStroke(1.dp, Amber.copy(alpha = 0.3f)),
     ) {
-        BasicTextField(
-            value = state.composerText,
-            onValueChange = viewModel::setComposerText,
-            enabled = enabled,
-            textStyle = TextStyle(color = Color(0xFFE8F1ED), fontSize = 12.sp, lineHeight = 17.sp),
-            cursorBrush = SolidColor(Mint),
-            modifier = Modifier.weight(1f),
-            maxLines = 4,
-            decorationBox = { inner ->
-                Box(Modifier.padding(vertical = 6.dp)) {
-                    if (state.composerText.isBlank()) Text(
-                        if (state.activeHost == null) "Choose a host to begin" else if (state.connectionPhase != HostConnectionPhase.Connected) "Waiting for host…" else "Message Hermes…",
-                        color = Muted,
-                        fontSize = 12.sp,
-                    )
-                    inner()
+        Column(Modifier.padding(13.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Shield, null, tint = Amber, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Hermes needs approval", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = Amber)
+            }
+            item.command?.let { command ->
+                Text(
+                    command,
+                    color = SoftText,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp,
+                    maxLines = 6,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 8.dp).fillMaxWidth().clip(RoundedCornerShape(9.dp)).background(Ink).padding(9.dp),
+                )
+            }
+            Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = { viewModel.respondApproval("deny") }) { Text("Deny", color = Red, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+                TextButton(onClick = { viewModel.respondApproval("once") }) { Text("Allow once", color = Mint, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+                TextButton(onClick = { viewModel.respondApproval("session") }) { Text("Allow for this run", color = MintSoft, fontSize = 10.sp) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
+    val runActive = state.activeRun != null
+    val enabled = state.connectionPhase == HostConnectionPhase.Connected && !state.isSending && state.unknownOutcome == null
+    val focusManager = LocalFocusManager.current
+    val suggestions = state.slashSuggestions()
+
+    Column(Modifier.fillMaxWidth()) {
+        state.unknownOutcome?.let { pending ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 11.dp).clip(RoundedCornerShape(13.dp)).background(Amber.copy(alpha = 0.07f)).padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (!pending.evidence && !pending.timedOut) CircularProgressIndicator(modifier = Modifier.size(12.dp), color = Amber, strokeWidth = 1.4.dp)
+                else Icon(Icons.Outlined.Shield, null, tint = Amber, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    when {
+                        pending.evidence -> "The host received your message and replied."
+                        pending.timedOut -> "Send outcome unknown — no evidence the host received it."
+                        else -> "Send outcome unknown — checking the host…"
+                    },
+                    color = Amber,
+                    fontSize = 9.sp,
+                    lineHeight = 13.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = viewModel::acknowledgeUnknownOutcome) {
+                    Text(if (pending.evidence) "Resume" else "Send anyway", color = MintSoft, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                 }
-            },
-        )
-        Spacer(Modifier.width(7.dp))
-        val canSend = enabled && state.composerText.isNotBlank()
-        Box(
-            modifier = Modifier.size(40.dp).clip(RoundedCornerShape(13.dp)).background(if (canSend) Mint else Muted.copy(alpha = 0.12f)).clickable(enabled = canSend) {
-                focusManager.clearFocus()
-                viewModel.sendMessage()
-            },
-            contentAlignment = Alignment.Center,
+            }
+        }
+
+        if (suggestions.isNotEmpty()) {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 11.dp).clip(RoundedCornerShape(13.dp)).background(InkRaised).padding(vertical = 4.dp),
+            ) {
+                suggestions.forEach { suggestion ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { viewModel.applySuggestion(suggestion) }.padding(horizontal = 12.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "/${suggestion.name}",
+                            color = if (suggestion.kind == SlashKind.Command) Mint else Cyan,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            suggestion.description,
+                            color = Muted,
+                            fontSize = 9.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (suggestion.kind == SlashKind.Skill) Text("SKILL", color = Cyan, fontSize = 7.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 8.dp).clip(RoundedCornerShape(18.dp)).background(SurfaceOne).padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (state.isSending) CircularProgressIndicator(modifier = Modifier.size(17.dp), color = Mint, strokeWidth = 1.7.dp)
-            else Icon(Icons.AutoMirrored.Outlined.Send, "Send", tint = if (canSend) Ink else Muted, modifier = Modifier.size(18.dp))
+            BasicTextField(
+                value = state.composerText,
+                onValueChange = viewModel::setComposerText,
+                enabled = enabled,
+                textStyle = TextStyle(color = Color(0xFFE8F1ED), fontSize = 12.sp, lineHeight = 17.sp),
+                cursorBrush = SolidColor(Mint),
+                modifier = Modifier.weight(1f),
+                maxLines = 4,
+                decorationBox = { inner ->
+                    Box(Modifier.padding(vertical = 6.dp)) {
+                        if (state.composerText.isBlank()) Text(
+                            when {
+                                state.activeHost == null -> "Choose a host to begin"
+                                state.connectionPhase != HostConnectionPhase.Connected -> "Waiting for host…"
+                                runActive -> "Run in progress — /stop to interrupt"
+                                else -> "Message Hermes, or / for commands"
+                            },
+                            color = Muted,
+                            fontSize = 12.sp,
+                        )
+                        inner()
+                    }
+                },
+            )
+            Spacer(Modifier.width(7.dp))
+            if (runActive) {
+                val stopping = state.activeRun?.stopping == true
+                Box(
+                    modifier = Modifier.size(40.dp).clip(RoundedCornerShape(13.dp)).background(Red.copy(alpha = 0.14f)).clickable(enabled = !stopping) {
+                        viewModel.stopActiveRun()
+                    },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (stopping) CircularProgressIndicator(modifier = Modifier.size(17.dp), color = Red, strokeWidth = 1.7.dp)
+                    else Icon(Icons.Outlined.Stop, "Stop run", tint = Red, modifier = Modifier.size(20.dp))
+                }
+            } else {
+                val canSend = enabled && state.composerText.isNotBlank()
+                Box(
+                    modifier = Modifier.size(40.dp).clip(RoundedCornerShape(13.dp)).background(if (canSend) Mint else Muted.copy(alpha = 0.12f)).clickable(enabled = canSend) {
+                        focusManager.clearFocus()
+                        viewModel.sendMessage()
+                    },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (state.isSending) CircularProgressIndicator(modifier = Modifier.size(17.dp), color = Mint, strokeWidth = 1.7.dp)
+                    else Icon(Icons.AutoMirrored.Outlined.Send, "Send", tint = if (canSend) Ink else Muted, modifier = Modifier.size(18.dp))
+                }
+            }
         }
     }
 }
@@ -456,17 +731,23 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 12.dp)) {
                 items(state.sessions, key = { it.id }) { session ->
-                    SessionCard(session, selected = state.activeSessionId == session.id) { viewModel.selectSession(session.id) }
+                    SessionCard(
+                        session = session,
+                        selected = state.activeSessionId == session.id,
+                        onClick = { viewModel.selectSession(session.id) },
+                        onLongClick = { viewModel.openSessionActions(session.id) },
+                    )
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SessionCard(session: HermesSession, selected: Boolean, onClick: () -> Unit) {
+private fun SessionCard(session: HermesSession, selected: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
     Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
         colors = CardDefaults.cardColors(containerColor = if (selected) Mint.copy(alpha = 0.075f) else Color(0xFF0A1513)),
         border = BorderStroke(1.dp, if (selected) Mint.copy(alpha = 0.28f) else Line),
         shape = RoundedCornerShape(15.dp),
@@ -480,6 +761,65 @@ private fun SessionCard(session: HermesSession, selected: Boolean, onClick: () -
             }
             Text(session.preview?.takeIf { it.isNotBlank() } ?: "No preview available", color = Muted, fontSize = 10.sp, lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp, start = 17.dp))
             Text(listOfNotNull(session.source, session.model).joinToString(" · ").ifBlank { "Hermes session" }, color = Muted.copy(alpha = 0.72f), fontSize = 8.sp, modifier = Modifier.padding(top = 9.dp, start = 17.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SessionActionsSheet(session: HermesSession, viewModel: HermesViewModel) {
+    var renaming by remember(session.id) { mutableStateOf(false) }
+    var title by remember(session.id) { mutableStateOf(session.title.orEmpty()) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = viewModel::dismissSessionActions,
+        sheetState = sheetState,
+        containerColor = InkRaised,
+        scrimColor = Color.Black.copy(alpha = 0.72f),
+        dragHandle = { Box(Modifier.padding(top = 9.dp, bottom = 4.dp).size(width = 38.dp, height = 4.dp).clip(CircleShape).background(LineStrong)) },
+    ) {
+        Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+            Text(
+                session.title?.takeIf { it.isNotBlank() } ?: "Untitled session",
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text("${session.messageCount ?: 0} messages", color = Muted, fontSize = 9.sp, modifier = Modifier.padding(top = 3.dp, bottom = 14.dp))
+
+            if (renaming) {
+                HostTextField(title, { title = it }, "New title", "Session title", Icons.Outlined.Edit)
+                Spacer(Modifier.height(10.dp))
+                PrimaryButton("Save title", Icons.Outlined.Check) {
+                    if (title.isNotBlank()) viewModel.renameSession(session.id, title)
+                }
+            } else {
+                SessionActionRow(Icons.Outlined.Edit, "Rename", "Change this session's title") { renaming = true }
+                SessionActionRow(Icons.AutoMirrored.Outlined.CallSplit, "Fork", "Branch a copy that carries the transcript forward") { viewModel.forkSession(session.id) }
+                SessionActionRow(Icons.Outlined.DeleteOutline, "Delete", "Remove the session and transcript from the host", danger = true) {
+                    viewModel.requestDeleteSession(session.id)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionActionRow(icon: ImageVector, title: String, detail: String, danger: Boolean = false, onClick: () -> Unit) {
+    val tint = if (danger) Red else Mint
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).clickable(onClick = onClick).padding(horizontal = 6.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(35.dp).clip(RoundedCornerShape(11.dp)).background(tint.copy(alpha = 0.075f)), contentAlignment = Alignment.Center) {
+            Icon(icon, null, tint = tint, modifier = Modifier.size(18.dp))
+        }
+        Spacer(Modifier.width(11.dp))
+        Column {
+            Text(title, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = if (danger) Red else Color.Unspecified)
+            Text(detail, color = Muted, fontSize = 9.sp, modifier = Modifier.padding(top = 2.dp))
         }
     }
 }
