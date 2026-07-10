@@ -1,3 +1,3 @@
 package au.com.chrismckechnie.hermesmobile
 
-enum class DeckScreen { Chat, Sessions, Jobs, Host }
+enum class DeckScreen { Chat, Sessions, Jobs, Host, Settings }

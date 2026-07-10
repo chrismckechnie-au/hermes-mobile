@@ -15,6 +15,8 @@ import java.util.UUID
 
 enum class HostConnectionPhase { NoHost, Connecting, Connected, Failed }
 
+enum class ThemeMode { System, Dark, Light }
+
 sealed interface ChatUiItem {
     val id: String
 
@@ -53,6 +55,7 @@ data class HermesUiState(
     val isSending: Boolean = false,
     val activeRunId: String? = null,
     val errorMessage: String? = null,
+    val themeMode: ThemeMode = ThemeMode.System,
 ) {
     val activeHost: HostProfile? get() = hosts.firstOrNull { it.id == activeHostId }
     val activeSession: HermesSession? get() = sessions.firstOrNull { it.id == activeSessionId }
@@ -61,19 +64,29 @@ data class HermesUiState(
 class HermesViewModel(application: Application) : AndroidViewModel(application) {
     private val gateway: HermesGateway = HermesHttpGateway()
     private val hostStore: HostStore = SecureHostStore(application)
+    private val settings = application.getSharedPreferences("hermes_settings", Application.MODE_PRIVATE)
     private val mutableState = MutableStateFlow(HermesUiState())
     val state: StateFlow<HermesUiState> = mutableState.asStateFlow()
 
     init {
         val snapshot = hostStore.load()
         val selected = snapshot.selectedHostId?.takeIf { id -> snapshot.hosts.any { it.id == id } }
+        val savedTheme = settings.getString("theme_mode", null)
+            ?.let { name -> ThemeMode.entries.firstOrNull { it.name == name } }
+            ?: ThemeMode.System
         mutableState.value = HermesUiState(
             hosts = snapshot.hosts,
             activeHostId = selected,
             showHostPicker = snapshot.hosts.isEmpty(),
             connectionPhase = if (selected == null) HostConnectionPhase.NoHost else HostConnectionPhase.Connecting,
+            themeMode = savedTheme,
         )
         if (selected != null) connect(selected)
+    }
+
+    fun setThemeMode(mode: ThemeMode) {
+        settings.edit().putString("theme_mode", mode.name).apply()
+        mutableState.update { it.copy(themeMode = mode) }
     }
 
     fun selectScreen(screen: DeckScreen) {
