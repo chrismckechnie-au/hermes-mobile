@@ -1,0 +1,10 @@
+*.iml
+.gradle/
+.tools/
+.idea/
+local.properties
+/build/
+**/build/
+*.png
+window_dump.xml
+captures/
