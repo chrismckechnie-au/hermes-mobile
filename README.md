@@ -12,30 +12,35 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - API keys encrypted at rest with Android Keystore (AES-GCM); unlock failures surface a notice instead of silently wiping hosts
 - Capability discovery and authenticated connection status
 - Session listing with pagination (`has_more`), pull-to-refresh, creation, rename, delete, history loading, and selection
-- Streaming chat over Server-Sent Events with stop/cancel for in-flight runs
+- Host model discovery with per-run model and reasoning-effort selection from the Chat model sheet
+- Streaming chat over `/v1/runs` Server-Sent Events with stop/cancel, process-death recovery, and unknown-submit protection
+- Local slash commands and host skill suggestions from the message composer
 - Markdown rendering of assistant replies (code blocks with copy, headings, bullets, bold/italic/inline code, links)
 - Live assistant deltas and structured tool start/completion cards
 - Tool-run approval cards (`approval.request` → approve/deny via `POST /v1/runs/{id}/approval`)
 - Scheduled job listing with pause/resume and run-now
 - Connected, connecting, empty, authentication-error, network-error, and retry states
 
-Not implemented (host support required): push notifications for job results, file upload (the Hermes API server currently rejects file content with `400 unsupported_content_type`). Note: current hermes-agent releases emit `approval.request` on `/v1/runs/{id}/events` streams; the session chat stream handler processes the event whenever the host sends it there too.
+Not implemented (host support required): push notifications for job results and file upload (the Hermes API server currently rejects file content with `400 unsupported_content_type`).
 
 ## Hermes API endpoints
 
 The client uses Hermes' supported HTTP surface:
 
 - `GET /v1/capabilities`
+- `GET /v1/models`
+- `GET /v1/skills`
+- `POST /v1/runs`
+- `GET /v1/runs/{id}` / `GET /v1/runs/{id}/events`
+- `POST /v1/runs/{id}/stop` / `POST /v1/runs/{id}/approval`
 - `GET /api/sessions` (with `limit`/`offset` pagination)
 - `POST /api/sessions`
 - `PATCH /api/sessions/{id}` (rename)
 - `DELETE /api/sessions/{id}`
 - `GET /api/sessions/{id}/messages`
-- `POST /api/sessions/{id}/chat/stream`
+- `POST /api/sessions/{id}/fork`
 - `GET /api/jobs`
 - `POST /api/jobs/{id}/pause` / `POST /api/jobs/{id}/resume` / `POST /api/jobs/{id}/run`
-- `POST /v1/runs/{id}/stop`
-- `POST /v1/runs/{id}/approval`
 
 Every request uses `Authorization: Bearer <API_SERVER_KEY>`.
 

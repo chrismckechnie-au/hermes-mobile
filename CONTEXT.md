@@ -12,6 +12,12 @@ Glossary of the ubiquitous language for Hermes Mobile. Terms only — no impleme
 
 **System theme** — the default appearance setting. It follows Android's current dark-mode setting; users can override it with Light or Dark in Settings.
 
+**Model settings** — the Chat-screen bottom sheet used to choose a host-configured model and optional reasoning effort for new runs.
+
+**Host default** — leaving a model or reasoning choice unset so the selected Hermes host applies its configured default.
+
+**Run** — one submitted agent turn created through `/v1/runs`; its events, approvals, cancellation, and terminal status are tracked independently of navigation.
+
 **Session** — a conversation thread that exists on the Hermes host, listed and resumed from the mobile client.
 
 **Job** — scheduled work configured on the Hermes host and surfaced read-only in the mobile client.

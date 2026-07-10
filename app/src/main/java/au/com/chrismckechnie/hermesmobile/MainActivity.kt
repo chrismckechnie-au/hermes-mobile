@@ -10,21 +10,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.initializer
-import androidx.lifecycle.viewmodel.viewModelFactory
 
 class MainActivity : ComponentActivity() {
-    private val viewModel: HermesViewModel by viewModels {
-        viewModelFactory {
-            initializer {
-                HermesViewModel(
-                    HermesHttpGateway(),
-                    SecureHostStore(applicationContext),
-                    PreferencesSettingsStore(applicationContext),
-                )
-            }
-        }
-    }
+    private val viewModel: HermesViewModel by viewModels { HermesViewModel.Factory }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

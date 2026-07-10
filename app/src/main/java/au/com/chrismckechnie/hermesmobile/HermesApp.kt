@@ -10,6 +10,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
@@ -45,6 +46,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -174,6 +177,7 @@ fun HermesMobileApp(state: HermesUiState, viewModel: HermesViewModel) {
                             onManage = viewModel::showHostPicker,
                             onDismissError = viewModel::dismissError,
                         )
+                        RunBanner(state, viewModel)
                         AnimatedContent(
                             targetState = state.screen,
                             transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(110)) },
@@ -301,12 +305,13 @@ private fun ConnectionNotice(
 @Composable
 private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val listState = rememberLazyListState()
-    val lastAssistantLength = (state.messages.lastOrNull { it is ChatUiItem.Assistant } as? ChatUiItem.Assistant)?.text?.length ?: 0
+    val displayedMessages = state.displayedMessages
+    val lastAssistantLength = (displayedMessages.lastOrNull { it is ChatUiItem.Assistant } as? ChatUiItem.Assistant)?.text?.length ?: 0
     // Follow the stream: react to new items AND to the growing text of the last
     // assistant bubble, but never fight the user's own scrolling.
-    LaunchedEffect(state.messages.size, lastAssistantLength) {
-        if (state.messages.isNotEmpty() && !listState.isScrollInProgress) {
-            listState.scrollToItem(state.messages.lastIndex, scrollOffset = 100_000)
+    LaunchedEffect(displayedMessages.size, lastAssistantLength) {
+        if (displayedMessages.isNotEmpty() && !listState.isScrollInProgress) {
+            listState.scrollToItem(displayedMessages.lastIndex, scrollOffset = 100_000)
         }
     }
 
@@ -325,6 +330,8 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            ModelChip(state, viewModel)
+            Spacer(Modifier.width(8.dp))
             IconButton(
                 onClick = viewModel::createSession,
                 enabled = state.connectionPhase == HostConnectionPhase.Connected,
@@ -332,7 +339,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
             ) { Icon(Lucide.Plus, "New session", tint = if (state.connectionPhase == HostConnectionPhase.Connected) T.Cream else T.Muted) }
         }
 
-        if (state.messages.isEmpty()) {
+        if (displayedMessages.isEmpty()) {
             EmptyConversation(state, Modifier.weight(1f))
         } else {
             LazyColumn(
@@ -341,17 +348,190 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 contentPadding = PaddingValues(horizontal = 15.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(13.dp),
             ) {
-                items(state.messages, key = { it.id }) { item ->
+                items(displayedMessages, key = { it.id }) { item ->
                     when (item) {
                         is ChatUiItem.User -> UserBubble(item.text)
                         is ChatUiItem.Assistant -> AssistantMessage(item.text, item.streaming)
                         is ChatUiItem.Tool -> LiveToolCard(item)
-                        is ChatUiItem.Approval -> ApprovalCard(item) { approve -> viewModel.respondToApproval(item.id, approve) }
+                        is ChatUiItem.Approval -> ApprovalCard(item, viewModel)
                     }
                 }
             }
         }
         Composer(state, viewModel)
+    }
+}
+
+@Composable
+private fun RunBanner(state: HermesUiState, viewModel: HermesViewModel) {
+    AnimatedVisibility(visible = state.runBannerVisible) {
+        val run = state.activeRun ?: return@AnimatedVisibility
+        Row(
+            Modifier.fillMaxWidth().background(T.Cream.copy(alpha = 0.06f))
+                .padding(start = 14.dp, end = 5.dp, top = 7.dp, bottom = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(13.dp), color = T.Cream, strokeWidth = 1.5.dp)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                buildString {
+                    append(if (run.awaitingApproval) "Waiting for approval" else if (run.stopping) "Stopping run" else "Run active")
+                    append(" — ")
+                    append(run.sessionTitle?.takeIf { it.isNotBlank() } ?: run.sessionId)
+                },
+                style = T.BodyMuted.copy(color = T.Cream),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = viewModel::returnToRunSession) { Text("Return", style = T.MicroBold) }
+            TextButton(onClick = viewModel::stopActiveRun, enabled = !run.stopping) {
+                Text("Stop", style = T.MicroBold.copy(color = T.Error))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModelChip(state: HermesUiState, viewModel: HermesViewModel) {
+    if (state.models.isEmpty()) return
+    var open by remember { mutableStateOf(false) }
+    val modelLabel = state.selectedModel ?: state.capabilities?.model ?: state.models.first()
+    val supportsReasoning = state.capabilities?.supportsReasoningEffort == true
+    val chipLabel = state.selectedReasoningEffort
+        ?.takeIf { supportsReasoning }
+        ?.let { "$modelLabel · $it" }
+        ?: modelLabel
+
+    Row(
+        modifier = Modifier
+            .widthIn(max = 118.dp)
+            .heightIn(min = 48.dp)
+            .clip(CircleShape)
+            .background(T.Cream.copy(alpha = 0.07f))
+            .clickable { open = true }
+            .padding(start = 10.dp, end = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            chipLabel,
+            style = T.MicroBold.copy(letterSpacing = 0.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(4.dp))
+        Icon(Lucide.ChevronDown, "Model and reasoning settings", tint = T.Muted, modifier = Modifier.size(15.dp))
+    }
+    if (open) ModelSettingsSheet(state, viewModel, supportsReasoning) { open = false }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ModelSettingsSheet(
+    state: HermesUiState,
+    viewModel: HermesViewModel,
+    supportsReasoning: Boolean,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val hostDefaultModel = state.capabilities?.model
+        ?.takeIf { it.isNotBlank() }
+        ?: state.models.firstOrNull()
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = T.SurfaceLow,
+        scrimColor = T.Scrim,
+        dragHandle = {
+            Box(
+                Modifier.padding(top = 9.dp, bottom = 4.dp)
+                    .size(width = 38.dp, height = 4.dp)
+                    .clip(CircleShape)
+                    .background(T.LineStrong),
+            )
+        },
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+            Text("Model settings", style = T.SheetTitle)
+            Text(
+                "Applies to new runs on ${state.activeHost?.name ?: "this host"}.",
+                style = T.BodyMuted,
+                modifier = Modifier.padding(top = 3.dp, bottom = 14.dp),
+            )
+
+            SelectorField(
+                label = "MODEL",
+                value = state.selectedModel ?: hostDefaultModel?.let { "$it (host default)" } ?: "—",
+                options = buildList {
+                    add(null to (hostDefaultModel?.let { "$it (host default)" } ?: "Host default"))
+                    state.models.forEach { model -> add(model to model) }
+                },
+                selectedKey = state.selectedModel,
+                onSelect = viewModel::selectModel,
+            )
+
+            if (supportsReasoning) {
+                Spacer(Modifier.height(12.dp))
+                SelectorField(
+                    label = "REASONING EFFORT",
+                    value = state.selectedReasoningEffort ?: "host default",
+                    options = (listOf<String?>(null) + REASONING_EFFORTS).map { it to (it ?: "host default") },
+                    selectedKey = state.selectedReasoningEffort,
+                    onSelect = viewModel::selectReasoningEffort,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectorField(
+    label: String,
+    value: String,
+    options: List<Pair<String?, String>>,
+    selectedKey: String?,
+    onSelect: (String?) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Text(label, style = T.Micro, modifier = Modifier.padding(bottom = 7.dp))
+    Box {
+        Row(
+            modifier = Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(T.RadiusCard))
+                .background(T.SurfaceOne)
+                .border(BorderStroke(1.dp, T.LineStrong), RoundedCornerShape(T.RadiusCard))
+                .clickable { expanded = true }
+                .padding(horizontal = 13.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(value, style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.size(17.dp))
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = T.SurfaceOne) {
+            options.forEach { (key, display) ->
+                val selected = key == selectedKey
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            display,
+                            style = T.BodyMuted.copy(
+                                color = if (selected) T.Cream else T.TextSoft,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            ),
+                        )
+                    },
+                    trailingIcon = {
+                        if (selected) Icon(Lucide.CircleCheck, null, tint = T.Cream, modifier = Modifier.size(15.dp))
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(key)
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -532,7 +712,7 @@ private fun LiveToolCard(item: ChatUiItem.Tool) {
 }
 
 @Composable
-private fun ApprovalCard(item: ChatUiItem.Approval, onRespond: (Boolean) -> Unit) {
+private fun ApprovalCard(item: ChatUiItem.Approval, viewModel: HermesViewModel) {
     Card(
         modifier = Modifier.padding(start = 39.dp).fillMaxWidth(),
         shape = RoundedCornerShape(T.RadiusCard),
@@ -545,38 +725,30 @@ private fun ApprovalCard(item: ChatUiItem.Approval, onRespond: (Boolean) -> Unit
                 Spacer(Modifier.width(9.dp))
                 Text("Approval required", style = T.CardTitle.copy(color = T.Warn))
             }
-            item.toolName?.let {
+            item.command?.let {
                 Text(it, style = T.MonoBody.copy(color = T.TextSoft, fontSize = 12.sp), modifier = Modifier.padding(top = 7.dp))
             }
-            item.message?.let {
-                Text(it, style = T.Body.copy(fontSize = 13.sp, lineHeight = 18.sp), modifier = Modifier.padding(top = 5.dp))
-            }
-            when (item.decision) {
-                null -> Row(Modifier.padding(top = 11.dp), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            Row(Modifier.padding(top = 11.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                listOf(
+                    Triple("Deny", "deny", T.Error),
+                    Triple("Allow once", "once", T.Cream),
+                    Triple("Allow for run", "session", T.CreamSoft),
+                ).forEach { (label, choice, color) ->
                     Surface(
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).clickable { onRespond(true) },
-                        color = T.Cream,
-                        contentColor = T.OnAccent,
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).clickable { viewModel.respondApproval(choice) },
+                        color = if (choice == "once") T.Cream else Color.Transparent,
+                        contentColor = if (choice == "once") T.OnAccent else color,
                         shape = RoundedCornerShape(13.dp),
+                        border = if (choice == "once") null else BorderStroke(1.dp, color.copy(alpha = 0.5f)),
                     ) {
                         Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                            Text("Approve", style = T.Label.copy(color = T.OnAccent, fontWeight = FontWeight.Bold))
-                        }
-                    }
-                    Surface(
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).clickable { onRespond(false) },
-                        color = Color.Transparent,
-                        contentColor = T.Error,
-                        shape = RoundedCornerShape(13.dp),
-                        border = BorderStroke(1.dp, T.Error.copy(alpha = 0.5f)),
-                    ) {
-                        Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                            Text("Deny", style = T.Label.copy(color = T.Error, fontWeight = FontWeight.Bold))
+                            Text(
+                                label,
+                                style = T.MicroBold.copy(color = if (choice == "once") T.OnAccent else color, letterSpacing = 0.sp),
+                            )
                         }
                     }
                 }
-                true -> Text("APPROVED", style = T.MicroBold.copy(color = T.Cream), modifier = Modifier.padding(top = 10.dp))
-                false -> Text("DENIED", style = T.MicroBold.copy(color = T.Error), modifier = Modifier.padding(top = 10.dp))
             }
         }
     }
@@ -584,45 +756,120 @@ private fun ApprovalCard(item: ChatUiItem.Approval, onRespond: (Boolean) -> Unit
 
 @Composable
 private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
-    val enabled = state.connectionPhase == HostConnectionPhase.Connected && !state.isSending
+    val enabled = state.connectionPhase == HostConnectionPhase.Connected &&
+        !state.isSending && state.activeRun == null && state.unknownOutcome == null
     val focusManager = LocalFocusManager.current
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 8.dp).clip(RoundedCornerShape(T.RadiusSheet)).background(T.SurfaceOne).padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        BasicTextField(
-            value = state.composerText,
-            onValueChange = viewModel::setComposerText,
-            enabled = enabled,
-            textStyle = T.Body.copy(color = T.TextSoft),
-            cursorBrush = SolidColor(T.Cream),
-            modifier = Modifier.weight(1f),
-            maxLines = 4,
-            decorationBox = { inner ->
-                Box(Modifier.padding(vertical = 6.dp)) {
-                    if (state.composerText.isBlank()) Text(
-                        if (state.activeHost == null) "Choose a host to begin" else if (state.connectionPhase != HostConnectionPhase.Connected) "Waiting for host…" else "Message Hermes…",
-                        style = T.Body.copy(color = T.Muted),
-                    )
-                    inner()
+    val suggestions = state.slashSuggestions()
+
+    Column(Modifier.fillMaxWidth()) {
+        state.unknownOutcome?.let { pending ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 11.dp)
+                    .clip(RoundedCornerShape(T.RadiusCard))
+                    .background(T.Warn.copy(alpha = 0.07f))
+                    .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (!pending.evidence && !pending.timedOut) {
+                    CircularProgressIndicator(modifier = Modifier.size(12.dp), color = T.Warn, strokeWidth = 1.4.dp)
+                } else {
+                    Icon(Lucide.ShieldCheck, null, tint = T.Warn, modifier = Modifier.size(14.dp))
                 }
-            },
-        )
-        Spacer(Modifier.width(7.dp))
-        if (state.isSending) {
-            Box(
-                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.Error.copy(alpha = 0.12f)).clickable { viewModel.cancelRun() },
-                contentAlignment = Alignment.Center,
-            ) { Icon(Lucide.Square, "Stop run", tint = T.Error, modifier = Modifier.size(18.dp)) }
-        } else {
-            val canSend = enabled && state.composerText.isNotBlank()
-            Box(
-                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(if (canSend) T.Cream else T.Muted.copy(alpha = 0.12f)).clickable(enabled = canSend) {
-                    focusManager.clearFocus()
-                    viewModel.sendMessage()
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    when {
+                        pending.evidence -> "The host received your message and replied."
+                        pending.timedOut -> "Send outcome unknown — no evidence the host received it."
+                        else -> "Send outcome unknown — checking the host…"
+                    },
+                    style = T.BodyMuted.copy(color = T.Warn),
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = viewModel::acknowledgeUnknownOutcome) {
+                    Text(if (pending.evidence) "Resume" else "Send anyway", style = T.MicroBold)
+                }
+            }
+        }
+
+        if (suggestions.isNotEmpty()) {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 11.dp)
+                    .clip(RoundedCornerShape(T.RadiusCard))
+                    .background(T.SurfaceLow)
+                    .padding(vertical = 4.dp),
+            ) {
+                suggestions.forEach { suggestion ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { viewModel.applySuggestion(suggestion) }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("/${suggestion.name}", style = T.MonoBody.copy(color = T.Cream, fontWeight = FontWeight.SemiBold))
+                        Spacer(Modifier.width(10.dp))
+                        Text(suggestion.description, style = T.BodyMuted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        if (suggestion.kind == SlashKind.Skill) Text("SKILL", style = T.MicroBold)
+                    }
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 8.dp)
+                .clip(RoundedCornerShape(T.RadiusSheet)).background(T.SurfaceOne)
+                .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BasicTextField(
+                value = state.composerText,
+                onValueChange = viewModel::setComposerText,
+                enabled = enabled,
+                textStyle = T.Body.copy(color = T.TextSoft),
+                cursorBrush = SolidColor(T.Cream),
+                modifier = Modifier.weight(1f),
+                maxLines = 4,
+                decorationBox = { inner ->
+                    Box(Modifier.padding(vertical = 6.dp)) {
+                        if (state.composerText.isBlank()) Text(
+                            when {
+                                state.activeHost == null -> "Choose a host to begin"
+                                state.connectionPhase != HostConnectionPhase.Connected -> "Waiting for host…"
+                                state.activeRun != null -> "Run in progress — /stop to interrupt"
+                                else -> "Message Hermes, or / for commands"
+                            },
+                            style = T.Body.copy(color = T.Muted),
+                        )
+                        inner()
+                    }
                 },
-                contentAlignment = Alignment.Center,
-            ) { Icon(Lucide.Send, "Send", tint = if (canSend) T.OnAccent else T.Muted, modifier = Modifier.size(19.dp)) }
+            )
+            Spacer(Modifier.width(7.dp))
+            if (state.activeRun != null) {
+                val stopping = state.activeRun.stopping
+                Box(
+                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard))
+                        .background(T.Error.copy(alpha = 0.12f))
+                        .clickable(enabled = !stopping) { viewModel.stopActiveRun() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (stopping) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Error)
+                    else Icon(Lucide.Square, "Stop run", tint = T.Error, modifier = Modifier.size(18.dp))
+                }
+            } else if (state.isSending) {
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Cream)
+                }
+            } else {
+                val canSend = enabled && state.composerText.isNotBlank()
+                Box(
+                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard))
+                        .background(if (canSend) T.Cream else T.Muted.copy(alpha = 0.12f))
+                        .clickable(enabled = canSend) {
+                            focusManager.clearFocus()
+                            viewModel.sendMessage()
+                        },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Lucide.Send, "Send", tint = if (canSend) T.OnAccent else T.Muted, modifier = Modifier.size(19.dp)) }
+            }
         }
     }
 }

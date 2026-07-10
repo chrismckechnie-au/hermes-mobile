@@ -8,3 +8,5 @@ local.properties
 *.png
 window_dump.xml
 captures/
+__pycache__/
+*.pyc

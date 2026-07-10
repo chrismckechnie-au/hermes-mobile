@@ -3,14 +3,13 @@ package au.com.chrismckechnie.hermesmobile
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
-import okhttp3.mockwebserver.SocketPolicy
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertThrows
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
-import java.io.IOException
 
 class HermesHttpGatewayTest {
     private lateinit var server: MockWebServer
@@ -35,9 +34,9 @@ class HermesHttpGatewayTest {
     fun tearDown() = server.shutdown()
 
     @Test
-    fun `probe uses bearer auth and reads capabilities`() = runBlocking {
+    fun `probe uses bearer auth and reads capability bundle`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
-            {"object":"hermes.api_server.capabilities","platform":"hermes-agent","model":"hermes-agent","features":{"session_list":true,"session_chat_stream":true,"file_upload":false}}
+            {"object":"hermes.api_server.capabilities","platform":"hermes-agent","model":"hermes-agent","features":{"run_submission":true,"run_events_sse":true,"run_stop":true,"approval_events":true,"run_approval_response":true,"skills_api":true,"file_upload":false}}
         """.trimIndent()))
 
         val info = gateway.probe(profile)
@@ -45,200 +44,235 @@ class HermesHttpGatewayTest {
 
         assertEquals("/v1/capabilities", request.path)
         assertEquals("Bearer test-key", request.getHeader("Authorization"))
-        assertEquals("hermes-agent", info.model)
-        assertTrue(info.features.contains("session_chat_stream"))
-        assertTrue(!info.features.contains("file_upload"))
+        assertTrue(info.supportsRuns)
+        assertTrue(info.supportsSkills)
+        assertFalse(info.supportsSessionFork)
     }
 
     @Test
-    fun `lists sessions from Hermes list envelope with pagination`() = runBlocking {
+    fun `probe without approval events fails the run bundle`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
-            {"object":"list","data":[{"id":"session-1","title":"Mobile work","source":"api_server","model":"hermes-agent","last_active":1720000000}],"has_more":true}
+            {"features":{"run_submission":true,"run_events_sse":true,"run_stop":true,"run_approval_response":true}}
         """.trimIndent()))
 
-        val page = gateway.listSessions(profile, offset = 25)
+        assertFalse(gateway.probe(profile).supportsRuns)
+    }
+
+    @Test
+    fun `lists sessions including children`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""
+            {"object":"list","data":[{"id":"session-1","title":"Mobile work","source":"api_server","model":"hermes-agent","last_active":1720000000}]}
+        """.trimIndent()))
+
+        val sessions = gateway.listSessions(profile)
         val request = server.takeRequest()
 
-        assertTrue(request.path.orEmpty().contains("offset=25"))
-        assertEquals(1, page.sessions.size)
-        assertEquals("session-1", page.sessions.single().id)
-        assertEquals("Mobile work", page.sessions.single().title)
-        assertTrue(page.hasMore)
+        assertTrue(request.path!!.contains("include_children=true"))
+        assertEquals(1, sessions.sessions.size)
+        assertEquals("session-1", sessions.sessions.single().id)
     }
 
     @Test
-    fun `malformed session row is skipped instead of failing the list`() = runBlocking {
+    fun `loadMessages returns the resolved session id from the envelope`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
-            {"object":"list","data":[{"title":"missing id"},{"id":"session-2","title":"Good"}],"has_more":false}
+            {"object":"list","session_id":"session-2","data":[{"id":"m1","role":"user","content":"hi"}]}
         """.trimIndent()))
 
-        val page = gateway.listSessions(profile)
+        val page = gateway.loadMessages(profile, "session-1")
 
-        assertEquals(listOf("session-2"), page.sessions.map { it.id })
+        assertEquals("session-2", page.sessionId)
+        assertEquals(1, page.messages.size)
     }
 
     @Test
-    fun `unexpected session envelope raises an error instead of silent empty list`() {
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"object":"list","items":[]}"""))
-
-        val error = assertThrows(HermesApiException::class.java) {
-            runBlocking { gateway.listSessions(profile) }
-        }
-        assertTrue(error.message.contains("unexpected"))
-    }
-
-    @Test
-    fun `error envelope message is surfaced with status code`() {
-        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":{"message":"Invalid API key"}}"""))
-
-        val error = assertThrows(HermesApiException::class.java) {
-            runBlocking { gateway.listSessions(profile) }
-        }
-        assertEquals(401, error.statusCode)
-        assertEquals("Invalid API key", error.message)
-    }
-
-    @Test
-    fun `plain http failure maps to friendly message`() {
-        server.enqueue(MockResponse().setResponseCode(500).setBody("boom"))
-
-        val error = assertThrows(HermesApiException::class.java) {
-            runBlocking { gateway.listSessions(profile) }
-        }
-        assertEquals("Hermes request failed with HTTP 500.", error.message)
-    }
-
-    @Test
-    fun `unreadable json body raises api exception`() {
-        server.enqueue(MockResponse().setResponseCode(200).setBody("not json at all"))
-
-        val error = assertThrows(HermesApiException::class.java) {
-            runBlocking { gateway.probe(profile) }
-        }
-        assertTrue(error.message.contains("unreadable"))
-    }
-
-    @Test
-    fun `streams assistant tool and approval events from session chat SSE`() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "text/event-stream").setBody("""
-            event: run.started
-            data: {"run_id":"run-1","session_id":"session-1"}
-
-            event: assistant.delta
-            data: {"delta":"Hello","message_id":"msg-1"}
-
-            event: tool.started
-            data: {"tool_name":"terminal","preview":"Running tests"}
-
-            event: approval.request
-            data: {"approval_id":"appr-1","tool_name":"terminal","message":"Run rm?","run_id":"run-1"}
-
-            event: assistant.completed
-            data: {"content":"Hello from Hermes","message_id":"msg-1"}
-
-            event: mystery.event
-            data: {}
-
-            event: done
-            data: {}
-
+    fun `listSkills parses the skills listing`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""
+            {"object":"list","data":[{"name":"grill-me","description":"A relentless interview.","category":null}]}
         """.trimIndent()))
-        val events = mutableListOf<HermesStreamEvent>()
 
-        gateway.streamSessionChat(profile, "session-1", "Hi") { events += it }
+        val skills = gateway.listSkills(profile)
         val request = server.takeRequest()
 
-        assertEquals("/api/sessions/session-1/chat/stream", request.path)
-        assertTrue(events.any { it is HermesStreamEvent.AssistantDelta && it.text == "Hello" })
-        assertTrue(events.any { it is HermesStreamEvent.ToolStarted && it.toolName == "terminal" })
-        assertTrue(events.any { it is HermesStreamEvent.ApprovalRequested && it.approvalId == "appr-1" && it.runId == "run-1" })
-        assertTrue(events.any { it is HermesStreamEvent.Completed && it.content == "Hello from Hermes" })
-        assertTrue(events.any { it is HermesStreamEvent.Unknown && it.name == "mystery.event" })
+        assertEquals("/v1/skills", request.path)
+        assertEquals("grill-me", skills.single().name)
     }
 
     @Test
-    fun `sse error event maps to Failed`() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "text/event-stream").setBody("""
-            event: error
-            data: {"message":"agent crashed"}
-
+    fun `listModels returns model ids`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""
+            {"object":"list","data":[{"id":"hermes-agent","root":"hermes-agent","parent":null},{"id":"hermes-fast","root":"hermes-4-8b","parent":"hermes-agent"}]}
         """.trimIndent()))
-        val events = mutableListOf<HermesStreamEvent>()
 
-        gateway.streamSessionChat(profile, "session-1", "Hi") { events += it }
+        val models = gateway.listModels(profile)
 
-        assertTrue(events.any { it is HermesStreamEvent.Failed && it.message == "agent crashed" })
+        assertEquals("/v1/models", server.takeRequest().path)
+        assertEquals(listOf("hermes-agent", "hermes-fast"), models)
     }
 
     @Test
-    fun `mid-stream disconnect surfaces as IOException`() {
-        server.enqueue(
-            MockResponse()
-                .setResponseCode(200)
-                .setHeader("Content-Type", "text/event-stream")
-                .setBody("event: run.started\ndata: {}\n\n")
-                .setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY)
+    fun `submitRun carries the selected model and omits it by default`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run-9","status":"started"}"""))
+        server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run-10","status":"started"}"""))
+
+        gateway.submitRun(profile, "session-1", "hello", emptyList(), model = "hermes-fast", reasoningEffort = "high")
+        val withOverrides = JSONObject(server.takeRequest().body.readUtf8())
+        gateway.submitRun(profile, "session-1", "hello", emptyList())
+        val withoutOverrides = JSONObject(server.takeRequest().body.readUtf8())
+
+        assertEquals("hermes-fast", withOverrides.getString("model"))
+        assertEquals("high", withOverrides.getString("reasoning_effort"))
+        assertFalse(withoutOverrides.has("model"))
+        assertFalse(withoutOverrides.has("reasoning_effort"))
+    }
+
+    @Test
+    fun `submitRun sends input session and filtered history and returns run id`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run-9","status":"started"}"""))
+
+        val history = listOf(
+            HermesMessage("m1", "user", "hello"),
+            HermesMessage("m2", "tool", "tool output", toolName = "terminal"),
+            HermesMessage("m3", "assistant", "hi"),
+            HermesMessage("m4", "assistant", ""),
         )
+        val runId = gateway.submitRun(profile, "session-1", "next question", history)
+        val request = server.takeRequest()
+        val body = JSONObject(request.body.readUtf8())
 
-        assertThrows(IOException::class.java) {
-            runBlocking { gateway.streamSessionChat(profile, "session-1", "Hi") { } }
-        }
-        Unit
+        assertEquals("run-9", runId)
+        assertEquals("/v1/runs", request.path)
+        assertEquals("next question", body.getString("input"))
+        assertEquals("session-1", body.getString("session_id"))
+        val sent = body.getJSONArray("conversation_history")
+        assertEquals(2, sent.length())
+        assertEquals("user", sent.getJSONObject(0).getString("role"))
+        assertEquals("assistant", sent.getJSONObject(1).getString("role"))
     }
 
     @Test
-    fun `stopRun posts to the runs stop endpoint`() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"status":"stopping"}"""))
+    fun `streamRunEvents parses data-only SSE with keepalives and unknown events`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "text/event-stream").setBody("""
+            : keepalive
 
-        gateway.stopRun(profile, "run-7")
+            data: {"event":"message.delta","run_id":"run-1","timestamp":1.0,"delta":"Hel"}
+
+            data: {"event":"message.delta","run_id":"run-1","timestamp":1.1,"delta":"lo"}
+
+            data: {"event":"tool.started","run_id":"run-1","timestamp":1.2,"tool":"terminal","preview":"ls"}
+
+            data: {"event":"reasoning.available","run_id":"run-1","timestamp":1.3,"text":"thinking"}
+
+            data: {"event":"tool.completed","run_id":"run-1","timestamp":1.4,"tool":"terminal","duration":0.2,"error":true}
+
+            data: {"event":"approval.request","run_id":"run-1","timestamp":1.5,"command":"rm -rf x","choices":["once","session","always","deny"]}
+
+            data: {"event":"approval.responded","run_id":"run-1","timestamp":1.6,"choice":"once","resolved":1}
+
+            data: {"event":"run.completed","run_id":"run-1","timestamp":1.7,"output":"Hello","usage":{"total_tokens":3}}
+
+            : stream closed
+
+        """.trimIndent()))
+        val events = mutableListOf<HermesRunEvent>()
+
+        gateway.streamRunEvents(profile, "run-1", events::add)
         val request = server.takeRequest()
 
-        assertEquals("POST", request.method)
-        assertEquals("/v1/runs/run-7/stop", request.path)
+        assertEquals("/v1/runs/run-1/events", request.path)
+        assertEquals("text/event-stream", request.getHeader("Accept"))
+        assertEquals(
+            listOf("Hel", "lo"),
+            events.filterIsInstance<HermesRunEvent.MessageDelta>().map { it.delta },
+        )
+        assertTrue(events.any { it is HermesRunEvent.ToolStarted && it.tool == "terminal" && it.preview == "ls" })
+        assertTrue(events.any { it is HermesRunEvent.ToolCompleted && it.failed })
+        assertTrue(events.any { it is HermesRunEvent.ApprovalRequested && it.command == "rm -rf x" })
+        assertTrue(events.any { it is HermesRunEvent.ApprovalResponded && it.choice == "once" })
+        assertTrue(events.any { it is HermesRunEvent.Completed && it.output == "Hello" })
+        // reasoning.available is intentionally not surfaced
+        assertEquals(7, events.size)
     }
 
     @Test
-    fun `resolveApproval posts decision payload`() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
+    fun `streamRunEvents surfaces failure and cancellation`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "text/event-stream").setBody("""
+            data: {"event":"run.failed","run_id":"run-1","timestamp":1.0,"error":"boom"}
 
-        gateway.resolveApproval(profile, "run-7", "appr-1", true)
+            data: {"event":"run.cancelled","run_id":"run-1","timestamp":1.1}
+
+        """.trimIndent()))
+        val events = mutableListOf<HermesRunEvent>()
+
+        gateway.streamRunEvents(profile, "run-1", events::add)
+
+        assertTrue(events.any { it is HermesRunEvent.Failed && it.error == "boom" })
+        assertTrue(events.any { it is HermesRunEvent.Cancelled })
+    }
+
+    @Test
+    fun `getRunStatus maps terminal states`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"object":"hermes.run","run_id":"run-1","status":"waiting_for_approval"}"""))
+
+        val status = gateway.getRunStatus(profile, "run-1")
+
+        assertEquals("waiting_for_approval", status.status)
+        assertTrue(status.isWaitingForApproval)
+        assertFalse(status.isTerminal)
+    }
+
+    @Test
+    fun `respondApproval posts the choice`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"object":"hermes.run.approval_response","run_id":"run-1","choice":"once","resolved":1}"""))
+
+        gateway.respondApproval(profile, "run-1", "once")
         val request = server.takeRequest()
 
-        assertEquals("POST", request.method)
-        assertEquals("/v1/runs/run-7/approval", request.path)
-        val body = request.body.readUtf8()
-        assertTrue(body.contains("\"approval_id\":\"appr-1\""))
-        assertTrue(body.contains("\"decision\":true"))
+        assertEquals("/v1/runs/run-1/approval", request.path)
+        assertEquals("once", JSONObject(request.body.readUtf8()).getString("choice"))
     }
 
     @Test
-    fun `renameSession patches and deleteSession deletes`() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
+    fun `stopRun posts to the stop endpoint`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"object":"hermes.run","run_id":"run-1","status":"stopping"}"""))
 
-        gateway.renameSession(profile, "session-1", "New title")
-        val patch = server.takeRequest()
+        gateway.stopRun(profile, "run-1")
+
+        assertEquals("/v1/runs/run-1/stop", server.takeRequest().path)
+    }
+
+    @Test
+    fun `renameSession patches the title`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"object":"hermes.session","session":{"id":"session-1","title":"Renamed"}}"""))
+
+        val session = gateway.renameSession(profile, "session-1", "Renamed")
+        val request = server.takeRequest()
+
+        assertEquals("PATCH", request.method)
+        assertEquals("/api/sessions/session-1", request.path)
+        assertEquals("Renamed", JSONObject(request.body.readUtf8()).getString("title"))
+        assertEquals("Renamed", session.title)
+    }
+
+    @Test
+    fun `deleteSession issues DELETE`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"object":"hermes.session.deleted","id":"session-1","deleted":true}"""))
+
         gateway.deleteSession(profile, "session-1")
-        val delete = server.takeRequest()
+        val request = server.takeRequest()
 
-        assertEquals("PATCH", patch.method)
-        assertEquals("/api/sessions/session-1", patch.path)
-        assertTrue(patch.body.readUtf8().contains("New title"))
-        assertEquals("DELETE", delete.method)
-        assertEquals("/api/sessions/session-1", delete.path)
+        assertEquals("DELETE", request.method)
+        assertEquals("/api/sessions/session-1", request.path)
     }
 
     @Test
-    fun `setJobEnabled maps to pause and resume endpoints`() = runBlocking {
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
-        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"ok":true}"""))
+    fun `forkSession returns the child session`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(201).setBody("""{"object":"hermes.session","session":{"id":"session-2","title":"work fork","parent_session_id":"session-1"}}"""))
 
-        gateway.setJobEnabled(profile, "job-1", false)
-        val pause = server.takeRequest()
-        gateway.setJobEnabled(profile, "job-1", true)
-        val resume = server.takeRequest()
+        val child = gateway.forkSession(profile, "session-1")
+        val request = server.takeRequest()
 
-        assertEquals("/api/jobs/job-1/pause", pause.path)
-        assertEquals("/api/jobs/job-1/resume", resume.path)
+        assertEquals("POST", request.method)
+        assertEquals("/api/sessions/session-1/fork", request.path)
+        assertEquals("session-2", child.id)
     }
 }

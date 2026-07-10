@@ -20,8 +20,8 @@ class HermesHttpGateway(
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .callTimeout(0, TimeUnit.MILLISECONDS)
-        // Never follow http<->https scheme changes: a compromised or misconfigured
-        // https host must not silently downgrade traffic to cleartext.
+        // Never follow http<->https scheme changes: authenticated traffic
+        // must not silently downgrade to cleartext.
         .followSslRedirects(false)
         .build(),
 ) : HermesGateway {
@@ -52,6 +52,8 @@ class HermesHttpGateway(
         val url = endpoint(host, "api", "sessions").newBuilder()
             .addQueryParameter("limit", limit.coerceIn(1, 200).toString())
             .addQueryParameter("offset", offset.coerceAtLeast(0).toString())
+            // Forked sessions are children; the host hides them by default.
+            .addQueryParameter("include_children", "true")
             .build()
         val data = executeJson(host, request(host, url))
         val rows = data.optJSONArray("data")
@@ -76,19 +78,14 @@ class HermesHttpGateway(
         parseSession(data.getJSONObject("session"))
     }
 
-    override suspend fun loadMessages(host: HostProfile, sessionId: String): List<HermesMessage> = withContext(Dispatchers.IO) {
+    override suspend fun loadMessages(host: HostProfile, sessionId: String): HermesMessagesPage = withContext(Dispatchers.IO) {
         val data = executeJson(host, request(host, endpoint(host, "api", "sessions", sessionId, "messages")))
-        data.optJSONArray("data").toObjectList(::parseMessage)
-    }
-
-    override suspend fun renameSession(host: HostProfile, sessionId: String, title: String): Unit = withContext(Dispatchers.IO) {
-        executeIgnoringBody(
-            request(host, endpoint(host, "api", "sessions", sessionId), method = "PATCH", body = JSONObject().put("title", title.trim())),
+        HermesMessagesPage(
+            // The envelope carries the resolved id — a rotated session resolves
+            // to its continuation here.
+            sessionId = data.optNullableString("session_id") ?: sessionId,
+            messages = data.optJSONArray("data").toObjectList(::parseMessage),
         )
-    }
-
-    override suspend fun deleteSession(host: HostProfile, sessionId: String): Unit = withContext(Dispatchers.IO) {
-        executeIgnoringBody(request(host, endpoint(host, "api", "sessions", sessionId), method = "DELETE"))
     }
 
     override suspend fun listJobs(host: HostProfile): List<HermesJob> = withContext(Dispatchers.IO) {
@@ -116,31 +113,59 @@ class HermesHttpGateway(
         executeIgnoringBody(request(host, endpoint(host, "api", "jobs", jobId, "run"), method = "POST"))
     }
 
-    override suspend fun stopRun(host: HostProfile, runId: String): Unit = withContext(Dispatchers.IO) {
-        executeIgnoringBody(request(host, endpoint(host, "v1", "runs", runId, "stop"), method = "POST"))
+    override suspend fun listSkills(host: HostProfile): List<HermesSkill> = withContext(Dispatchers.IO) {
+        val data = executeJson(host, request(host, listOf("v1", "skills")))
+        data.optJSONArray("data").toObjectList { json ->
+            HermesSkill(
+                name = json.optString("name"),
+                description = json.optNullableString("description"),
+            )
+        }.filter { it.name.isNotBlank() }
     }
 
-    override suspend fun resolveApproval(host: HostProfile, runId: String, approvalId: String, approve: Boolean): Unit = withContext(Dispatchers.IO) {
-        val body = JSONObject().put("approval_id", approvalId).put("decision", approve)
-        executeIgnoringBody(request(host, endpoint(host, "v1", "runs", runId, "approval"), method = "POST", body = body))
+    override suspend fun listModels(host: HostProfile): List<String> = withContext(Dispatchers.IO) {
+        val data = executeJson(host, request(host, listOf("v1", "models")))
+        data.optJSONArray("data").toObjectList { json -> json.optString("id") }
+            .filter { it.isNotBlank() }
     }
 
-    override suspend fun streamSessionChat(
+    override suspend fun submitRun(
         host: HostProfile,
         sessionId: String,
         input: String,
-        onEvent: (HermesStreamEvent) -> Unit,
+        history: List<HermesMessage>,
+        model: String?,
+        reasoningEffort: String?,
+    ): String = withContext(Dispatchers.IO) {
+        val body = JSONObject().apply {
+            put("input", input)
+            put("session_id", sessionId)
+            if (!model.isNullOrBlank()) put("model", model)
+            if (!reasoningEffort.isNullOrBlank()) put("reasoning_effort", reasoningEffort)
+            put("conversation_history", JSONArray().apply {
+                // Tool messages don't survive the host's {role, content}
+                // reduction; send only substantive user/assistant turns.
+                history.filter { it.role == "user" || it.role == "assistant" }
+                    .filter { it.content.isNotBlank() }
+                    .forEach { message ->
+                        put(JSONObject().apply {
+                            put("role", message.role)
+                            put("content", message.content)
+                        })
+                    }
+            })
+        }
+        val data = executeJson(host, request(host, endpoint(host, "v1", "runs"), method = "POST", body = body))
+        data.optNullableString("run_id") ?: throw HermesApiException(502, "Hermes did not return a run id.")
+    }
+
+    override suspend fun streamRunEvents(
+        host: HostProfile,
+        runId: String,
+        onEvent: (HermesRunEvent) -> Unit,
     ) = withContext(Dispatchers.IO) {
-        val body = JSONObject().put("input", input)
-        val request = request(
-            host,
-            endpoint(host, "api", "sessions", sessionId, "chat", "stream"),
-            method = "POST",
-            body = body,
-        )
+        val request = request(host, endpoint(host, "v1", "runs", runId, "events"))
         val call = client.newCall(request)
-        // Blocking socket reads ignore coroutine cancellation; cancel the call so
-        // the read throws and the coroutine can actually exit.
         val cancelHandle = coroutineContext.job.invokeOnCompletion { cause ->
             if (cause != null) call.cancel()
         }
@@ -148,20 +173,14 @@ class HermesHttpGateway(
             call.execute().use { response ->
                 ensureSuccessful(response)
                 val source = response.body?.source() ?: throw HermesApiException(response.code, "Hermes returned an empty stream.")
-                var eventName: String? = null
                 val dataLines = mutableListOf<String>()
 
                 fun dispatch() {
-                    val name = eventName ?: return
-                    val payloadText = dataLines.joinToString("\n").ifBlank { "{}" }
-                    val payload = runCatching { JSONObject(payloadText) }.getOrNull()
-                    if (payload == null) {
-                        onEvent(HermesStreamEvent.Failed("Hermes sent an unreadable stream chunk; the reply may be incomplete."))
-                    } else {
-                        onEvent(parseStreamEvent(name, payload))
-                    }
-                    eventName = null
+                    if (dataLines.isEmpty()) return
+                    val payloadText = dataLines.joinToString("\n")
                     dataLines.clear()
+                    val payload = runCatching { JSONObject(payloadText) }.getOrNull() ?: return
+                    parseRunEvent(payload)?.let(onEvent)
                 }
 
                 while (!source.exhausted()) {
@@ -169,7 +188,7 @@ class HermesHttpGateway(
                     val line = source.readUtf8Line() ?: break
                     when {
                         line.isBlank() -> dispatch()
-                        line.startsWith("event:") -> eventName = line.substringAfter(':').trim()
+                        line.startsWith(":") -> Unit // keepalive / stream-closed comments
                         line.startsWith("data:") -> dataLines += line.substringAfter(':').trimStart()
                     }
                 }
@@ -180,35 +199,70 @@ class HermesHttpGateway(
         }
     }
 
-    private fun parseStreamEvent(name: String, payload: JSONObject): HermesStreamEvent = when (name) {
-        "run.started" -> HermesStreamEvent.RunStarted(payload.optNullableString("run_id"))
-        "assistant.delta" -> HermesStreamEvent.AssistantDelta(payload.optString("delta"))
-        "tool.started" -> HermesStreamEvent.ToolStarted(
-            payload.optNullableString("tool_name") ?: "tool",
+    private fun parseRunEvent(payload: JSONObject): HermesRunEvent? = when (payload.optString("event")) {
+        "message.delta" -> HermesRunEvent.MessageDelta(payload.optString("delta"))
+        "tool.started" -> HermesRunEvent.ToolStarted(
+            payload.optNullableString("tool") ?: "tool",
             payload.optNullableString("preview"),
         )
-        "tool.completed" -> HermesStreamEvent.ToolCompleted(
-            payload.optNullableString("tool_name") ?: "tool",
-            payload.optNullableString("preview"),
+        "tool.completed" -> HermesRunEvent.ToolCompleted(
+            payload.optNullableString("tool") ?: "tool",
+            failed = payload.optBoolean("error", false),
         )
-        "tool.failed" -> HermesStreamEvent.ToolCompleted(
-            payload.optNullableString("tool_name") ?: "tool",
-            payload.optNullableString("preview"),
-            failed = true,
+        "approval.request" -> HermesRunEvent.ApprovalRequested(payload.optNullableString("command"))
+        "approval.responded" -> HermesRunEvent.ApprovalResponded(payload.optNullableString("choice"))
+        "run.completed" -> HermesRunEvent.Completed(payload.optString("output"))
+        "run.failed" -> HermesRunEvent.Failed(payload.optString("error", "Hermes run failed."))
+        "run.cancelled" -> HermesRunEvent.Cancelled
+        else -> null // reasoning.available and future events are ignored
+    }
+
+    override suspend fun getRunStatus(host: HostProfile, runId: String): HermesRunStatus = withContext(Dispatchers.IO) {
+        val data = executeJson(host, request(host, endpoint(host, "v1", "runs", runId)))
+        HermesRunStatus(
+            runId = data.optNullableString("run_id") ?: runId,
+            status = data.optString("status", "unknown"),
         )
-        "approval.request" -> HermesStreamEvent.ApprovalRequested(
-            approvalId = payload.optNullableString("approval_id") ?: "",
-            toolName = payload.optNullableString("tool_name"),
-            message = payload.optNullableString("message"),
-            runId = payload.optNullableString("run_id"),
+    }
+
+    override suspend fun respondApproval(host: HostProfile, runId: String, choice: String) {
+        withContext(Dispatchers.IO) {
+            executeJson(
+                host,
+                request(host, endpoint(host, "v1", "runs", runId, "approval"), method = "POST", body = JSONObject().put("choice", choice)),
+            )
+        }
+    }
+
+    override suspend fun stopRun(host: HostProfile, runId: String) {
+        withContext(Dispatchers.IO) {
+            executeJson(host, request(host, endpoint(host, "v1", "runs", runId, "stop"), method = "POST"))
+        }
+    }
+
+    override suspend fun renameSession(host: HostProfile, sessionId: String, title: String): HermesSession = withContext(Dispatchers.IO) {
+        val request = request(
+            host,
+            endpoint(host, "api", "sessions", sessionId),
+            method = "PATCH",
+            body = JSONObject().put("title", title),
         )
-        "assistant.completed" -> HermesStreamEvent.Completed(
-            payload.optString("content"),
-            payload.optNullableString("session_id"),
+        parseSession(executeJson(host, request).getJSONObject("session"))
+    }
+
+    override suspend fun deleteSession(host: HostProfile, sessionId: String) {
+        withContext(Dispatchers.IO) {
+            executeJson(host, request(host, endpoint(host, "api", "sessions", sessionId), method = "DELETE"))
+        }
+    }
+
+    override suspend fun forkSession(host: HostProfile, sessionId: String): HermesSession = withContext(Dispatchers.IO) {
+        val request = request(
+            host,
+            endpoint(host, "api", "sessions", sessionId, "fork"),
+            method = "POST",
         )
-        "error" -> HermesStreamEvent.Failed(payload.optString("message", "Hermes stream failed."))
-        "done", "run.completed" -> HermesStreamEvent.Done
-        else -> HermesStreamEvent.Unknown(name)
+        parseSession(executeJson(host, request).getJSONObject("session"))
     }
 
     private fun request(
@@ -228,13 +282,10 @@ class HermesHttpGateway(
         val builder = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer ${validated.apiKey}")
-            .header("Accept", if (method == "POST" && url.encodedPath.endsWith("/stream")) "text/event-stream" else "application/json")
+            .header("Accept", if (url.encodedPath.endsWith("/events")) "text/event-stream" else "application/json")
             .header("X-Hermes-Session-Key", "hermes-mobile:${validated.id}")
-        when {
-            method == "GET" -> builder.get()
-            method == "DELETE" && body == null -> builder.delete()
-            else -> builder.method(method, (body ?: JSONObject()).toString().toRequestBody(jsonMediaType))
-        }
+        if (method == "GET") builder.get()
+        else builder.method(method, (body ?: JSONObject()).toString().toRequestBody(jsonMediaType))
         return builder.build()
     }
 
@@ -289,7 +340,6 @@ class HermesHttpGateway(
     )
 }
 
-/** Maps each object row via [transform]; malformed rows are skipped instead of failing the whole list. */
 private inline fun <T> JSONArray?.toObjectList(transform: (JSONObject) -> T): List<T> {
     if (this == null) return emptyList()
     return buildList {

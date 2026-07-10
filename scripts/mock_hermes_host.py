@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""Small contract-faithful Hermes API host for Android UI verification."""
+"""Small contract-faithful Hermes API host for Android UI verification.
+
+Speaks the /v1/runs transport the mobile client uses: run submission,
+data-only SSE run events, approvals, stop, plus session rename/delete/fork.
+
+Fixtures:
+- input containing "approve-me": the run emits approval.request and blocks
+  until POST /v1/runs/{id}/approval arrives (deny -> refusal output).
+- input containing "slow": the run streams deltas for ~15s so Stop can be
+  exercised mid-run.
+"""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import threading
 import time
 import uuid
 
@@ -29,17 +40,24 @@ SESSIONS = [
         "last_active": time.time() - 3600,
     },
 ]
-JOBS = [
-    {"id": "job-daily", "name": "Daily Agent Updates", "schedule": "0 4 * * *", "enabled": True, "deliver": "discord"},
-    {"id": "job-research", "name": "Daily Content Research", "schedule": "0 5 * * *", "enabled": True, "deliver": "discord"},
-]
 MESSAGES = {
     "session-mobile": [
         {"id": "m1", "role": "user", "content": "Can the phone choose between Hermes hosts?"},
         {"id": "m2", "role": "assistant", "content": "Yes. Host profiles are stored on-device, the selected API is probed for capabilities, and its bearer key stays encrypted in Android Keystore."},
     ]
 }
-APPROVALS = {}
+SKILLS = [
+    {"name": "grill-me", "description": "A relentless interview to sharpen a plan or design.", "category": None},
+    {"name": "code-review", "description": "Review changes since a fixed point along Standards and Spec axes.", "category": None},
+    {"name": "diagnosing-bugs", "description": "Diagnosis loop for hard bugs and performance regressions.", "category": None},
+]
+
+RUNS = {}  # run_id -> {status, session_id, input, approval_event, approval_choice, stopped}
+RUNS_LOCK = threading.Lock()
+
+
+def _find_session(session_id):
+    return next((s for s in SESSIONS if s["id"] == session_id), None)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -62,15 +80,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _query(self):
-        if "?" not in self.path:
-            return {}
-        query = {}
-        for pair in self.path.split("?", 1)[1].split("&"):
-            if "=" in pair:
-                key, value = pair.split("=", 1)
-                query[key] = value
-        return query
+    def _body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        return json.loads(self.rfile.read(length) or b"{}")
+
+    # ------------------------------------------------------------------
+    # GET
+    # ------------------------------------------------------------------
 
     def do_GET(self):
         if not self._auth():
@@ -85,37 +101,58 @@ class Handler(BaseHTTPRequestHandler):
                     "session_list": True,
                     "session_create": True,
                     "session_chat_stream": True,
-                    "run_approval": True,
+                    "session_resources": True,
+                    "session_fork": True,
+                    "run_submission": True,
+                    "run_events_sse": True,
+                    "run_stop": True,
+                    "approval_events": True,
+                    "run_approval_response": True,
+                    "run_reasoning_effort": True,
+                    "skills_api": True,
                     "jobs": True,
                 },
             })
+        elif path == "/v1/skills":
+            self._json(200, {"object": "list", "data": SKILLS})
+        elif path == "/v1/models":
+            now = int(time.time())
+            self._json(200, {"object": "list", "data": [
+                {"id": "hermes-agent", "object": "model", "created": now, "owned_by": "hermes", "root": "hermes-agent", "parent": None},
+                {"id": "hermes-fast", "object": "model", "created": now, "owned_by": "hermes", "root": "hermes-4-8b", "parent": "hermes-agent"},
+                {"id": "hermes-deep", "object": "model", "created": now, "owned_by": "hermes", "root": "hermes-4-405b", "parent": "hermes-agent"},
+            ]})
         elif path == "/api/sessions":
-            query = self._query()
-            limit = int(query.get("limit", "50"))
-            offset = int(query.get("offset", "0"))
-            page = SESSIONS[offset:offset + limit]
-            self._json(200, {
-                "object": "list",
-                "data": page,
-                "limit": limit,
-                "offset": offset,
-                "has_more": offset + limit < len(SESSIONS),
-            })
+            self._json(200, {"object": "list", "data": SESSIONS, "limit": 50, "offset": 0, "has_more": False})
         elif path == "/api/jobs":
-            self._json(200, {"jobs": JOBS})
+            self._json(200, {"jobs": [
+                {"id": "job-daily", "name": "Daily Agent Updates", "schedule": "0 4 * * *", "enabled": True, "deliver": "discord"},
+                {"id": "job-research", "name": "Daily Content Research", "schedule": "0 5 * * *", "enabled": True, "deliver": "discord"},
+            ]})
         elif path.startswith("/api/sessions/") and path.endswith("/messages"):
             session_id = path.split("/")[3]
             self._json(200, {"object": "list", "session_id": session_id, "data": MESSAGES.get(session_id, [])})
+        elif path.startswith("/v1/runs/") and path.endswith("/events"):
+            self._stream_run_events(path.split("/")[3])
+        elif path.startswith("/v1/runs/"):
+            run_id = path.split("/")[3]
+            run = RUNS.get(run_id)
+            if run is None:
+                self._json(404, {"error": {"message": f"Run not found: {run_id}"}})
+            else:
+                self._json(200, {"object": "hermes.run", "run_id": run_id, "status": run["status"]})
         else:
             self._json(404, {"error": {"message": "Not found"}})
+
+    # ------------------------------------------------------------------
+    # POST / PATCH / DELETE
+    # ------------------------------------------------------------------
 
     def do_POST(self):
         if not self._auth():
             return
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
         path = self.path.split("?", 1)[0]
-        parts = path.strip("/").split("/")
+        body = self._body()
         if path == "/api/sessions":
             session = {
                 "id": f"api_{uuid.uuid4().hex[:8]}",
@@ -126,45 +163,80 @@ class Handler(BaseHTTPRequestHandler):
             }
             SESSIONS.insert(0, session)
             self._json(201, {"object": "hermes.session", "session": session})
+        elif path == "/v1/runs":
+            effort = body.get("reasoning_effort")
+            if effort is not None and effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}:
+                self._json(400, {"error": {"message": f"Invalid reasoning_effort: {effort!r}", "code": "invalid_reasoning_effort"}})
+                return
+            run_id = f"run_{uuid.uuid4().hex[:8]}"
+            with RUNS_LOCK:
+                RUNS[run_id] = {
+                    "status": "running",
+                    "session_id": body.get("session_id") or run_id,
+                    "input": body.get("input", ""),
+                    "approval_event": threading.Event(),
+                    "approval_choice": None,
+                    "stopped": False,
+                }
+            self._json(202, {"run_id": run_id, "status": "started"})
+        elif path.startswith("/v1/runs/") and path.endswith("/approval"):
+            run_id = path.split("/")[3]
+            run = RUNS.get(run_id)
+            if run is None:
+                self._json(404, {"error": {"message": f"Run not found: {run_id}"}})
+                return
+            choice = str(body.get("choice", "")).lower()
+            if choice not in {"once", "session", "always", "deny"}:
+                self._json(400, {"error": {"message": "Invalid approval choice"}})
+                return
+            run["approval_choice"] = choice
+            run["approval_event"].set()
+            self._json(200, {"object": "hermes.run.approval_response", "run_id": run_id, "choice": choice, "resolved": 1})
+        elif path.startswith("/v1/runs/") and path.endswith("/stop"):
+            run_id = path.split("/")[3]
+            run = RUNS.get(run_id)
+            if run is None:
+                self._json(404, {"error": {"message": f"Run not found: {run_id}"}})
+                return
+            run["stopped"] = True
+            run["status"] = "stopping"
+            run["approval_event"].set()
+            self._json(200, {"object": "hermes.run", "run_id": run_id, "status": "stopping"})
+        elif path.startswith("/api/sessions/") and path.endswith("/fork"):
+            source_id = path.split("/")[3]
+            source = _find_session(source_id)
+            if source is None:
+                self._json(404, {"error": {"message": "Not found"}})
+                return
+            child = {
+                "id": f"api_{uuid.uuid4().hex[:8]}",
+                "title": f"{source.get('title') or 'fork'} fork",
+                "source": "api_server",
+                "model": source.get("model"),
+                "message_count": source.get("message_count", 0),
+                "parent_session_id": source_id,
+            }
+            SESSIONS.insert(0, child)
+            MESSAGES[child["id"]] = list(MESSAGES.get(source_id, []))
+            self._json(201, {"object": "hermes.session", "session": child})
         elif path.startswith("/api/sessions/") and path.endswith("/chat/stream"):
-            self._stream_chat(path.split("/")[3], body)
-        elif len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] in ("pause", "resume", "run"):
-            job = next((j for j in JOBS if j["id"] == parts[2]), None)
-            if job is None:
-                self._json(404, {"error": {"message": "Unknown job"}})
-                return
-            if parts[3] == "pause":
-                job["enabled"] = False
-            elif parts[3] == "resume":
-                job["enabled"] = True
-            self._json(200, {"ok": True, "job": job})
-        elif len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "stop":
-            self._json(200, {"status": "stopping"})
-        elif len(parts) == 4 and parts[:2] == ["v1", "runs"] and parts[3] == "approval":
-            approval_id = body.get("approval_id")
-            decision = body.get("decision")
-            if approval_id not in APPROVALS:
-                self._json(404, {"error": {"message": "Unknown approval"}})
-                return
-            APPROVALS[approval_id] = decision
-            self._json(200, {"ok": True, "approval_id": approval_id, "decision": decision})
+            # Legacy transport kept for older clients of the fixture.
+            self._legacy_chat_stream(path.split("/")[3])
         else:
             self._json(404, {"error": {"message": "Not found"}})
 
     def do_PATCH(self):
         if not self._auth():
             return
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
         path = self.path.split("?", 1)[0]
-        parts = path.strip("/").split("/")
-        if len(parts) == 3 and parts[:2] == ["api", "sessions"]:
-            session = next((s for s in SESSIONS if s["id"] == parts[2]), None)
+        body = self._body()
+        if path.startswith("/api/sessions/"):
+            session = _find_session(path.split("/")[3])
             if session is None:
-                self._json(404, {"error": {"message": "Unknown session"}})
+                self._json(404, {"error": {"message": "Not found"}})
                 return
             if "title" in body:
-                session["title"] = body["title"]
+                session["title"] = str(body["title"])
             self._json(200, {"object": "hermes.session", "session": session})
         else:
             self._json(404, {"error": {"message": "Not found"}})
@@ -173,40 +245,90 @@ class Handler(BaseHTTPRequestHandler):
         if not self._auth():
             return
         path = self.path.split("?", 1)[0]
-        parts = path.strip("/").split("/")
-        if len(parts) == 3 and parts[:2] == ["api", "sessions"]:
+        if path.startswith("/api/sessions/"):
+            session_id = path.split("/")[3]
+            global SESSIONS
             before = len(SESSIONS)
-            SESSIONS[:] = [s for s in SESSIONS if s["id"] != parts[2]]
-            if len(SESSIONS) == before:
-                self._json(404, {"error": {"message": "Unknown session"}})
-                return
-            self._json(200, {"ok": True})
+            SESSIONS = [s for s in SESSIONS if s["id"] != session_id]
+            MESSAGES.pop(session_id, None)
+            self._json(200, {"object": "hermes.session.deleted", "id": session_id, "deleted": len(SESSIONS) < before})
         else:
             self._json(404, {"error": {"message": "Not found"}})
 
-    def _stream_chat(self, session_id, body):
-        run_id = f"run_{uuid.uuid4().hex[:8]}"
+    # ------------------------------------------------------------------
+    # Run event streaming (data-only SSE, event name inside the JSON)
+    # ------------------------------------------------------------------
+
+    def _sse_start(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _sse_data(self, run_id, event, **fields):
+        payload = {"event": event, "run_id": run_id, "timestamp": time.time(), **fields}
+        self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
+        self.wfile.flush()
+
+    def _stream_run_events(self, run_id):
+        run = RUNS.get(run_id)
+        if run is None:
+            self._json(404, {"error": {"message": f"Run not found: {run_id}"}})
+            return
+        self._sse_start()
+        session_id = run["session_id"]
+        text = run["input"]
+        output = "Connected to Hermes. Run transport, stop, and approvals are working."
+        try:
+            self.wfile.write(b": keepalive\n\n")
+            if "approve-me" in text:
+                self._sse_data(run_id, "tool.started", tool="terminal", preview="rm -rf /tmp/hermes-demo")
+                run["status"] = "waiting_for_approval"
+                self._sse_data(run_id, "approval.request", command="rm -rf /tmp/hermes-demo", choices=["once", "session", "always", "deny"])
+                run["approval_event"].wait(timeout=60)
+                run["status"] = "running"
+                choice = run["approval_choice"]
+                self._sse_data(run_id, "approval.responded", choice=choice, resolved=1)
+                if run["stopped"]:
+                    run["status"] = "cancelled"
+                    self._sse_data(run_id, "run.cancelled")
+                    return
+                failed = choice == "deny"
+                self._sse_data(run_id, "tool.completed", tool="terminal", duration=0.4, error=failed)
+                output = "Approval denied, so the command was not executed." if failed else "Approved command executed."
+            elif "slow" in text:
+                for index in range(30):
+                    if run["stopped"]:
+                        run["status"] = "cancelled"
+                        self._sse_data(run_id, "run.cancelled")
+                        return
+                    self._sse_data(run_id, "message.delta", delta=f"chunk-{index} ", message_id="msg-demo")
+                    time.sleep(0.5)
+            else:
+                self._sse_data(run_id, "message.delta", delta="Connected to ", message_id="msg-demo")
+                self._sse_data(run_id, "tool.started", tool="host_probe", preview="Checking Hermes capabilities")
+                self._sse_data(run_id, "tool.completed", tool="host_probe", duration=0.2, error=False)
+                self._sse_data(run_id, "message.delta", delta="Hermes.", message_id="msg-demo")
+            run["status"] = "completed"
+            self._sse_data(run_id, "run.completed", output=output, usage={"input_tokens": 10, "output_tokens": 20, "total_tokens": 30})
+            messages = MESSAGES.setdefault(session_id, [])
+            messages.append({"id": f"m{uuid.uuid4().hex[:6]}", "role": "user", "content": text})
+            messages.append({"id": f"m{uuid.uuid4().hex[:6]}", "role": "assistant", "content": output})
+            session = _find_session(session_id)
+            if session is not None:
+                session["message_count"] = len(messages)
+                session["last_active"] = time.time()
+            self.wfile.write(b": stream closed\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _legacy_chat_stream(self, session_id):
         events = [
-            ("run.started", {"run_id": run_id, "session_id": session_id}),
-            ("assistant.delta", {"delta": "Connected to ", "message_id": "msg-demo"}),
-            ("tool.started", {"tool_name": "host_probe", "preview": "Checking Hermes capabilities"}),
-            ("tool.completed", {"tool_name": "host_probe", "preview": "Capabilities confirmed"}),
-        ]
-        # Say "approve" in the message to exercise the approval card.
-        if "approve" in body.get("input", "").lower():
-            approval_id = f"appr_{uuid.uuid4().hex[:8]}"
-            APPROVALS[approval_id] = None
-            events.append(("approval.request", {
-                "approval_id": approval_id,
-                "tool_name": "terminal",
-                "message": "Hermes wants to run `ls -la ~` on the host.",
-                "run_id": run_id,
-                "session_id": session_id,
-            }))
-        events += [
-            ("assistant.delta", {"delta": "Hermes. Host selection and streaming are working.", "message_id": "msg-demo"}),
-            ("assistant.completed", {"content": "Connected to Hermes. Host selection and streaming are working.", "session_id": session_id}),
-            ("run.completed", {"completed": True, "session_id": session_id}),
+            ("run.started", {"run_id": "run-demo", "session_id": session_id}),
+            ("assistant.delta", {"delta": "Connected to Hermes.", "message_id": "msg-demo"}),
+            ("assistant.completed", {"content": "Connected to Hermes.", "session_id": session_id}),
             ("done", {}),
         ]
         payload = "".join(f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in events).encode()
