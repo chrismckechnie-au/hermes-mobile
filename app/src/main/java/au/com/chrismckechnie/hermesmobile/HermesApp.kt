@@ -8,10 +8,12 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +39,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -46,11 +51,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -66,21 +72,34 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.core.view.WindowCompat
+import androidx.compose.ui.window.Dialog
 import com.composables.icons.lucide.CalendarClock
 import com.composables.icons.lucide.ChevronDown
 import com.composables.icons.lucide.CircleCheck
 import com.composables.icons.lucide.CloudOff
+import com.composables.icons.lucide.Copy
 import com.composables.icons.lucide.Ellipsis
 import com.composables.icons.lucide.Globe
 import com.composables.icons.lucide.History
@@ -88,7 +107,7 @@ import com.composables.icons.lucide.KeyRound
 import com.composables.icons.lucide.Lock
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.MessageCircle
-import com.composables.icons.lucide.Pause
+import com.composables.icons.lucide.Pencil
 import com.composables.icons.lucide.Play
 import com.composables.icons.lucide.Plus
 import com.composables.icons.lucide.RefreshCw
@@ -97,6 +116,7 @@ import com.composables.icons.lucide.Send
 import com.composables.icons.lucide.Server
 import com.composables.icons.lucide.Settings
 import com.composables.icons.lucide.ShieldCheck
+import com.composables.icons.lucide.Square
 import com.composables.icons.lucide.Terminal
 import com.composables.icons.lucide.Trash2
 import com.composables.icons.lucide.Wifi
@@ -105,6 +125,22 @@ import com.composables.icons.lucide.X
 private val T: HermesPalette
     @Composable get() = LocalHermes.current
 
+private fun phaseLabel(phase: HostConnectionPhase): String = when (phase) {
+    HostConnectionPhase.Connected -> "ONLINE"
+    HostConnectionPhase.Connecting -> "CONNECTING"
+    HostConnectionPhase.Failed -> "OFFLINE"
+    HostConnectionPhase.NoHost -> "NO HOST"
+}
+
+@Composable
+private fun phaseColor(phase: HostConnectionPhase): Color = when (phase) {
+    HostConnectionPhase.Connected -> T.Ok
+    HostConnectionPhase.Connecting -> T.Warn
+    HostConnectionPhase.Failed -> T.Error
+    HostConnectionPhase.NoHost -> T.Muted
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HermesMobileApp(state: HermesUiState, viewModel: HermesViewModel) {
     val dark = when (state.themeMode) {
@@ -123,47 +159,48 @@ fun HermesMobileApp(state: HermesUiState, viewModel: HermesViewModel) {
         }
     }
     CompositionLocalProvider(LocalHermes provides palette) {
-    MaterialTheme(colorScheme = palette.ColorScheme) {
-        Surface(modifier = Modifier.fillMaxSize(), color = palette.Abyss) {
-            Box(Modifier.fillMaxSize()) {
-                Box(Modifier.fillMaxSize().hermesBackdrop(palette))
-                Column(Modifier.fillMaxSize().statusBarsPadding()) {
-                    CommandHeader(state = state, onChooseHost = viewModel::showHostPicker)
-                    ConnectionNotice(
-                        state = state,
-                        onRetry = viewModel::retryConnection,
-                        onManage = viewModel::showHostPicker,
-                        onDismissError = viewModel::dismissError,
-                    )
-                    AnimatedContent(
-                        targetState = state.screen,
-                        transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(110)) },
-                        label = "command-deck-screen",
-                        modifier = Modifier.weight(1f),
-                    ) { screen ->
-                        when (screen) {
-                            DeckScreen.Chat -> ChatScreen(state, viewModel)
-                            DeckScreen.Sessions -> SessionsScreen(state, viewModel)
-                            DeckScreen.Jobs -> JobsScreen(state)
-                            DeckScreen.Host -> HostScreen(state, viewModel)
-                            DeckScreen.Settings -> SettingsScreen(state, viewModel)
+        MaterialTheme(colorScheme = palette.ColorScheme) {
+            Surface(modifier = Modifier.fillMaxSize(), color = palette.Abyss) {
+                Box(Modifier.fillMaxSize()) {
+                    Box(Modifier.fillMaxSize().hermesBackdrop(palette))
+                    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                        CommandHeader(state = state, onChooseHost = viewModel::showHostPicker)
+                        ConnectionNotice(
+                            state = state,
+                            onRetry = viewModel::retryConnection,
+                            onManage = viewModel::showHostPicker,
+                            onDismissError = viewModel::dismissError,
+                        )
+                        AnimatedContent(
+                            targetState = state.screen,
+                            transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(110)) },
+                            label = "command-deck-screen",
+                            modifier = Modifier.weight(1f),
+                        ) { screen ->
+                            when (screen) {
+                                DeckScreen.Chat -> ChatScreen(state, viewModel)
+                                DeckScreen.Sessions -> SessionsScreen(state, viewModel)
+                                DeckScreen.Jobs -> JobsScreen(state, viewModel)
+                                DeckScreen.Host -> HostScreen(state, viewModel)
+                                DeckScreen.Settings -> SettingsScreen(state, viewModel)
+                            }
                         }
+                        BottomDock(state.screen, viewModel::selectScreen)
                     }
-                    BottomDock(state.screen, viewModel::selectScreen)
-                }
 
-                if (state.showHostPicker) {
-                    HostPickerSheet(
-                        state = state,
-                        onDismiss = viewModel::hideHostPicker,
-                        onSelect = viewModel::selectHost,
-                        onSave = viewModel::saveHost,
-                        onDelete = viewModel::deleteHost,
-                    )
+                    if (state.showHostPicker) {
+                        HostPickerSheet(
+                            state = state,
+                            onDismiss = viewModel::hideHostPicker,
+                            onSelect = viewModel::selectHost,
+                            onSave = viewModel::saveHost,
+                            onDelete = viewModel::deleteHost,
+                            onEdit = viewModel::editHost,
+                        )
+                    }
                 }
             }
         }
-    }
     }
 }
 
@@ -178,7 +215,7 @@ private fun CommandHeader(state: HermesUiState, onChooseHost: () -> Unit) {
             Box(
                 modifier = Modifier.size(34.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.08f)),
                 contentAlignment = Alignment.Center,
-            ) { Icon(HermesWing, null, tint = T.Cream, modifier = Modifier.size(19.dp)) }
+            ) { Icon(HermesWing, null, tint = T.Cream, modifier = Modifier.size(18.dp)) }
             Spacer(Modifier.width(10.dp))
             Column {
                 Text("HERMES", style = T.Label.copy(letterSpacing = 1.8.sp))
@@ -186,26 +223,33 @@ private fun CommandHeader(state: HermesUiState, onChooseHost: () -> Unit) {
             }
         }
 
+        val hostName = state.activeHost?.name ?: "Choose host"
+        val statusText = phaseLabel(state.connectionPhase)
         Row(
-            modifier = Modifier.clip(CircleShape).background(T.Cream.copy(alpha = 0.06f)).clickable(onClick = onChooseHost).heightIn(min = 48.dp).padding(start = 12.dp, end = 8.dp),
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(T.Cream.copy(alpha = 0.055f))
+                .clickable(onClick = onChooseHost)
+                .padding(start = 12.dp, end = 8.dp, top = 6.dp, bottom = 6.dp)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = "Hermes host $hostName, ${statusText.lowercase()}. Opens host picker."
+                },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            val statusColor = when (state.connectionPhase) {
-                HostConnectionPhase.Connected -> T.Ok
-                HostConnectionPhase.Connecting -> T.Warn
-                HostConnectionPhase.Failed -> T.Error
-                HostConnectionPhase.NoHost -> T.Muted
+            Box(Modifier.size(8.dp).clip(CircleShape).background(phaseColor(state.connectionPhase)))
+            Spacer(Modifier.width(8.dp))
+            Column {
+                Text(
+                    hostName,
+                    style = T.BodyMuted.copy(color = if (state.activeHost == null) T.TextSoft else T.CreamSoft, fontWeight = FontWeight.SemiBold),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 130.dp),
+                )
+                Text(statusText, style = T.Micro.copy(color = phaseColor(state.connectionPhase), letterSpacing = 0.8.sp))
             }
-            Box(Modifier.size(7.dp).clip(CircleShape).background(statusColor))
-            Spacer(Modifier.width(7.dp))
-            Text(
-                state.activeHost?.name ?: "Choose host",
-                style = T.BodyMuted.copy(color = if (state.activeHost == null) T.TextSoft else T.CreamSoft, fontWeight = FontWeight.SemiBold),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 110.dp),
-            )
-            Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.size(16.dp))
+            Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.size(18.dp))
         }
     }
     HorizontalDivider(color = T.Line)
@@ -220,11 +264,11 @@ private fun ConnectionNotice(
 ) {
     AnimatedVisibility(visible = state.connectionPhase == HostConnectionPhase.Connecting) {
         Row(
-            Modifier.fillMaxWidth().background(T.Warn.copy(alpha = 0.06f)).padding(horizontal = 16.dp, vertical = 8.dp),
+            Modifier.fillMaxWidth().background(T.Warn.copy(alpha = 0.06f)).padding(horizontal = 16.dp, vertical = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            CircularProgressIndicator(modifier = Modifier.size(13.dp), color = T.Warn, strokeWidth = 1.5.dp)
-            Spacer(Modifier.width(8.dp))
+            CircularProgressIndicator(modifier = Modifier.size(14.dp), color = T.Warn, strokeWidth = 1.5.dp)
+            Spacer(Modifier.width(9.dp))
             Text("Connecting to ${state.activeHost?.name ?: "Hermes"}…", style = T.BodyMuted.copy(color = T.Warn))
         }
     }
@@ -233,19 +277,19 @@ private fun ConnectionNotice(
             Modifier.fillMaxWidth().background(T.Error.copy(alpha = 0.08f)).padding(start = 14.dp, end = 5.dp, top = 7.dp, bottom = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Lucide.CloudOff, null, tint = T.Error, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(8.dp))
+            Icon(Lucide.CloudOff, null, tint = T.Error, modifier = Modifier.size(17.dp))
+            Spacer(Modifier.width(9.dp))
             Text(
                 state.errorMessage ?: "Hermes host is unavailable.",
                 style = T.BodyMuted.copy(color = T.ErrorSoft),
-                maxLines = 2,
+                maxLines = 3,
                 modifier = Modifier.weight(1f),
             )
             if (state.connectionPhase == HostConnectionPhase.Failed) {
                 TextButton(onClick = onRetry) { Text("Retry", style = T.BodyMuted.copy(color = T.Error)) }
                 TextButton(onClick = onManage) { Text("Hosts", style = T.BodyMuted.copy(color = T.TextSoft)) }
             } else {
-                IconButton(onClick = onDismissError) { Icon(Lucide.X, "Dismiss", tint = T.Muted, modifier = Modifier.size(17.dp)) }
+                IconButton(onClick = onDismissError, modifier = Modifier.size(48.dp)) { Icon(Lucide.X, "Dismiss error", tint = T.Muted, modifier = Modifier.size(18.dp)) }
             }
         }
     }
@@ -254,13 +298,18 @@ private fun ConnectionNotice(
 @Composable
 private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val listState = rememberLazyListState()
-    LaunchedEffect(state.messages.size) {
-        if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.lastIndex)
+    val lastAssistantLength = (state.messages.lastOrNull { it is ChatUiItem.Assistant } as? ChatUiItem.Assistant)?.text?.length ?: 0
+    // Follow the stream: react to new items AND to the growing text of the last
+    // assistant bubble, but never fight the user's own scrolling.
+    LaunchedEffect(state.messages.size, lastAssistantLength) {
+        if (state.messages.isNotEmpty() && !listState.isScrollInProgress) {
+            listState.scrollToItem(state.messages.lastIndex, scrollOffset = 100_000)
+        }
     }
 
     Column(Modifier.fillMaxSize()) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -294,6 +343,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                         is ChatUiItem.User -> UserBubble(item.text)
                         is ChatUiItem.Assistant -> AssistantMessage(item.text, item.streaming)
                         is ChatUiItem.Tool -> LiveToolCard(item)
+                        is ChatUiItem.Approval -> ApprovalCard(item) { approve -> viewModel.respondToApproval(item.id, approve) }
                     }
                 }
             }
@@ -312,7 +362,7 @@ private fun EmptyConversation(state: HermesUiState, modifier: Modifier = Modifie
         Box(
             Modifier.size(54.dp).clip(RoundedCornerShape(T.RadiusSheet)).background(T.Cream.copy(alpha = 0.07f)),
             contentAlignment = Alignment.Center,
-        ) { Icon(if (state.activeHost == null) Lucide.Server else HermesWing, null, tint = T.Cream, modifier = Modifier.size(26.dp)) }
+        ) { Icon(if (state.activeHost == null) Lucide.Server else HermesWing, null, tint = T.Cream, modifier = Modifier.size(25.dp)) }
         Spacer(Modifier.height(17.dp))
         Text(
             when (state.connectionPhase) {
@@ -353,18 +403,18 @@ private fun UserBubble(text: String) {
 private fun AssistantMessage(text: String, streaming: Boolean) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         Box(Modifier.size(29.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.08f)), contentAlignment = Alignment.Center) {
-            Icon(HermesWing, null, tint = T.Cream, modifier = Modifier.size(16.dp))
+            Icon(HermesWing, null, tint = T.Cream, modifier = Modifier.size(15.dp))
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             if (text.isBlank() && streaming) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-                    CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Cream)
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.4.dp, color = T.Cream)
                     Spacer(Modifier.width(8.dp))
                     Text("Hermes is working…", style = T.BodyMuted)
                 }
             } else {
-                Text(text, style = T.Body, modifier = Modifier.padding(top = 2.dp))
+                MarkdownText(text, modifier = Modifier.padding(top = 2.dp))
                 if (streaming) {
                     Text("STREAMING", style = T.MicroBold, modifier = Modifier.padding(top = 6.dp))
                 }
@@ -374,11 +424,93 @@ private fun AssistantMessage(text: String, streaming: Boolean) {
 }
 
 @Composable
+private fun MarkdownText(text: String, modifier: Modifier = Modifier) {
+    val clipboard = LocalClipboardManager.current
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        parseMarkdownBlocks(text).forEach { block ->
+            when (block) {
+                is MarkdownBlock.Heading -> Text(
+                    inlineAnnotated(block.text),
+                    color = T.TextPrimary,
+                    fontSize = if (block.level <= 2) 17.sp else 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 22.sp,
+                )
+                is MarkdownBlock.Paragraph -> Text(
+                    inlineAnnotated(block.text),
+                    color = T.TextSoft,
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp,
+                )
+                is MarkdownBlock.Bullet -> Row {
+                    Text("•", color = T.Cream, fontSize = 15.sp, lineHeight = 22.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(inlineAnnotated(block.text), color = T.TextSoft, fontSize = 15.sp, lineHeight = 22.sp)
+                }
+                is MarkdownBlock.Code -> Card(
+                    colors = CardDefaults.cardColors(containerColor = T.SurfaceLow),
+                    border = BorderStroke(1.dp, T.Line),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Column {
+                        Row(
+                            Modifier.fillMaxWidth().padding(start = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(block.language?.uppercase() ?: "CODE", style = T.Micro.copy(letterSpacing = 1.sp))
+                            IconButton(
+                                onClick = { clipboard.setText(AnnotatedString(block.code)) },
+                                modifier = Modifier.size(48.dp),
+                            ) { Icon(Lucide.Copy, "Copy code", tint = T.Muted, modifier = Modifier.size(16.dp)) }
+                        }
+                        Text(
+                            block.code,
+                            style = T.MonoBody.copy(color = T.TextSoft, fontSize = 13.sp, lineHeight = 19.sp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                                .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun inlineAnnotated(text: String): AnnotatedString {
+    val codeBg = T.Line
+    val linkColor = T.Tool
+    return buildAnnotatedString {
+        parseInlineMarkdown(text).forEach { token ->
+            val style = SpanStyle(
+                fontWeight = if (token.bold) FontWeight.Bold else null,
+                fontStyle = if (token.italic) FontStyle.Italic else null,
+                fontFamily = if (token.code) T.Mono else null,
+                background = if (token.code) codeBg else Color.Unspecified,
+            )
+            if (token.linkUrl != null) {
+                withLink(
+                    LinkAnnotation.Url(
+                        token.linkUrl,
+                        TextLinkStyles(style = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)),
+                    )
+                ) { append(token.text) }
+            } else {
+                withStyle(style) { append(token.text) }
+            }
+        }
+    }
+}
+
+@Composable
 private fun LiveToolCard(item: ChatUiItem.Tool) {
-    Surface(
+    Card(
         modifier = Modifier.padding(start = 39.dp).fillMaxWidth(),
         shape = RoundedCornerShape(T.RadiusCard),
-        color = T.SurfaceLow,
+        colors = CardDefaults.cardColors(containerColor = T.SurfaceLow),
         border = BorderStroke(1.dp, if (item.failed) T.Error.copy(alpha = 0.3f) else T.Line),
     ) {
         Row(Modifier.padding(11.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -392,6 +524,57 @@ private fun LiveToolCard(item: ChatUiItem.Tool) {
             }
             if (item.running) CircularProgressIndicator(modifier = Modifier.size(15.dp), strokeWidth = 1.5.dp, color = T.Tool)
             else Text(if (item.failed) "FAILED" else "DONE", style = T.MicroBold.copy(color = if (item.failed) T.Error else T.Cream))
+        }
+    }
+}
+
+@Composable
+private fun ApprovalCard(item: ChatUiItem.Approval, onRespond: (Boolean) -> Unit) {
+    Card(
+        modifier = Modifier.padding(start = 39.dp).fillMaxWidth(),
+        shape = RoundedCornerShape(T.RadiusCard),
+        colors = CardDefaults.cardColors(containerColor = T.Warn.copy(alpha = 0.06f)),
+        border = BorderStroke(1.dp, T.Warn.copy(alpha = 0.3f)),
+    ) {
+        Column(Modifier.padding(13.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Lucide.ShieldCheck, null, tint = T.Warn, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(9.dp))
+                Text("Approval required", style = T.CardTitle.copy(color = T.Warn))
+            }
+            item.toolName?.let {
+                Text(it, style = T.MonoBody.copy(color = T.TextSoft, fontSize = 12.sp), modifier = Modifier.padding(top = 7.dp))
+            }
+            item.message?.let {
+                Text(it, style = T.Body.copy(fontSize = 13.sp, lineHeight = 18.sp), modifier = Modifier.padding(top = 5.dp))
+            }
+            when (item.decision) {
+                null -> Row(Modifier.padding(top = 11.dp), horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Surface(
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).clickable { onRespond(true) },
+                        color = T.Cream,
+                        contentColor = T.OnAccent,
+                        shape = RoundedCornerShape(13.dp),
+                    ) {
+                        Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                            Text("Approve", style = T.Label.copy(color = T.OnAccent, fontWeight = FontWeight.Bold))
+                        }
+                    }
+                    Surface(
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).clickable { onRespond(false) },
+                        color = Color.Transparent,
+                        contentColor = T.Error,
+                        shape = RoundedCornerShape(13.dp),
+                        border = BorderStroke(1.dp, T.Error.copy(alpha = 0.5f)),
+                    ) {
+                        Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                            Text("Deny", style = T.Label.copy(color = T.Error, fontWeight = FontWeight.Bold))
+                        }
+                    }
+                }
+                true -> Text("APPROVED", style = T.MicroBold.copy(color = T.Cream), modifier = Modifier.padding(top = 10.dp))
+                false -> Text("DENIED", style = T.MicroBold.copy(color = T.Error), modifier = Modifier.padding(top = 10.dp))
+            }
         }
     }
 }
@@ -423,45 +606,127 @@ private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
             },
         )
         Spacer(Modifier.width(7.dp))
-        val canSend = enabled && state.composerText.isNotBlank()
-        Box(
-            modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(if (canSend) T.Cream else T.Muted.copy(alpha = 0.12f)).clickable(enabled = canSend) {
-                focusManager.clearFocus()
-                viewModel.sendMessage()
-            },
-            contentAlignment = Alignment.Center,
-        ) {
-            if (state.isSending) CircularProgressIndicator(modifier = Modifier.size(17.dp), color = T.Cream, strokeWidth = 1.7.dp)
-            else Icon(Lucide.Send, "Send", tint = if (canSend) T.OnAccent else T.Muted, modifier = Modifier.size(19.dp))
+        if (state.isSending) {
+            Box(
+                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.Error.copy(alpha = 0.12f)).clickable { viewModel.cancelRun() },
+                contentAlignment = Alignment.Center,
+            ) { Icon(Lucide.Square, "Stop run", tint = T.Error, modifier = Modifier.size(18.dp)) }
+        } else {
+            val canSend = enabled && state.composerText.isNotBlank()
+            Box(
+                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(if (canSend) T.Cream else T.Muted.copy(alpha = 0.12f)).clickable(enabled = canSend) {
+                    focusManager.clearFocus()
+                    viewModel.sendMessage()
+                },
+                contentAlignment = Alignment.Center,
+            ) { Icon(Lucide.Send, "Send", tint = if (canSend) T.OnAccent else T.Muted, modifier = Modifier.size(19.dp)) }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
+    var actionTarget by remember { mutableStateOf<HermesSession?>(null) }
+    var renameTarget by remember { mutableStateOf<HermesSession?>(null) }
+    var renameText by remember { mutableStateOf("") }
+
     Column(Modifier.fillMaxSize().padding(horizontal = 15.dp)) {
-        ScreenHeading("Sessions", "${state.sessions.size} on ${state.activeHost?.name ?: "no host"}", Lucide.Plus, viewModel::createSession)
-        if (state.sessions.isEmpty()) {
-            EmptyListState(Lucide.History, "No sessions yet", "Start a message and Hermes will create one here.")
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
-                items(state.sessions, key = { it.id }) { session ->
-                    SessionCard(session, selected = state.activeSessionId == session.id) { viewModel.selectSession(session.id) }
+        ScreenHeading("Sessions", "${state.sessions.size} on ${state.activeHost?.name ?: "no host"}", Lucide.Plus, "New session", viewModel::createSession)
+        PullToRefreshBox(
+            isRefreshing = state.isRefreshing,
+            onRefresh = viewModel::refresh,
+            modifier = Modifier.weight(1f),
+        ) {
+            if (state.sessions.isEmpty()) {
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                    EmptyListState(Lucide.History, "No sessions yet", "Start a message and Hermes will create one here. Pull down to refresh.")
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(bottom = 12.dp),
+                ) {
+                    items(state.sessions, key = { it.id }) { session ->
+                        SessionCard(
+                            session = session,
+                            selected = state.activeSessionId == session.id,
+                            onClick = { viewModel.selectSession(session.id) },
+                            onLongClick = { actionTarget = session },
+                        )
+                    }
+                    if (state.sessionsHasMore) {
+                        item(key = "load-more") {
+                            TextButton(
+                                onClick = viewModel::loadMoreSessions,
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            ) { Text("Load older sessions", style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp)) }
+                        }
+                    }
                 }
             }
         }
     }
+
+    actionTarget?.let { session ->
+        AlertDialog(
+            onDismissRequest = { actionTarget = null },
+            containerColor = T.SurfaceLow,
+            title = { Text(session.title?.takeIf { it.isNotBlank() } ?: "Untitled session", fontSize = 16.sp) },
+            text = { Text("Rename this session or delete it from the host.", style = T.BodyMuted.copy(fontSize = 13.sp)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    renameText = session.title.orEmpty()
+                    renameTarget = session
+                    actionTarget = null
+                }) { Text("Rename", style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp)) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    viewModel.deleteSession(session.id)
+                    actionTarget = null
+                }) { Text("Delete", style = T.BodyMuted.copy(color = T.Error, fontSize = 13.sp)) }
+            },
+        )
+    }
+
+    renameTarget?.let { session ->
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            containerColor = T.SurfaceLow,
+            title = { Text("Rename session", fontSize = 16.sp) },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    singleLine = true,
+                    textStyle = T.Body.copy(fontSize = 14.sp),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.renameSession(session.id, renameText)
+                    renameTarget = null
+                }) { Text("Save", style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) { Text("Cancel", style = T.BodyMuted.copy(fontSize = 13.sp)) }
+            },
+        )
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SessionCard(session: HermesSession, selected: Boolean, onClick: () -> Unit) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = if (selected) T.Cream.copy(alpha = 0.075f) else T.SurfaceLow,
+private fun SessionCard(session: HermesSession, selected: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick, onLongClickLabel = "Session actions"),
+        colors = CardDefaults.cardColors(containerColor = if (selected) T.Cream.copy(alpha = 0.075f) else T.SurfaceLow),
         border = BorderStroke(1.dp, if (selected) T.FocusRing else T.Line),
         shape = RoundedCornerShape(T.RadiusCard),
     ) {
-        Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(13.dp)) {
+        Column(Modifier.padding(13.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(8.dp).clip(CircleShape).background(if (selected) T.Cream else T.Muted.copy(alpha = 0.4f)))
                 Spacer(Modifier.width(9.dp))
@@ -474,32 +739,60 @@ private fun SessionCard(session: HermesSession, selected: Boolean, onClick: () -
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun JobsScreen(state: HermesUiState) {
+private fun JobsScreen(state: HermesUiState, viewModel: HermesViewModel) {
     Column(Modifier.fillMaxSize().padding(horizontal = 15.dp)) {
-        ScreenHeading("Jobs", "Scheduled work from the selected host", Lucide.Ellipsis, {})
-        if (state.jobs.isEmpty()) {
-            EmptyListState(Lucide.CalendarClock, "No scheduled jobs", "Jobs exposed by this Hermes host will appear here.")
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 12.dp)) {
-                items(state.jobs, key = { it.id }) { job -> JobCard(job) }
+        ScreenHeading("Jobs", "Scheduled work from the selected host", Lucide.RefreshCw, "Refresh jobs", viewModel::refresh)
+        PullToRefreshBox(
+            isRefreshing = state.isRefreshing,
+            onRefresh = viewModel::refresh,
+            modifier = Modifier.weight(1f),
+        ) {
+            if (state.jobs.isEmpty()) {
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                    EmptyListState(Lucide.CalendarClock, "No scheduled jobs", "Jobs exposed by this Hermes host will appear here. Pull down to refresh.")
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(bottom = 12.dp),
+                ) {
+                    items(state.jobs, key = { it.id }) { job ->
+                        JobCard(job, onToggle = { viewModel.toggleJob(job) }, onRunNow = { viewModel.runJobNow(job.id) })
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun JobCard(job: HermesJob) {
-    Surface(color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
+private fun JobCard(job: HermesJob, onToggle: () -> Unit, onRunNow: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = T.SurfaceLow), border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
         Row(Modifier.fillMaxWidth().padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(3.dp).height(39.dp).clip(CircleShape).background(if (job.enabled) T.Cream else T.Muted.copy(alpha = 0.45f)))
-            Spacer(Modifier.width(11.dp))
             Column(Modifier.weight(1f)) {
-                Text(job.name, style = T.Label)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(job.name, style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (job.enabled) "ACTIVE" else "PAUSED",
+                        style = T.MicroBold.copy(color = if (job.enabled) T.Cream else T.Muted),
+                    )
+                }
                 Text(job.schedule, style = T.MonoBody, modifier = Modifier.padding(top = 4.dp))
-                Text(job.deliver?.let { "Delivery · $it" } ?: "Local delivery", style = T.Micro.copy(color = T.Muted.copy(alpha = 0.75f), letterSpacing = 0.sp), modifier = Modifier.padding(top = 7.dp))
+                Text(job.deliver?.let { "Delivery · $it" } ?: "Local delivery", style = T.Micro.copy(color = T.Muted.copy(alpha = 0.75f), letterSpacing = 0.sp), modifier = Modifier.padding(top = 6.dp))
             }
-            Icon(if (job.enabled) Lucide.Pause else Lucide.Play, if (job.enabled) "Enabled" else "Paused", tint = if (job.enabled) T.Cream else T.Muted)
+            IconButton(onClick = onRunNow, modifier = Modifier.size(48.dp)) {
+                Icon(Lucide.Play, "Run job now", tint = T.Tool, modifier = Modifier.size(20.dp))
+            }
+            Switch(
+                checked = job.enabled,
+                onCheckedChange = { onToggle() },
+                modifier = Modifier.semantics { contentDescription = if (job.enabled) "Pause job ${job.name}" else "Resume job ${job.name}" },
+                colors = SwitchDefaults.colors(checkedThumbColor = T.OnAccent, checkedTrackColor = T.Cream, uncheckedThumbColor = T.Muted, uncheckedTrackColor = T.SurfaceTwo),
+            )
         }
     }
 }
@@ -508,47 +801,47 @@ private fun JobCard(job: HermesJob) {
 private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val host = state.activeHost
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 15.dp)) {
-        ScreenHeading("Host", "Connection and capability status", Lucide.Ellipsis, viewModel::showHostPicker)
+        ScreenHeading("Host", "Connection and capability status", Lucide.Server, "Manage hosts", viewModel::showHostPicker)
         if (host == null) {
             EmptyListState(Lucide.Server, "No host selected", "Choose a desktop or server running the Hermes API server.")
-        } else {
-            Surface(
-                color = T.Cream.copy(alpha = 0.065f),
-                border = BorderStroke(1.dp, T.Cream.copy(alpha = 0.18f)),
-                shape = RoundedCornerShape(T.RadiusSheet),
-            ) {
-                Column(Modifier.padding(17.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
-                        Box(Modifier.size(46.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.Cream.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
-                            Icon(Lucide.Server, null, tint = T.Cream, modifier = Modifier.size(24.dp))
-                        }
-                        ConnectionBadge(state.connectionPhase)
+            return@Column
+        }
+        Card(
+            colors = CardDefaults.cardColors(containerColor = T.Cream.copy(alpha = 0.065f)),
+            border = BorderStroke(1.dp, T.Cream.copy(alpha = 0.18f)),
+            shape = RoundedCornerShape(T.RadiusSheet),
+        ) {
+            Column(Modifier.padding(17.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+                    Box(Modifier.size(46.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.Cream.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
+                        Icon(Lucide.Server, null, tint = T.Cream, modifier = Modifier.size(25.dp))
                     }
-                    Spacer(Modifier.height(15.dp))
-                    Text(host.name, style = T.ScreenTitle)
-                    Text(host.baseUrl, style = T.MonoBody, modifier = Modifier.padding(top = 5.dp))
-                    Spacer(Modifier.height(16.dp))
-                    HorizontalDivider(color = T.Line)
-                    Row(Modifier.fillMaxWidth().padding(top = 13.dp)) {
-                        Metric(state.sessions.size.toString(), "SESSIONS", Modifier.weight(1f))
-                        Metric(state.jobs.count { it.enabled }.toString(), "ACTIVE JOBS", Modifier.weight(1f))
-                        Metric(state.capabilities?.model ?: "—", "MODEL", Modifier.weight(1f))
-                    }
+                    ConnectionBadge(state.connectionPhase)
+                }
+                Spacer(Modifier.height(15.dp))
+                Text(host.name, style = T.ScreenTitle)
+                Text(host.baseUrl, style = T.MonoBody, modifier = Modifier.padding(top = 5.dp))
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider(color = T.Line)
+                Row(Modifier.fillMaxWidth().padding(top = 13.dp)) {
+                    Metric(state.sessions.size.toString() + if (state.sessionsHasMore) "+" else "", "SESSIONS", Modifier.weight(1f))
+                    Metric(state.jobs.count { it.enabled }.toString(), "ACTIVE JOBS", Modifier.weight(1f))
+                    Metric(state.capabilities?.model ?: "—", "MODEL", Modifier.weight(1f))
                 }
             }
-            Spacer(Modifier.height(10.dp))
-            HostStatusRow(Lucide.Wifi, "Hermes API", state.capabilities?.platform ?: "Waiting for capabilities", if (state.connectionPhase == HostConnectionPhase.Connected) "READY" else "OFFLINE", if (state.connectionPhase == HostConnectionPhase.Connected) T.Cream else T.Error)
-            HostStatusRow(Lucide.ShieldCheck, "Authentication", "Bearer key stored with Android Keystore encryption", "SECURE", T.Cream)
-            HostStatusRow(Lucide.Globe, "Transport", if (host.baseUrl.startsWith("https")) "HTTPS encrypted connection" else "Explicit private-network HTTP", if (host.baseUrl.startsWith("https")) "TLS" else "PRIVATE", if (host.baseUrl.startsWith("https")) T.Cream else T.Warn)
-            Text("DISCOVERED CAPABILITIES", style = T.Micro, modifier = Modifier.padding(top = 12.dp, bottom = 8.dp))
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                val features = state.capabilities?.features.orEmpty().ifEmpty { setOf("Waiting for host") }
-                features.sorted().take(8).forEach { FeatureChip(it.replace('_', ' '), state.connectionPhase == HostConnectionPhase.Connected) }
-            }
-            Spacer(Modifier.height(16.dp))
-            PrimaryButton("Choose or manage hosts", Lucide.Server, viewModel::showHostPicker)
-            Spacer(Modifier.height(16.dp))
         }
+        Spacer(Modifier.height(10.dp))
+        HostStatusRow(Lucide.Wifi, "Hermes API", state.capabilities?.platform ?: "Waiting for capabilities", if (state.connectionPhase == HostConnectionPhase.Connected) "READY" else "OFFLINE", if (state.connectionPhase == HostConnectionPhase.Connected) T.Cream else T.Error)
+        HostStatusRow(Lucide.ShieldCheck, "Authentication", "Bearer key stored with Android Keystore encryption", "SECURE", T.Cream)
+        HostStatusRow(Lucide.Globe, "Transport", if (host.baseUrl.startsWith("https")) "HTTPS encrypted connection" else "Explicit private-network HTTP", if (host.baseUrl.startsWith("https")) "TLS" else "PRIVATE", if (host.baseUrl.startsWith("https")) T.Cream else T.Warn)
+        Text("DISCOVERED CAPABILITIES", style = T.Micro, modifier = Modifier.padding(top = 12.dp, bottom = 8.dp))
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            val features = state.capabilities?.features.orEmpty().ifEmpty { setOf("Waiting for host") }
+            features.sorted().take(8).forEach { FeatureChip(it.replace('_', ' '), state.connectionPhase == HostConnectionPhase.Connected) }
+        }
+        Spacer(Modifier.height(16.dp))
+        PrimaryButton("Choose or manage hosts", Lucide.Server, viewModel::showHostPicker)
+        Spacer(Modifier.height(16.dp))
     }
 }
 
@@ -556,7 +849,7 @@ private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
 private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
     var showLicenses by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 15.dp)) {
-        ScreenHeading("Settings", "Appearance and app options", Lucide.Settings, {})
+        ScreenHeading("Settings", "Appearance and app options", Lucide.Settings, "Settings", {})
         Text("APPEARANCE", style = T.Micro, modifier = Modifier.padding(bottom = 8.dp))
         Surface(color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
             Column(Modifier.fillMaxWidth().padding(13.dp)) {
@@ -612,7 +905,7 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
 @Composable
 private fun LicensesRow(onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(T.RadiusSmall)).clickable(onClick = onClick).heightIn(min = 48.dp).padding(horizontal = 4.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(T.RadiusSmall)).clickable(onClick = onClick).heightIn(min = 48.dp).padding(horizontal = 13.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(Lucide.ScrollText, null, tint = T.Muted, modifier = Modifier.size(15.dp))
@@ -646,12 +939,8 @@ private fun LicensesDialog(onDismiss: () -> Unit) {
 
 @Composable
 private fun ConnectionBadge(phase: HostConnectionPhase) {
-    val (label, color) = when (phase) {
-        HostConnectionPhase.Connected -> "ONLINE" to T.Ok
-        HostConnectionPhase.Connecting -> "CONNECTING" to T.Warn
-        HostConnectionPhase.Failed -> "OFFLINE" to T.Error
-        HostConnectionPhase.NoHost -> "NO HOST" to T.Muted
-    }
+    val label = phaseLabel(phase)
+    val color = phaseColor(phase)
     Row(Modifier.clip(CircleShape).background(color.copy(alpha = 0.1f)).padding(horizontal = 9.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(6.dp).clip(CircleShape).background(color))
         Spacer(Modifier.width(6.dp))
@@ -669,14 +958,14 @@ private fun FeatureChip(label: String, enabled: Boolean) {
 }
 
 @Composable
-private fun ScreenHeading(title: String, subtitle: String, actionIcon: ImageVector, onAction: () -> Unit) {
+private fun ScreenHeading(title: String, subtitle: String, actionIcon: ImageVector, actionLabel: String, onAction: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(top = 15.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, style = T.ScreenTitle)
             Text(subtitle, style = T.Micro.copy(letterSpacing = 0.sp), modifier = Modifier.padding(top = 3.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         IconButton(onClick = onAction, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.Cream.copy(alpha = 0.065f))) {
-            Icon(actionIcon, null, tint = T.Cream, modifier = Modifier.size(18.dp))
+            Icon(actionIcon, actionLabel, tint = T.Cream, modifier = Modifier.size(19.dp))
         }
     }
 }
@@ -700,7 +989,7 @@ private fun Metric(value: String, label: String, modifier: Modifier = Modifier) 
 
 @Composable
 private fun HostStatusRow(icon: ImageVector, title: String, detail: String, state: String, stateColor: Color) {
-    Surface(modifier = Modifier.padding(bottom = 8.dp), color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
+    Card(modifier = Modifier.padding(bottom = 8.dp), colors = CardDefaults.cardColors(containerColor = T.SurfaceLow), border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(35.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.055f)), contentAlignment = Alignment.Center) { Icon(icon, null, tint = T.Cream, modifier = Modifier.size(18.dp)) }
             Spacer(Modifier.width(10.dp))
@@ -715,7 +1004,7 @@ private fun HostStatusRow(icon: ImageVector, title: String, detail: String, stat
 
 @Composable
 private fun PrimaryButton(label: String, icon: ImageVector, onClick: () -> Unit) {
-    Surface(modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(onClick = onClick), color = T.Cream, contentColor = T.OnAccent, shape = RoundedCornerShape(T.RadiusCard)) {
+    Surface(modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(T.RadiusCard)).clickable(onClick = onClick), color = T.Cream, contentColor = T.OnAccent, shape = RoundedCornerShape(T.RadiusCard)) {
         Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, modifier = Modifier.size(17.dp))
             Spacer(Modifier.width(8.dp))
@@ -756,11 +1045,14 @@ private fun HostPickerSheet(
     onSelect: (String) -> Unit,
     onSave: (String?, String, String, String, Boolean) -> Unit,
     onDelete: (String) -> Unit,
+    onEdit: (String) -> Unit,
 ) {
-    var name by remember(state.showHostPicker) { mutableStateOf("") }
-    var baseUrl by remember(state.showHostPicker) { mutableStateOf("https://") }
-    var apiKey by remember(state.showHostPicker) { mutableStateOf("") }
-    var allowHttp by remember(state.showHostPicker) { mutableStateOf(false) }
+    val editing = state.editingHost
+    var name by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(editing?.name.orEmpty()) }
+    var baseUrl by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(editing?.baseUrl ?: "https://") }
+    var apiKey by remember(state.showHostPicker, state.editingHostId) { mutableStateOf("") }
+    var allowHttp by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(editing?.allowInsecureHttp ?: false) }
+    var deleteTarget by remember { mutableStateOf<HostProfile?>(null) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -776,13 +1068,20 @@ private fun HostPickerSheet(
                     Text(if (state.hosts.isEmpty()) "Connect Hermes" else "Choose a host", style = T.SheetTitle)
                     Text("Switch between desktop and server instances without reconfiguring the app.", style = T.BodyMuted, modifier = Modifier.padding(top = 5.dp))
                 }
-                if (state.hosts.isNotEmpty()) IconButton(onClick = onDismiss) { Icon(Lucide.X, "Close", tint = T.Muted) }
+                if (state.hosts.isNotEmpty()) IconButton(onClick = onDismiss, modifier = Modifier.size(48.dp)) { Icon(Lucide.X, "Close host picker", tint = T.Muted) }
             }
 
             if (state.hosts.isNotEmpty()) {
                 Text("SAVED HOSTS", style = T.Micro, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
                 state.hosts.forEach { host ->
-                    SavedHostRow(host, selected = state.activeHostId == host.id, phase = if (state.activeHostId == host.id) state.connectionPhase else HostConnectionPhase.NoHost, onSelect = { onSelect(host.id) }, onDelete = { onDelete(host.id) })
+                    SavedHostRow(
+                        host = host,
+                        selected = state.activeHostId == host.id,
+                        phase = if (state.activeHostId == host.id) state.connectionPhase else HostConnectionPhase.NoHost,
+                        onSelect = { onSelect(host.id) },
+                        onEdit = { onEdit(host.id) },
+                        onDelete = { deleteTarget = host },
+                    )
                     Spacer(Modifier.height(7.dp))
                 }
                 HorizontalDivider(color = T.Line, modifier = Modifier.padding(vertical = 15.dp))
@@ -790,12 +1089,19 @@ private fun HostPickerSheet(
                 SecurityCallout()
             }
 
-            Text("ADD A HOST", style = T.Micro, modifier = Modifier.padding(top = 6.dp, bottom = 9.dp))
+            Text(if (editing == null) "ADD A HOST" else "EDIT HOST", style = T.Micro, modifier = Modifier.padding(top = 6.dp, bottom = 9.dp))
             HostTextField(name, { name = it }, "Host name", "Ubuntu Hermes", Lucide.Server)
             Spacer(Modifier.height(9.dp))
             HostTextField(baseUrl, { baseUrl = it }, "Hermes server URL", "https://hermes.example.com", Lucide.Globe)
             Spacer(Modifier.height(9.dp))
-            HostTextField(apiKey, { apiKey = it }, "API key", "Required bearer token", Lucide.KeyRound, password = true)
+            HostTextField(
+                apiKey,
+                { apiKey = it },
+                "API key",
+                if (editing == null) "Required bearer token" else "Leave blank to keep the current key",
+                Lucide.KeyRound,
+                password = true,
+            )
             Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Allow private-network HTTP", style = T.Label)
@@ -807,15 +1113,33 @@ private fun HostPickerSheet(
                     colors = SwitchDefaults.colors(checkedThumbColor = T.OnAccent, checkedTrackColor = T.Cream, uncheckedThumbColor = T.Muted, uncheckedTrackColor = T.SurfaceTwo),
                 )
             }
-            PrimaryButton("Save and connect", Lucide.Wifi) { onSave(null, name, baseUrl, apiKey, allowHttp) }
+            PrimaryButton(if (editing == null) "Save and connect" else "Save changes", Lucide.Wifi) { onSave(editing?.id, name, baseUrl, apiKey, allowHttp) }
             Text("Hermes Mobile probes /v1/capabilities before loading sessions. The API key is encrypted with Android Keystore and never shown again.", style = T.Micro.copy(letterSpacing = 0.sp), modifier = Modifier.padding(top = 11.dp))
         }
+    }
+
+    deleteTarget?.let { host ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            containerColor = T.SurfaceLow,
+            title = { Text("Delete ${host.name}?", fontSize = 16.sp) },
+            text = { Text("This removes the host and its stored API key from this phone. The key is not shown anywhere, so you will need it again to re-add the host.", style = T.Body.copy(fontSize = 13.sp, lineHeight = 18.sp)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDelete(host.id)
+                    deleteTarget = null
+                }) { Text("Delete", style = T.BodyMuted.copy(color = T.Error, fontSize = 13.sp)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("Cancel", style = T.BodyMuted.copy(fontSize = 13.sp)) }
+            },
+        )
     }
 }
 
 @Composable
 private fun SecurityCallout() {
-    Surface(color = T.Cream.copy(alpha = 0.055f), border = BorderStroke(1.dp, T.Cream.copy(alpha = 0.14f)), shape = RoundedCornerShape(T.RadiusSheet), modifier = Modifier.padding(top = 17.dp, bottom = 16.dp)) {
+    Card(colors = CardDefaults.cardColors(containerColor = T.Cream.copy(alpha = 0.055f)), border = BorderStroke(1.dp, T.Cream.copy(alpha = 0.14f)), shape = RoundedCornerShape(T.RadiusSheet), modifier = Modifier.padding(top = 17.dp, bottom = 16.dp)) {
         Row(Modifier.padding(13.dp), verticalAlignment = Alignment.Top) {
             Icon(Lucide.Lock, null, tint = T.Cream, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(10.dp))
@@ -833,14 +1157,15 @@ private fun SavedHostRow(
     selected: Boolean,
     phase: HostConnectionPhase,
     onSelect: () -> Unit,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Surface(
-        color = if (selected) T.Cream.copy(alpha = 0.07f) else T.SurfaceOne,
+    Card(
+        colors = CardDefaults.cardColors(containerColor = if (selected) T.Cream.copy(alpha = 0.07f) else T.SurfaceOne),
         border = BorderStroke(1.dp, if (selected) T.FocusRing else T.Line),
         shape = RoundedCornerShape(T.RadiusCard),
     ) {
-        Row(Modifier.fillMaxWidth().clickable(onClick = onSelect).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().clickable(onClick = onSelect).padding(start = 12.dp, top = 6.dp, bottom = 6.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(38.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.075f)), contentAlignment = Alignment.Center) { Icon(Lucide.Server, null, tint = T.Cream, modifier = Modifier.size(19.dp)) }
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
@@ -848,10 +1173,15 @@ private fun SavedHostRow(
                 Text(host.baseUrl, style = T.MonoSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
             }
             if (selected) {
-                val color = if (phase == HostConnectionPhase.Connected) T.Ok else if (phase == HostConnectionPhase.Failed) T.Error else T.Warn
-                Icon(if (phase == HostConnectionPhase.Connected) Lucide.CircleCheck else Lucide.RefreshCw, null, tint = color, modifier = Modifier.size(18.dp))
+                Icon(
+                    if (phase == HostConnectionPhase.Connected) Lucide.CircleCheck else Lucide.RefreshCw,
+                    phaseLabel(phase).lowercase(),
+                    tint = phaseColor(phase),
+                    modifier = Modifier.size(18.dp),
+                )
             }
-            IconButton(onClick = onDelete) { Icon(Lucide.Trash2, "Delete host", tint = T.Muted, modifier = Modifier.size(17.dp)) }
+            IconButton(onClick = onEdit, modifier = Modifier.size(48.dp)) { Icon(Lucide.Pencil, "Edit host ${host.name}", tint = T.Muted, modifier = Modifier.size(17.dp)) }
+            IconButton(onClick = onDelete, modifier = Modifier.size(48.dp)) { Icon(Lucide.Trash2, "Delete host ${host.name}", tint = T.Muted, modifier = Modifier.size(17.dp)) }
         }
     }
 }
