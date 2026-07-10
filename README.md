@@ -6,7 +6,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 
 ## Implemented
 
-- Native Command Deck interface for Android
+- Native Command Deck interface for Android, styled in an Apple-inspired dark/light system palette (switchable in Settings) with Lucide icons, JetBrains Mono, and a custom wing mark
 - Multiple saved Hermes hosts with quick switching, editing, and confirmed deletion
 - HTTPS by default, with explicit opt-in for private-network HTTP; scheme-downgrade redirects are refused
 - API keys encrypted at rest with Android Keystore (AES-GCM); unlock failures surface a notice instead of silently wiping hosts

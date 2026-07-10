@@ -16,6 +16,22 @@ import java.util.UUID
 
 enum class HostConnectionPhase { NoHost, Connecting, Connected, Failed }
 
+enum class ThemeMode { System, Dark, Light }
+
+interface SettingsStore {
+    fun loadThemeMode(): ThemeMode
+    fun saveThemeMode(mode: ThemeMode)
+}
+
+/** No-op store used when the caller doesn't wire persistence (e.g. tests). */
+private class InMemorySettingsStore : SettingsStore {
+    private var mode = ThemeMode.System
+    override fun loadThemeMode(): ThemeMode = mode
+    override fun saveThemeMode(mode: ThemeMode) {
+        this.mode = mode
+    }
+}
+
 sealed interface ChatUiItem {
     val id: String
 
@@ -67,6 +83,7 @@ data class HermesUiState(
     val isRefreshing: Boolean = false,
     val activeRunId: String? = null,
     val errorMessage: String? = null,
+    val themeMode: ThemeMode = ThemeMode.System,
 ) {
     val activeHost: HostProfile? get() = hosts.firstOrNull { it.id == activeHostId }
     val activeSession: HermesSession? get() = sessions.firstOrNull { it.id == activeSessionId }
@@ -76,6 +93,7 @@ data class HermesUiState(
 class HermesViewModel(
     private val gateway: HermesGateway,
     private val hostStore: HostStore,
+    private val settingsStore: SettingsStore = InMemorySettingsStore(),
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(HermesUiState())
     val state: StateFlow<HermesUiState> = mutableState.asStateFlow()
@@ -91,11 +109,17 @@ class HermesViewModel(
             activeHostId = selected,
             showHostPicker = snapshot.hosts.isEmpty(),
             connectionPhase = if (selected == null) HostConnectionPhase.NoHost else HostConnectionPhase.Connecting,
+            themeMode = settingsStore.loadThemeMode(),
             errorMessage = if (result.unlockFailed) {
                 "Saved hosts could not be unlocked on this device (Keystore key changed). Re-add your host and API key."
             } else null,
         )
         if (selected != null) connect(selected)
+    }
+
+    fun setThemeMode(mode: ThemeMode) {
+        settingsStore.saveThemeMode(mode)
+        mutableState.update { it.copy(themeMode = mode) }
     }
 
     fun selectScreen(screen: DeckScreen) {

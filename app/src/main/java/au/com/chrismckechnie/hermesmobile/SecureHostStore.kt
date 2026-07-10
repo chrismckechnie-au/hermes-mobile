@@ -62,6 +62,20 @@ object HostSnapshotCodec {
     }
 }
 
+/** Plain (unencrypted) SharedPreferences store for non-sensitive app settings. */
+class PreferencesSettingsStore(context: Context) : SettingsStore {
+    private val preferences = context.getSharedPreferences("hermes_mobile_settings", Context.MODE_PRIVATE)
+
+    override fun loadThemeMode(): ThemeMode =
+        preferences.getString("theme_mode", null)
+            ?.let { name -> ThemeMode.entries.firstOrNull { it.name == name } }
+            ?: ThemeMode.System
+
+    override fun saveThemeMode(mode: ThemeMode) {
+        preferences.edit().putString("theme_mode", mode.name).apply()
+    }
+}
+
 class SecureHostStore(context: Context) : HostStore {
     private val preferences = context.getSharedPreferences("hermes_mobile_secure_hosts", Context.MODE_PRIVATE)
     private val alias = "hermes-mobile-hosts-v1"
