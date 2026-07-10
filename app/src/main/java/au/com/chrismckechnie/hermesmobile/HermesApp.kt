@@ -35,6 +35,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -76,6 +78,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -849,12 +852,15 @@ private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
 private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
     var showLicenses by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 15.dp)) {
-        ScreenHeading("Settings", "Appearance and app options", Lucide.Settings, "Settings", {})
+        ScreenHeading("Settings", "Appearance and app options")
         Text("APPEARANCE", style = T.Micro, modifier = Modifier.padding(bottom = 8.dp))
         Surface(color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
             Column(Modifier.fillMaxWidth().padding(13.dp)) {
                 Text("Theme", style = T.Label)
-                Row(Modifier.padding(top = 9.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                Row(
+                    Modifier.padding(top = 9.dp).selectableGroup(),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
                     ThemeMode.entries.forEach { mode ->
                         val selected = state.themeMode == mode
                         Text(
@@ -866,7 +872,11 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                             modifier = Modifier
                                 .clip(CircleShape)
                                 .background(if (selected) T.Cream else T.SurfaceTwo)
-                                .clickable { viewModel.setThemeMode(mode) }
+                                .selectable(
+                                    selected = selected,
+                                    onClick = { viewModel.setThemeMode(mode) },
+                                    role = Role.RadioButton,
+                                )
                                 .padding(horizontal = 16.dp, vertical = 12.dp),
                         )
                     }
@@ -958,14 +968,22 @@ private fun FeatureChip(label: String, enabled: Boolean) {
 }
 
 @Composable
-private fun ScreenHeading(title: String, subtitle: String, actionIcon: ImageVector, actionLabel: String, onAction: () -> Unit) {
+private fun ScreenHeading(
+    title: String,
+    subtitle: String,
+    actionIcon: ImageVector? = null,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
     Row(Modifier.fillMaxWidth().padding(top = 15.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, style = T.ScreenTitle)
             Text(subtitle, style = T.Micro.copy(letterSpacing = 0.sp), modifier = Modifier.padding(top = 3.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        IconButton(onClick = onAction, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.Cream.copy(alpha = 0.065f))) {
-            Icon(actionIcon, actionLabel, tint = T.Cream, modifier = Modifier.size(19.dp))
+        if (actionIcon != null && actionLabel != null && onAction != null) {
+            IconButton(onClick = onAction, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.Cream.copy(alpha = 0.065f))) {
+                Icon(actionIcon, actionLabel, tint = T.Cream, modifier = Modifier.size(19.dp))
+            }
         }
     }
 }

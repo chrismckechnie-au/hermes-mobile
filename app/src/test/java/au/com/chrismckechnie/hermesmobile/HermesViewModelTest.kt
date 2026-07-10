@@ -39,6 +39,20 @@ class HermesViewModelTest {
     private fun viewModel() = HermesViewModel(gateway, store)
 
     @Test
+    fun `theme mode loads from settings and saves changes`() = runTest(dispatcher) {
+        val settings = FakeSettingsStore(ThemeMode.Light)
+        val vm = HermesViewModel(gateway, store, settings)
+        advanceUntilIdle()
+
+        assertEquals(ThemeMode.Light, vm.state.value.themeMode)
+
+        vm.setThemeMode(ThemeMode.Dark)
+
+        assertEquals(ThemeMode.Dark, vm.state.value.themeMode)
+        assertEquals(ThemeMode.Dark, settings.savedMode)
+    }
+
+    @Test
     fun `stream error event clears streaming flag and surfaces message`() = runTest(dispatcher) {
         gateway.streamEvents = listOf(
             HermesStreamEvent.RunStarted("run-1"),
@@ -227,6 +241,16 @@ private class FakeStore : HostStore {
     override fun load() = HostLoadResult(snapshot, unlockFailed)
     override fun save(snapshot: HostSnapshot) {
         saved = snapshot
+    }
+}
+
+private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsStore {
+    var savedMode: ThemeMode? = null
+
+    override fun loadThemeMode(): ThemeMode = initialMode
+
+    override fun saveThemeMode(mode: ThemeMode) {
+        savedMode = mode
     }
 }
 
