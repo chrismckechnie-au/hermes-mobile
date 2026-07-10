@@ -245,7 +245,7 @@ class HermesViewModel(
         val host = mutableState.value.activeHost ?: return
         if (mutableState.value.connectionPhase != HostConnectionPhase.Connected) return
         viewModelScope.launch {
-            runCatching { gateway.createSession(host, "Hermes Mobile") }
+            runCatching { gateway.createSession(host) }
                 .onSuccess { session ->
                     mutableState.update {
                         it.copy(
@@ -387,7 +387,7 @@ class HermesViewModel(
                 // The stream endpoint only needs the id; do NOT require the session to be
                 // present in the cached list (it may have arrived via a Completed event).
                 val sessionId = mutableState.value.activeSessionId
-                    ?: gateway.createSession(host, text.take(44)).also { created ->
+                    ?: gateway.createSession(host).also { created ->
                         mutableState.update {
                             it.copy(
                                 sessions = listOf(created) + it.sessions,
