@@ -211,7 +211,7 @@ class HermesViewModel(
             val page = runCatching { gateway.listSessions(host) }.getOrNull()
             val jobs = runCatching { gateway.listJobs(host) }.getOrNull()
             mutableState.update {
-                if (it.activeHostId != host.id) it.copy(isRefreshing = false)
+                if (it.activeHost != host) it.copy(isRefreshing = false)
                 else it.copy(
                     isRefreshing = false,
                     sessions = page?.sessions ?: it.sessions,
@@ -230,7 +230,7 @@ class HermesViewModel(
             runCatching { gateway.listSessions(host, offset = offset) }
                 .onSuccess { page ->
                     mutableState.update { state ->
-                        if (state.activeHostId != host.id) state
+                        if (state.activeHost != host) state
                         else state.copy(
                             sessions = state.sessions + page.sessions.filterNot { new -> state.sessions.any { it.id == new.id } },
                             sessionsHasMore = page.hasMore,
@@ -440,7 +440,9 @@ class HermesViewModel(
                     val jobsDeferred = async { runCatching { gateway.listJobs(host) }.getOrDefault(emptyList()) }
                     sessionsDeferred.await() to jobsDeferred.await()
                 }
-                if (mutableState.value.activeHostId != hostId) return@launch
+                // Compare the full captured profile, not just the id: editing a host
+                // keeps its id, and results fetched against the old URL/key must drop.
+                if (mutableState.value.activeHost != host) return@launch
                 mutableState.update {
                     it.copy(
                         connectionPhase = HostConnectionPhase.Connected,
@@ -454,7 +456,7 @@ class HermesViewModel(
                 }
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
-                if (mutableState.value.activeHostId == hostId) {
+                if (mutableState.value.activeHost == host) {
                     mutableState.update {
                         it.copy(
                             connectionPhase = HostConnectionPhase.Failed,
@@ -471,7 +473,7 @@ class HermesViewModel(
         viewModelScope.launch {
             val page = runCatching { gateway.listSessions(host) }.getOrNull()
             val jobs = runCatching { gateway.listJobs(host) }.getOrNull()
-            if (mutableState.value.activeHostId == host.id) {
+            if (mutableState.value.activeHost == host) {
                 mutableState.update {
                     it.copy(
                         sessions = page?.sessions ?: it.sessions,
@@ -551,7 +553,9 @@ class HermesViewModel(
 
     private fun showFailure(error: Throwable) {
         if (error is CancellationException) return
-        mutableState.update { it.copy(errorMessage = friendlyMessage(error), isSending = false) }
+        // Never touch isSending here: a failing background action (job toggle,
+        // rename, approval) must not re-enable the composer mid-stream.
+        mutableState.update { it.copy(errorMessage = friendlyMessage(error)) }
     }
 
     private fun friendlyMessage(error: Throwable): String = when (error) {
