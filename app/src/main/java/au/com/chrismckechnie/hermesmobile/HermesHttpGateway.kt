@@ -1,6 +1,8 @@
 package au.com.chrismckechnie.hermesmobile
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
@@ -18,6 +20,9 @@ class HermesHttpGateway(
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .callTimeout(0, TimeUnit.MILLISECONDS)
+        // Never follow http<->https scheme changes: a compromised or misconfigured
+        // https host must not silently downgrade traffic to cleartext.
+        .followSslRedirects(false)
         .build(),
 ) : HermesGateway {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -43,13 +48,18 @@ class HermesHttpGateway(
         )
     }
 
-    override suspend fun listSessions(host: HostProfile, limit: Int): List<HermesSession> = withContext(Dispatchers.IO) {
+    override suspend fun listSessions(host: HostProfile, limit: Int, offset: Int): HermesSessionPage = withContext(Dispatchers.IO) {
         val url = endpoint(host, "api", "sessions").newBuilder()
             .addQueryParameter("limit", limit.coerceIn(1, 200).toString())
-            .addQueryParameter("offset", "0")
+            .addQueryParameter("offset", offset.coerceAtLeast(0).toString())
             .build()
         val data = executeJson(host, request(host, url))
-        data.optJSONArray("data").toObjectList(::parseSession)
+        val rows = data.optJSONArray("data")
+            ?: throw HermesApiException(200, "Hermes returned an unexpected session list shape.")
+        HermesSessionPage(
+            sessions = rows.toObjectList(::parseSession),
+            hasMore = data.optBoolean("has_more", false),
+        )
     }
 
     override suspend fun createSession(host: HostProfile, title: String?): HermesSession = withContext(Dispatchers.IO) {
@@ -71,6 +81,16 @@ class HermesHttpGateway(
         data.optJSONArray("data").toObjectList(::parseMessage)
     }
 
+    override suspend fun renameSession(host: HostProfile, sessionId: String, title: String): Unit = withContext(Dispatchers.IO) {
+        executeIgnoringBody(
+            request(host, endpoint(host, "api", "sessions", sessionId), method = "PATCH", body = JSONObject().put("title", title.trim())),
+        )
+    }
+
+    override suspend fun deleteSession(host: HostProfile, sessionId: String): Unit = withContext(Dispatchers.IO) {
+        executeIgnoringBody(request(host, endpoint(host, "api", "sessions", sessionId), method = "DELETE"))
+    }
+
     override suspend fun listJobs(host: HostProfile): List<HermesJob> = withContext(Dispatchers.IO) {
         val url = endpoint(host, "api", "jobs").newBuilder()
             .addQueryParameter("include_disabled", "true")
@@ -87,6 +107,24 @@ class HermesHttpGateway(
         }
     }
 
+    override suspend fun setJobEnabled(host: HostProfile, jobId: String, enabled: Boolean): Unit = withContext(Dispatchers.IO) {
+        val action = if (enabled) "resume" else "pause"
+        executeIgnoringBody(request(host, endpoint(host, "api", "jobs", jobId, action), method = "POST"))
+    }
+
+    override suspend fun runJob(host: HostProfile, jobId: String): Unit = withContext(Dispatchers.IO) {
+        executeIgnoringBody(request(host, endpoint(host, "api", "jobs", jobId, "run"), method = "POST"))
+    }
+
+    override suspend fun stopRun(host: HostProfile, runId: String): Unit = withContext(Dispatchers.IO) {
+        executeIgnoringBody(request(host, endpoint(host, "v1", "runs", runId, "stop"), method = "POST"))
+    }
+
+    override suspend fun resolveApproval(host: HostProfile, runId: String, approvalId: String, approve: Boolean): Unit = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("approval_id", approvalId).put("decision", approve)
+        executeIgnoringBody(request(host, endpoint(host, "v1", "runs", runId, "approval"), method = "POST", body = body))
+    }
+
     override suspend fun streamSessionChat(
         host: HostProfile,
         sessionId: String,
@@ -100,30 +138,45 @@ class HermesHttpGateway(
             method = "POST",
             body = body,
         )
-        client.newCall(request).execute().use { response ->
-            ensureSuccessful(response)
-            val source = response.body?.source() ?: throw HermesApiException(response.code, "Hermes returned an empty stream.")
-            var eventName: String? = null
-            val dataLines = mutableListOf<String>()
+        val call = client.newCall(request)
+        // Blocking socket reads ignore coroutine cancellation; cancel the call so
+        // the read throws and the coroutine can actually exit.
+        val cancelHandle = coroutineContext.job.invokeOnCompletion { cause ->
+            if (cause != null) call.cancel()
+        }
+        try {
+            call.execute().use { response ->
+                ensureSuccessful(response)
+                val source = response.body?.source() ?: throw HermesApiException(response.code, "Hermes returned an empty stream.")
+                var eventName: String? = null
+                val dataLines = mutableListOf<String>()
 
-            fun dispatch() {
-                val name = eventName ?: return
-                val payloadText = dataLines.joinToString("\n").ifBlank { "{}" }
-                val payload = runCatching { JSONObject(payloadText) }.getOrElse { JSONObject() }
-                onEvent(parseStreamEvent(name, payload))
-                eventName = null
-                dataLines.clear()
-            }
-
-            while (!source.exhausted()) {
-                val line = source.readUtf8Line() ?: break
-                when {
-                    line.isBlank() -> dispatch()
-                    line.startsWith("event:") -> eventName = line.substringAfter(':').trim()
-                    line.startsWith("data:") -> dataLines += line.substringAfter(':').trimStart()
+                fun dispatch() {
+                    val name = eventName ?: return
+                    val payloadText = dataLines.joinToString("\n").ifBlank { "{}" }
+                    val payload = runCatching { JSONObject(payloadText) }.getOrNull()
+                    if (payload == null) {
+                        onEvent(HermesStreamEvent.Failed("Hermes sent an unreadable stream chunk; the reply may be incomplete."))
+                    } else {
+                        onEvent(parseStreamEvent(name, payload))
+                    }
+                    eventName = null
+                    dataLines.clear()
                 }
+
+                while (!source.exhausted()) {
+                    coroutineContext.ensureActive()
+                    val line = source.readUtf8Line() ?: break
+                    when {
+                        line.isBlank() -> dispatch()
+                        line.startsWith("event:") -> eventName = line.substringAfter(':').trim()
+                        line.startsWith("data:") -> dataLines += line.substringAfter(':').trimStart()
+                    }
+                }
+                dispatch()
             }
-            dispatch()
+        } finally {
+            cancelHandle.dispose()
         }
     }
 
@@ -143,13 +196,19 @@ class HermesHttpGateway(
             payload.optNullableString("preview"),
             failed = true,
         )
+        "approval.request" -> HermesStreamEvent.ApprovalRequested(
+            approvalId = payload.optNullableString("approval_id") ?: "",
+            toolName = payload.optNullableString("tool_name"),
+            message = payload.optNullableString("message"),
+            runId = payload.optNullableString("run_id"),
+        )
         "assistant.completed" -> HermesStreamEvent.Completed(
             payload.optString("content"),
             payload.optNullableString("session_id"),
         )
         "error" -> HermesStreamEvent.Failed(payload.optString("message", "Hermes stream failed."))
-        "done" -> HermesStreamEvent.Done
-        else -> HermesStreamEvent.Done
+        "done", "run.completed" -> HermesStreamEvent.Done
+        else -> HermesStreamEvent.Unknown(name)
     }
 
     private fun request(
@@ -171,8 +230,11 @@ class HermesHttpGateway(
             .header("Authorization", "Bearer ${validated.apiKey}")
             .header("Accept", if (method == "POST" && url.encodedPath.endsWith("/stream")) "text/event-stream" else "application/json")
             .header("X-Hermes-Session-Key", "hermes-mobile:${validated.id}")
-        if (method == "GET") builder.get()
-        else builder.method(method, (body ?: JSONObject()).toString().toRequestBody(jsonMediaType))
+        when {
+            method == "GET" -> builder.get()
+            method == "DELETE" && body == null -> builder.delete()
+            else -> builder.method(method, (body ?: JSONObject()).toString().toRequestBody(jsonMediaType))
+        }
         return builder.build()
     }
 
@@ -188,6 +250,10 @@ class HermesHttpGateway(
                 throw HermesApiException(response.code, "Hermes returned an unreadable response.")
             }
         }
+    }
+
+    private fun executeIgnoringBody(request: Request) {
+        client.newCall(request).execute().use(::ensureSuccessful)
     }
 
     private fun ensureSuccessful(response: Response) {
@@ -223,11 +289,13 @@ class HermesHttpGateway(
     )
 }
 
+/** Maps each object row via [transform]; malformed rows are skipped instead of failing the whole list. */
 private inline fun <T> JSONArray?.toObjectList(transform: (JSONObject) -> T): List<T> {
     if (this == null) return emptyList()
     return buildList {
         for (index in 0 until length()) {
-            optJSONObject(index)?.let { add(transform(it)) }
+            val row = optJSONObject(index) ?: continue
+            runCatching { transform(row) }.getOrNull()?.let(::add)
         }
     }
 }
