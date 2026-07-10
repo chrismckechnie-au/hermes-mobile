@@ -13,45 +13,40 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+data class HostLoadResult(
+    val snapshot: HostSnapshot,
+    val unlockFailed: Boolean = false,
+)
+
 interface HostStore {
-    fun load(): HostSnapshot
+    fun load(): HostLoadResult
     fun save(snapshot: HostSnapshot)
 }
 
-class SecureHostStore(context: Context) : HostStore {
-    private val preferences = context.getSharedPreferences("hermes_mobile_secure_hosts", Context.MODE_PRIVATE)
-    private val alias = "hermes-mobile-hosts-v1"
+/** Pure JSON codec for [HostSnapshot], kept crypto-free so it is unit-testable. */
+object HostSnapshotCodec {
+    fun encode(snapshot: HostSnapshot): String = JSONObject().apply {
+        put("selectedHostId", snapshot.selectedHostId ?: JSONObject.NULL)
+        put("hosts", JSONArray().apply {
+            snapshot.hosts.forEach { host ->
+                put(JSONObject().apply {
+                    put("id", host.id)
+                    put("name", host.name)
+                    put("baseUrl", host.baseUrl)
+                    put("apiKey", host.apiKey)
+                    put("allowInsecureHttp", host.allowInsecureHttp)
+                })
+            }
+        })
+    }.toString()
 
-    override fun load(): HostSnapshot {
-        val payload = preferences.getString("encrypted_snapshot", null) ?: return HostSnapshot()
-        return runCatching { decodeSnapshot(decrypt(payload)) }.getOrElse { HostSnapshot() }
-    }
-
-    override fun save(snapshot: HostSnapshot) {
-        val json = JSONObject().apply {
-            put("selectedHostId", snapshot.selectedHostId ?: JSONObject.NULL)
-            put("hosts", JSONArray().apply {
-                snapshot.hosts.forEach { host ->
-                    put(JSONObject().apply {
-                        put("id", host.id)
-                        put("name", host.name)
-                        put("baseUrl", host.baseUrl)
-                        put("apiKey", host.apiKey)
-                        put("allowInsecureHttp", host.allowInsecureHttp)
-                    })
-                }
-            })
-        }
-        preferences.edit().putString("encrypted_snapshot", encrypt(json.toString())).apply()
-    }
-
-    private fun decodeSnapshot(raw: String): HostSnapshot {
+    fun decode(raw: String): HostSnapshot {
         val json = JSONObject(raw)
         val hostsJson = json.optJSONArray("hosts") ?: JSONArray()
         val hosts = buildList {
             for (index in 0 until hostsJson.length()) {
                 val item = hostsJson.optJSONObject(index) ?: continue
-                add(
+                runCatching {
                     HostProfile(
                         id = item.getString("id"),
                         name = item.getString("name"),
@@ -59,11 +54,26 @@ class SecureHostStore(context: Context) : HostStore {
                         apiKey = item.getString("apiKey"),
                         allowInsecureHttp = item.optBoolean("allowInsecureHttp", false),
                     )
-                )
+                }.getOrNull()?.let(::add)
             }
         }
         val selected = json.opt("selectedHostId")?.takeUnless { it == JSONObject.NULL }?.toString()
         return HostSnapshot(hosts = hosts, selectedHostId = selected)
+    }
+}
+
+class SecureHostStore(context: Context) : HostStore {
+    private val preferences = context.getSharedPreferences("hermes_mobile_secure_hosts", Context.MODE_PRIVATE)
+    private val alias = "hermes-mobile-hosts-v1"
+
+    override fun load(): HostLoadResult {
+        val payload = preferences.getString("encrypted_snapshot", null) ?: return HostLoadResult(HostSnapshot())
+        return runCatching { HostLoadResult(HostSnapshotCodec.decode(decrypt(payload))) }
+            .getOrElse { HostLoadResult(HostSnapshot(), unlockFailed = true) }
+    }
+
+    override fun save(snapshot: HostSnapshot) {
+        preferences.edit().putString("encrypted_snapshot", encrypt(HostSnapshotCodec.encode(snapshot))).apply()
     }
 
     private fun encrypt(plainText: String): String {

@@ -7,26 +7,35 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 ## Implemented
 
 - Native Command Deck interface for Android
-- Multiple saved Hermes hosts with quick switching
-- HTTPS by default, with explicit opt-in for private-network HTTP
-- API keys encrypted at rest with Android Keystore (AES-GCM)
+- Multiple saved Hermes hosts with quick switching, editing, and confirmed deletion
+- HTTPS by default, with explicit opt-in for private-network HTTP; scheme-downgrade redirects are refused
+- API keys encrypted at rest with Android Keystore (AES-GCM); unlock failures surface a notice instead of silently wiping hosts
 - Capability discovery and authenticated connection status
-- Session listing, creation, history loading, and selection
-- Streaming chat over Server-Sent Events
+- Session listing with pagination (`has_more`), pull-to-refresh, creation, rename, delete, history loading, and selection
+- Streaming chat over Server-Sent Events with stop/cancel for in-flight runs
+- Markdown rendering of assistant replies (code blocks with copy, headings, bullets, bold/italic/inline code, links)
 - Live assistant deltas and structured tool start/completion cards
-- Scheduled job listing
+- Tool-run approval cards (`approval.request` → approve/deny via `POST /v1/runs/{id}/approval`)
+- Scheduled job listing with pause/resume and run-now
 - Connected, connecting, empty, authentication-error, network-error, and retry states
+
+Not implemented (host support required): push notifications for job results, file upload (the Hermes API server currently rejects file content with `400 unsupported_content_type`). Note: current hermes-agent releases emit `approval.request` on `/v1/runs/{id}/events` streams; the session chat stream handler processes the event whenever the host sends it there too.
 
 ## Hermes API endpoints
 
 The client uses Hermes' supported HTTP surface:
 
 - `GET /v1/capabilities`
-- `GET /api/sessions`
+- `GET /api/sessions` (with `limit`/`offset` pagination)
 - `POST /api/sessions`
+- `PATCH /api/sessions/{id}` (rename)
+- `DELETE /api/sessions/{id}`
 - `GET /api/sessions/{id}/messages`
 - `POST /api/sessions/{id}/chat/stream`
 - `GET /api/jobs`
+- `POST /api/jobs/{id}/pause` / `POST /api/jobs/{id}/resume` / `POST /api/jobs/{id}/run`
+- `POST /v1/runs/{id}/stop`
+- `POST /v1/runs/{id}/approval`
 
 Every request uses `Authorization: Bearer <API_SERVER_KEY>`.
 
@@ -57,7 +66,7 @@ In Hermes Mobile, choose **Add a host** and enter:
 - the matching `API_SERVER_KEY`
 - private-network HTTP opt-in only when the connection is protected by a trusted LAN/VPN
 
-Entering a URL ending in `/v1` is also supported; the client normalizes it to the server root.
+Entering a URL ending in `/v1` is also supported; the client normalizes it to the server root. When editing a saved host, leave the API key blank to keep the stored key.
 
 ## Build
 
@@ -79,7 +88,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## Contract verification host
 
-`scripts/mock_hermes_host.py` is a local, contract-faithful fixture for emulator QA. It listens on port `8766` by default and accepts the test-only bearer key `test-key`.
+`scripts/mock_hermes_host.py` is a local, contract-faithful fixture for emulator QA. It listens on port `8766` by default and accepts the test-only bearer key `test-key`. Send a chat message containing the word "approve" to exercise the tool-approval card.
 
 ```bash
 python3 scripts/mock_hermes_host.py

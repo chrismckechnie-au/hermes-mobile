@@ -59,6 +59,11 @@ data class HermesSession(
     val messageCount: Int?,
 )
 
+data class HermesSessionPage(
+    val sessions: List<HermesSession>,
+    val hasMore: Boolean,
+)
+
 data class HermesMessage(
     val id: String?,
     val role: String,
@@ -80,8 +85,15 @@ sealed interface HermesStreamEvent {
     data class AssistantDelta(val text: String) : HermesStreamEvent
     data class ToolStarted(val toolName: String, val preview: String?) : HermesStreamEvent
     data class ToolCompleted(val toolName: String, val preview: String?, val failed: Boolean = false) : HermesStreamEvent
+    data class ApprovalRequested(
+        val approvalId: String,
+        val toolName: String?,
+        val message: String?,
+        val runId: String?,
+    ) : HermesStreamEvent
     data class Completed(val content: String, val sessionId: String?) : HermesStreamEvent
     data class Failed(val message: String) : HermesStreamEvent
+    data class Unknown(val name: String) : HermesStreamEvent
     data object Done : HermesStreamEvent
 }
 
@@ -92,10 +104,16 @@ class HermesApiException(
 
 interface HermesGateway {
     suspend fun probe(host: HostProfile): HermesCapabilities
-    suspend fun listSessions(host: HostProfile, limit: Int = 50): List<HermesSession>
+    suspend fun listSessions(host: HostProfile, limit: Int = 50, offset: Int = 0): HermesSessionPage
     suspend fun createSession(host: HostProfile, title: String? = null): HermesSession
     suspend fun loadMessages(host: HostProfile, sessionId: String): List<HermesMessage>
+    suspend fun renameSession(host: HostProfile, sessionId: String, title: String)
+    suspend fun deleteSession(host: HostProfile, sessionId: String)
     suspend fun listJobs(host: HostProfile): List<HermesJob>
+    suspend fun setJobEnabled(host: HostProfile, jobId: String, enabled: Boolean)
+    suspend fun runJob(host: HostProfile, jobId: String)
+    suspend fun stopRun(host: HostProfile, runId: String)
+    suspend fun resolveApproval(host: HostProfile, runId: String, approvalId: String, approve: Boolean)
     suspend fun streamSessionChat(
         host: HostProfile,
         sessionId: String,
