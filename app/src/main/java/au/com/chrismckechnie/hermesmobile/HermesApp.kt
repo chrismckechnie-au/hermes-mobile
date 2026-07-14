@@ -691,21 +691,33 @@ private fun inlineAnnotated(text: String): AnnotatedString {
 @Composable
 private fun LiveToolCard(item: ChatUiItem.Tool) {
     Card(
-        modifier = Modifier.padding(start = 39.dp).fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(T.RadiusCard),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow),
         border = BorderStroke(1.dp, if (item.failed) T.Error.copy(alpha = 0.3f) else T.Line),
     ) {
-        Row(Modifier.padding(11.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(33.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Tool.copy(alpha = 0.08f)), contentAlignment = Alignment.Center) {
-                Icon(Lucide.Terminal, null, tint = if (item.failed) T.Error else T.Tool, modifier = Modifier.size(17.dp))
+        Row(
+            Modifier.padding(horizontal = 9.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier.size(27.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Tool.copy(alpha = 0.08f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Lucide.Terminal, null, tint = if (item.failed) T.Error else T.Tool, modifier = Modifier.size(14.dp))
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(8.dp))
             Column(Modifier.weight(1f)) {
-                Text(item.name, style = T.Label)
-                Text(item.preview ?: if (item.running) "Running…" else "Completed", style = T.MonoSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(item.name, style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    item.preview ?: if (item.running) "Running…" else "Completed",
+                    style = T.MonoSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-            if (item.running) CircularProgressIndicator(modifier = Modifier.size(15.dp), strokeWidth = 1.5.dp, color = T.Tool)
+            Spacer(Modifier.width(7.dp))
+            if (item.running) CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
             else Text(if (item.failed) "FAILED" else "DONE", style = T.MicroBold.copy(color = if (item.failed) T.Error else T.Cream))
         }
     }
