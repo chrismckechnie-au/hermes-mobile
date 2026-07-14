@@ -127,6 +127,7 @@ class HermesHttpGateway(
         val data = executeJson(host, request(host, listOf("v1", "models")))
         data.optJSONArray("data").toObjectList { json -> json.optString("id") }
             .filter { it.isNotBlank() }
+            .distinct()
     }
 
     override suspend fun submitRun(

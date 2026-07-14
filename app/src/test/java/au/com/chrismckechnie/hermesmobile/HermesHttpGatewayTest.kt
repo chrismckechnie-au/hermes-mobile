@@ -98,15 +98,24 @@ class HermesHttpGatewayTest {
     }
 
     @Test
-    fun `listModels returns model ids`() = runBlocking {
+    fun `listModels returns every unique model id advertised by the host`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
-            {"object":"list","data":[{"id":"hermes-agent","root":"hermes-agent","parent":null},{"id":"hermes-fast","root":"hermes-4-8b","parent":"hermes-agent"}]}
+            {"object":"list","data":[
+              {"id":"hermes-agent","root":"hermes-agent","parent":null},
+              {"id":"gpt-5.6-sol","provider":"openai-codex","parent":"hermes-agent"},
+              {"id":"gpt-5.6-terra","provider":"openai-codex","parent":"hermes-agent"},
+              {"id":"gpt-5.6-luna","provider":"openai-codex","parent":"hermes-agent"},
+              {"id":"gpt-5.6-terra","provider":"opencode-zen","parent":"hermes-agent"}
+            ]}
         """.trimIndent()))
 
         val models = gateway.listModels(profile)
 
         assertEquals("/v1/models", server.takeRequest().path)
-        assertEquals(listOf("hermes-agent", "hermes-fast"), models)
+        assertEquals(
+            listOf("hermes-agent", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+            models,
+        )
     }
 
     @Test

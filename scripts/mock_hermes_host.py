@@ -119,8 +119,10 @@ class Handler(BaseHTTPRequestHandler):
             now = int(time.time())
             self._json(200, {"object": "list", "data": [
                 {"id": "hermes-agent", "object": "model", "created": now, "owned_by": "hermes", "root": "hermes-agent", "parent": None},
-                {"id": "hermes-fast", "object": "model", "created": now, "owned_by": "hermes", "root": "hermes-4-8b", "parent": "hermes-agent"},
-                {"id": "hermes-deep", "object": "model", "created": now, "owned_by": "hermes", "root": "hermes-4-405b", "parent": "hermes-agent"},
+                {"id": "gpt-5.6-sol", "object": "model", "created": now, "owned_by": "hermes", "provider": "openai-codex", "root": "gpt-5.6-sol", "parent": "hermes-agent"},
+                {"id": "gpt-5.6-terra", "object": "model", "created": now, "owned_by": "hermes", "provider": "openai-codex", "root": "gpt-5.6-terra", "parent": "hermes-agent"},
+                {"id": "gpt-5.6-luna", "object": "model", "created": now, "owned_by": "hermes", "provider": "openai-codex", "root": "gpt-5.6-luna", "parent": "hermes-agent"},
+                {"id": "claude-fable-5", "object": "model", "created": now, "owned_by": "hermes", "provider": "opencode-zen", "root": "claude-fable-5", "parent": "hermes-agent"},
             ]})
         elif path == "/api/sessions":
             self._json(200, {"object": "list", "data": SESSIONS, "limit": 50, "offset": 0, "has_more": False})

@@ -35,7 +35,7 @@ private class FakeGateway : HermesGateway {
     )
     val resolvedIds = mutableMapOf<String, String>()
     var skills = listOf(HermesSkill("grill-me", "A relentless interview"))
-    var models = listOf("hermes-agent", "hermes-fast")
+    var models = listOf("hermes-agent", "hermes-fast", "gpt-5.6-terra")
     var events = Channel<HermesRunEvent>(Channel.UNLIMITED)
     var runStatus = HermesRunStatus("run-1", "completed")
     var submitError: Throwable? = null
@@ -181,7 +181,7 @@ class HermesViewModelTest {
         assertTrue(state.capabilities!!.supportsRuns)
         assertEquals(listOf("s1"), state.sessions.map { it.id })
         assertEquals(listOf("grill-me"), state.skills.map { it.name })
-        assertEquals(listOf("hermes-agent", "hermes-fast"), state.models)
+        assertEquals(listOf("hermes-agent", "hermes-fast", "gpt-5.6-terra"), state.models)
     }
 
     @Test
