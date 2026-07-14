@@ -230,6 +230,33 @@ class HermesHttpGatewayTest {
     }
 
     @Test
+    fun `lists active sessions for overlays`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""
+            {"object":"list","active_count":1,"data":[{"session_id":"session-1","run_id":"run-1","title":"Background work","state":"running","surface":"api_server"}]}
+        """.trimIndent()))
+
+        val sessions = gateway.listActiveSessions(profile)
+
+        assertEquals("/v1/active-sessions", server.takeRequest().path)
+        assertEquals("Background work", sessions.single().title)
+    }
+
+    @Test
+    fun `registers device with host local profile routing`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+
+        gateway.registerMobileDevice(profile, "install-1", "token-1", "0.2.0", overlayEnabled = true)
+        val request = server.takeRequest()
+        val body = JSONObject(request.body.readUtf8())
+
+        assertEquals("PUT", request.method)
+        assertEquals("/v1/mobile/devices/install-1", request.path)
+        assertEquals("host-1", body.getString("host_profile_id"))
+        assertEquals("token-1", body.getString("fid"))
+        assertTrue(body.getJSONObject("capabilities").getBoolean("overlay"))
+    }
+
+    @Test
     fun `respondApproval posts the choice`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""{"object":"hermes.run.approval_response","run_id":"run-1","choice":"once","resolved":1}"""))
 

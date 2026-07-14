@@ -226,6 +226,43 @@ class HermesHttpGateway(
         )
     }
 
+    override suspend fun listActiveSessions(host: HostProfile): List<HermesActiveSession> = withContext(Dispatchers.IO) {
+        val data = executeJson(host, request(host, listOf("v1", "active-sessions")))
+        data.optJSONArray("data").toObjectList { json ->
+            HermesActiveSession(
+                sessionId = json.optString("session_id"),
+                runId = json.optNullableString("run_id"),
+                title = json.optString("title", "Hermes session"),
+                state = json.optString("state", "active"),
+                surface = json.optString("surface", "unknown"),
+            )
+        }.filter { it.sessionId.isNotBlank() }
+    }
+
+    override suspend fun registerMobileDevice(
+        host: HostProfile,
+        installationId: String,
+        token: String,
+        appVersion: String,
+        overlayEnabled: Boolean,
+    ) = withContext(Dispatchers.IO) {
+        val body = JSONObject().apply {
+            put("fid", token)
+            put("host_profile_id", host.id)
+            put("app_version", appVersion)
+            put("capabilities", JSONObject().apply {
+                put("notifications", true)
+                put("bubbles", true)
+                put("overlay", overlayEnabled)
+            })
+        }
+        executeIgnoringBody(request(host, endpoint(host, "v1", "mobile", "devices", installationId), method = "PUT", body = body))
+    }
+
+    override suspend fun unregisterMobileDevice(host: HostProfile, installationId: String) = withContext(Dispatchers.IO) {
+        executeIgnoringBody(request(host, endpoint(host, "v1", "mobile", "devices", installationId), method = "DELETE"))
+    }
+
     override suspend fun respondApproval(host: HostProfile, runId: String, choice: String) {
         withContext(Dispatchers.IO) {
             executeJson(

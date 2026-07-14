@@ -42,6 +42,7 @@ private class FakeGateway : HermesGateway {
     val submits = mutableListOf<SubmitCall>()
     val approvals = mutableListOf<String>()
     val stops = mutableListOf<String>()
+    val statusRequests = mutableListOf<String>()
     val renames = mutableListOf<Pair<String, String>>()
     val deletes = mutableListOf<String>()
     val forks = mutableListOf<String>()
@@ -83,7 +84,10 @@ private class FakeGateway : HermesGateway {
         for (event in events) onEvent(event)
     }
 
-    override suspend fun getRunStatus(host: HostProfile, runId: String) = runStatus
+    override suspend fun getRunStatus(host: HostProfile, runId: String): HermesRunStatus {
+        statusRequests += runId
+        return runStatus
+    }
     override suspend fun respondApproval(host: HostProfile, runId: String, choice: String) { approvals += choice }
     override suspend fun stopRun(host: HostProfile, runId: String) { stops += runId }
 
@@ -118,11 +122,15 @@ private class FakeHostStore(
 
 private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsStore {
     var savedMode: ThemeMode? = null
+    var checkpoint: RunCheckpoint? = null
 
     override fun loadThemeMode(): ThemeMode = initialMode
     override fun saveThemeMode(mode: ThemeMode) {
         savedMode = mode
     }
+    override fun loadRunCheckpoint(): RunCheckpoint? = checkpoint
+    override fun saveRunCheckpoint(checkpoint: RunCheckpoint) { this.checkpoint = checkpoint }
+    override fun clearRunCheckpoint() { checkpoint = null }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -356,6 +364,40 @@ class HermesViewModelTest {
         gateway.events.close()
         advanceUntilIdle()
         assertNull(viewModel.state.value.activeRun)
+    }
+
+    @Test
+    fun `run checkpoint is durable until the host reports terminal`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System)
+        val (viewModel, gateway) = buildViewModel(settingsStore = settings)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+
+        viewModel.setComposerText("continue after the phone closes")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals(RunCheckpoint("h1", "s1", "run-1"), settings.checkpoint)
+        gateway.events.send(HermesRunEvent.Completed("done"))
+        gateway.events.close()
+        advanceUntilIdle()
+        assertNull(settings.checkpoint)
+    }
+
+    @Test
+    fun `durable checkpoint reconciles after Android process recreation`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System).apply {
+            checkpoint = RunCheckpoint("h1", "s1", "run-recovered")
+        }
+        val gateway = FakeGateway().apply {
+            runStatus = HermesRunStatus("run-recovered", "completed")
+        }
+
+        val (viewModel, _) = buildViewModel(gateway = gateway, settingsStore = settings)
+
+        assertEquals(listOf("run-recovered"), gateway.statusRequests)
+        assertNull(viewModel.state.value.activeRun)
+        assertNull(settings.checkpoint)
     }
 
     @Test

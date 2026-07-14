@@ -26,15 +26,41 @@ enum class ThemeMode { System, Dark, Light }
 interface SettingsStore {
     fun loadThemeMode(): ThemeMode
     fun saveThemeMode(mode: ThemeMode)
+    fun loadRunCheckpoint(): RunCheckpoint? = null
+    fun saveRunCheckpoint(checkpoint: RunCheckpoint) = Unit
+    fun clearRunCheckpoint() = Unit
+    fun loadNotificationHostIds(): Set<String> = emptySet()
+    fun saveNotificationHostIds(hostIds: Set<String>) = Unit
+    fun loadOverlayEnabled(): Boolean = false
+    fun saveOverlayEnabled(enabled: Boolean) = Unit
+    fun loadInstallationId(): String? = null
+    fun getOrCreateInstallationId(): String = UUID.randomUUID().toString()
 }
 
 private class InMemorySettingsStore : SettingsStore {
     private var mode = ThemeMode.System
+    private var checkpoint: RunCheckpoint? = null
+    private var notificationHosts = emptySet<String>()
+    private var overlay = false
     override fun loadThemeMode(): ThemeMode = mode
     override fun saveThemeMode(mode: ThemeMode) {
         this.mode = mode
     }
+    override fun loadRunCheckpoint(): RunCheckpoint? = checkpoint
+    override fun saveRunCheckpoint(checkpoint: RunCheckpoint) { this.checkpoint = checkpoint }
+    override fun clearRunCheckpoint() { checkpoint = null }
+    override fun loadNotificationHostIds(): Set<String> = notificationHosts
+    override fun saveNotificationHostIds(hostIds: Set<String>) { notificationHosts = hostIds }
+    override fun loadOverlayEnabled(): Boolean = overlay
+    override fun saveOverlayEnabled(enabled: Boolean) { overlay = enabled }
 }
+
+/** Durable, non-secret coordinates used to reconnect to a host-owned run. */
+data class RunCheckpoint(
+    val hostId: String,
+    val sessionId: String,
+    val runId: String,
+)
 
 sealed interface ChatUiItem {
     val id: String
@@ -139,6 +165,8 @@ data class HermesUiState(
     val confirmDeleteSessionId: String? = null,
     val errorMessage: String? = null,
     val themeMode: ThemeMode = ThemeMode.System,
+    val notificationHostIds: Set<String> = emptySet(),
+    val overlayEnabled: Boolean = false,
 ) {
     val activeHost: HostProfile? get() = hosts.firstOrNull { it.id == activeHostId }
     val activeSession: HermesSession? get() = sessions.firstOrNull { it.id == activeSessionId }
@@ -190,6 +218,8 @@ class HermesViewModel(
             showHostPicker = snapshot.hosts.isEmpty(),
             connectionPhase = if (selected == null) HostConnectionPhase.NoHost else HostConnectionPhase.Connecting,
             themeMode = settingsStore.loadThemeMode(),
+            notificationHostIds = settingsStore.loadNotificationHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
+            overlayEnabled = settingsStore.loadOverlayEnabled(),
             errorMessage = if (loadResult.unlockFailed) {
                 "Saved hosts could not be unlocked on this device (Keystore key changed). Re-add your host and API key."
             } else null,
@@ -203,8 +233,38 @@ class HermesViewModel(
         mutableState.update { it.copy(themeMode = mode) }
     }
 
+    fun setHostNotificationsEnabled(hostId: String, enabled: Boolean) {
+        val ids = mutableState.value.notificationHostIds.toMutableSet().apply {
+            if (enabled) add(hostId) else remove(hostId)
+        }
+        settingsStore.saveNotificationHostIds(ids)
+        mutableState.update { it.copy(notificationHostIds = ids) }
+    }
+
+    fun setOverlayEnabled(enabled: Boolean) {
+        settingsStore.saveOverlayEnabled(enabled)
+        mutableState.update { it.copy(overlayEnabled = enabled) }
+    }
+
     fun selectScreen(screen: DeckScreen) {
         mutableState.update { it.copy(screen = screen) }
+    }
+
+    fun openSessionFromNotification(hostId: String, sessionId: String) {
+        val host = mutableState.value.hosts.firstOrNull { it.id == hostId } ?: return
+        if (mutableState.value.activeHostId != hostId) {
+            mutableState.update {
+                it.copy(activeHostId = hostId, screen = DeckScreen.Chat, activeSessionId = sessionId, messages = emptyList())
+            }
+            connect(hostId)
+        } else {
+            mutableState.update { it.copy(screen = DeckScreen.Chat, activeSessionId = sessionId) }
+        }
+        viewModelScope.launch {
+            runCatching { gateway.loadMessages(host, sessionId) }
+                .onSuccess { applyLoadedMessages(sessionId, it) }
+                .onFailure(::showFailure)
+        }
     }
 
     fun setComposerText(value: String) {
@@ -306,7 +366,18 @@ class HermesViewModel(
             mutableState.update { it.copy(errorMessage = "A run is active on this host. Stop it before deleting the host.") }
             return
         }
+        val removedHost = mutableState.value.hosts.firstOrNull { it.id == hostId }
+        if (removedHost != null && hostId in mutableState.value.notificationHostIds) {
+            settingsStore.loadInstallationId()?.let { installationId ->
+                viewModelScope.launch {
+                    runCatching { gateway.unregisterMobileDevice(removedHost, installationId) }
+                }
+            }
+        }
         val hosts = mutableState.value.hosts.filterNot { it.id == hostId }
+        val notificationHostIds = mutableState.value.notificationHostIds - hostId
+        settingsStore.saveNotificationHostIds(notificationHostIds)
+        if (notificationHostIds.isEmpty()) settingsStore.saveOverlayEnabled(false)
         val selected = mutableState.value.activeHostId?.takeIf { it != hostId && hosts.any { host -> host.id == it } }
             ?: hosts.firstOrNull()?.id
         persist(HostSnapshot(hosts, selected))
@@ -317,6 +388,7 @@ class HermesViewModel(
                     hosts = hosts,
                     editingHostId = state.editingHostId?.takeIf { it != hostId },
                     showHostPicker = hosts.isEmpty(),
+                    notificationHostIds = notificationHostIds,
                 )
             } else {
                 HermesUiState(
@@ -325,6 +397,8 @@ class HermesViewModel(
                     showHostPicker = hosts.isEmpty(),
                     connectionPhase = if (selected == null) HostConnectionPhase.NoHost else HostConnectionPhase.Connecting,
                     themeMode = state.themeMode,
+                    notificationHostIds = notificationHostIds,
+                    overlayEnabled = state.overlayEnabled && notificationHostIds.isNotEmpty(),
                 )
             }
         }
@@ -610,16 +684,7 @@ class HermesViewModel(
 
         if (!terminal.get()) {
             logRun("run stream ended without terminal event runId=${run.runId}; polling")
-            if (!pollUntilTerminal(run)) {
-                mutableState.update { state ->
-                    if (state.activeRun?.runId != run.runId) state
-                    else state.copy(
-                        activeRun = state.activeRun.copy(approvalDetailsLost = true),
-                        errorMessage = "Run state is unknown. Approve or inspect it on the host, or stop the run.",
-                    )
-                }
-                return
-            }
+            if (!pollUntilTerminal(run)) return
         }
         finalizeRun(run)
     }
@@ -687,15 +752,18 @@ class HermesViewModel(
         else run.tail.subList(0, index) + item + run.tail.subList(index, run.tail.size)
     }
 
-    /** Bounded-backoff status polling. Returns true when the Run reached a terminal state. */
+    /** Capped-backoff status polling. Returns true when the Run reached a terminal state. */
     private suspend fun pollUntilTerminal(run: ActiveRun): Boolean {
         var delayMs = 2_000L
-        var waited = 0L
-        while (waited < 120_000L) {
+        // The run belongs to the host, not the Activity. Keep reconciling when
+        // Android backgrounds the UI; durable coordinates restore this loop
+        // after process death.
+        while (mutableState.value.activeRun?.runId == run.runId) {
             delay(delayMs)
-            waited += delayMs
             delayMs = (delayMs * 2).coerceAtMost(30_000L)
-            val status = runCatching { gateway.getRunStatus(run.host, run.runId) }.getOrNull() ?: continue
+            val result = runCatching { gateway.getRunStatus(run.host, run.runId) }
+            if ((result.exceptionOrNull() as? HermesApiException)?.statusCode == 404) return true
+            val status = result.getOrNull() ?: continue
             logRun("run status runId=${run.runId} status=${status.status}")
             if (status.isTerminal) return true
             if (status.isWaitingForApproval) {
@@ -951,9 +1019,10 @@ class HermesViewModel(
     }
 
     private fun recoverRunAfterProcessDeath(snapshot: HostSnapshot) {
-        val hostId = savedState.get<String>(KEY_RUN_HOST) ?: return
-        val sessionId = savedState.get<String>(KEY_RUN_SESSION) ?: return
-        val runId = savedState.get<String>(KEY_RUN_ID) ?: return
+        val durable = settingsStore.loadRunCheckpoint()
+        val hostId = durable?.hostId ?: savedState.get<String>(KEY_RUN_HOST) ?: return
+        val sessionId = durable?.sessionId ?: savedState.get<String>(KEY_RUN_SESSION) ?: return
+        val runId = durable?.runId ?: savedState.get<String>(KEY_RUN_ID) ?: return
         val host = snapshot.hosts.firstOrNull { it.id == hostId }
         if (host == null) {
             clearRunCoordinates()
@@ -972,8 +1041,9 @@ class HermesViewModel(
         )
         mutableState.update { it.copy(activeRun = run) }
         viewModelScope.launch {
-            val status = runCatching { gateway.getRunStatus(host, runId) }.getOrNull()
-            if (status == null || status.isTerminal) {
+            val result = runCatching { gateway.getRunStatus(host, runId) }
+            val status = result.getOrNull()
+            if (status?.isTerminal == true || (result.exceptionOrNull() as? HermesApiException)?.statusCode == 404) {
                 finalizeRun(run)
                 return@launch
             }
@@ -985,12 +1055,14 @@ class HermesViewModel(
         savedState[KEY_RUN_HOST] = run.host.id
         savedState[KEY_RUN_SESSION] = run.sessionId
         savedState[KEY_RUN_ID] = run.runId
+        settingsStore.saveRunCheckpoint(RunCheckpoint(run.host.id, run.sessionId, run.runId))
     }
 
     private fun clearRunCoordinates() {
         savedState.remove<String>(KEY_RUN_HOST)
         savedState.remove<String>(KEY_RUN_SESSION)
         savedState.remove<String>(KEY_RUN_ID)
+        settingsStore.clearRunCheckpoint()
     }
 
     private fun applyLoadedMessages(requestedId: String, page: HermesMessagesPage) {

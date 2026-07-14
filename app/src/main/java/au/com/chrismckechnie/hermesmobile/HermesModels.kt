@@ -116,6 +116,14 @@ data class HermesRunStatus(
     }
 }
 
+data class HermesActiveSession(
+    val sessionId: String,
+    val runId: String?,
+    val title: String,
+    val state: String,
+    val surface: String,
+)
+
 /** Events on `GET /v1/runs/{run_id}/events` — data-only SSE, name in the JSON `event` field. */
 sealed interface HermesRunEvent {
     data class MessageDelta(val delta: String) : HermesRunEvent
@@ -158,4 +166,13 @@ interface HermesGateway {
     suspend fun renameSession(host: HostProfile, sessionId: String, title: String): HermesSession
     suspend fun deleteSession(host: HostProfile, sessionId: String)
     suspend fun forkSession(host: HostProfile, sessionId: String): HermesSession
+    suspend fun listActiveSessions(host: HostProfile): List<HermesActiveSession> = emptyList()
+    suspend fun registerMobileDevice(
+        host: HostProfile,
+        installationId: String,
+        token: String,
+        appVersion: String,
+        overlayEnabled: Boolean,
+    ) = Unit
+    suspend fun unregisterMobileDevice(host: HostProfile, installationId: String) = Unit
 }

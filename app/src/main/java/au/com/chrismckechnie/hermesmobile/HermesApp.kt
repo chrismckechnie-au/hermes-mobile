@@ -1150,6 +1150,38 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.size(16.dp))
             }
         }
+        Text("NOTIFICATIONS", style = T.Micro, modifier = Modifier.padding(top = 14.dp, bottom = 8.dp))
+        Surface(color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 13.dp, vertical = 5.dp)) {
+                state.hosts.forEach { host ->
+                    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(host.name, style = T.Label)
+                            Text("Run status, approvals, failures, and completion", style = T.BodyMuted)
+                        }
+                        Switch(
+                            checked = host.id in state.notificationHostIds,
+                            onCheckedChange = { viewModel.setHostNotificationsEnabled(host.id, it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = T.OnAccent, checkedTrackColor = T.Cream),
+                        )
+                    }
+                }
+                if (state.hosts.isEmpty()) Text("Add a host before enabling notifications.", style = T.BodyMuted, modifier = Modifier.padding(vertical = 12.dp))
+                HorizontalDivider(color = T.Line)
+                Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Floating active-session overlay", style = T.Label)
+                        Text("Shows opted-in hosts while sessions are active", style = T.BodyMuted)
+                    }
+                    Switch(
+                        checked = state.overlayEnabled,
+                        enabled = state.notificationHostIds.isNotEmpty(),
+                        onCheckedChange = viewModel::setOverlayEnabled,
+                        colors = SwitchDefaults.colors(checkedThumbColor = T.OnAccent, checkedTrackColor = T.Cream),
+                    )
+                }
+            }
+        }
         Text("ABOUT", style = T.Micro, modifier = Modifier.padding(top = 14.dp, bottom = 8.dp))
         Surface(color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
             LicensesRow { showLicenses = true }

@@ -21,7 +21,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - Scheduled job listing with pause/resume and run-now
 - Connected, connecting, empty, authentication-error, network-error, and retry states
 
-Not implemented (host support required): push notifications for job results and file upload (the Hermes API server currently rejects file content with `400 unsupported_content_type`).
+Not implemented: file upload (the Hermes API server currently rejects file content with `400 unsupported_content_type`).
 
 ## Hermes API endpoints
 
@@ -30,6 +30,8 @@ The client uses Hermes' supported HTTP surface:
 - `GET /v1/capabilities`
 - `GET /v1/models`
 - `GET /v1/skills`
+- `GET /v1/active-sessions`
+- `PUT` / `DELETE /v1/mobile/devices/{installation_id}`
 - `POST /v1/runs`
 - `GET /v1/runs/{id}` / `GET /v1/runs/{id}/events`
 - `POST /v1/runs/{id}/stop` / `POST /v1/runs/{id}/approval`
@@ -72,6 +74,39 @@ In Hermes Mobile, choose **Add a host** and enter:
 - private-network HTTP opt-in only when the connection is protected by a trusted LAN/VPN
 
 Entering a URL ending in `/v1` is also supported; the client normalizes it to the server root. When editing a saved host, leave the API key blank to keep the stored key.
+
+## Background runs, notifications, Bubbles, and overlay
+
+Runs execute on the Hermes host and continue when the Android activity or app
+process closes. Hermes Mobile durably stores the active host/session/run
+coordinates, reconnects to `/v1/runs/{run_id}`, and reconciles long-running
+work after the live SSE connection is lost.
+
+Push delivery is opt-in per saved host under **Settings → Notifications**. The
+same section enables the optional Android draw-over-other-apps session overlay.
+Notifications contain status and the session title only; prompts, responses,
+tool output, commands, and credentials are never included in FCM payloads.
+
+Firebase is deliberately user-owned:
+
+1. Create an Android app with package `au.com.chrismckechnie.hermesmobile` in
+   your Firebase project and place its config at `app/google-services.json`
+   (the path is gitignored).
+2. Enable the Firebase Cloud Messaging API. On each opted-in Hermes host,
+   provide Application Default Credentials for a service account allowed to
+   send FCM messages, commonly with `GOOGLE_APPLICATION_CREDENTIALS`.
+3. Add this profile-scoped `config.yaml` block and restart the gateway:
+
+   ```yaml
+   mobile_notifications:
+     enabled: true
+     project_id: your-firebase-project-id
+   ```
+
+Without `google-services.json`, device registration and push delivery remain
+inactive. Notification, Bubble, and overlay permissions remain user-controlled.
+The overlay only runs as a visible foreground service while opted-in hosts
+report active sessions.
 
 ## Build
 

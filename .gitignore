@@ -3,6 +3,7 @@
 .tools/
 .idea/
 local.properties
+app/google-services.json
 /build/
 **/build/
 *.png

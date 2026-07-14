@@ -74,6 +74,50 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
     override fun saveThemeMode(mode: ThemeMode) {
         preferences.edit().putString("theme_mode", mode.name).apply()
     }
+
+    override fun loadRunCheckpoint(): RunCheckpoint? {
+        val hostId = preferences.getString("run_host_id", null) ?: return null
+        val sessionId = preferences.getString("run_session_id", null) ?: return null
+        val runId = preferences.getString("run_id", null) ?: return null
+        return RunCheckpoint(hostId, sessionId, runId)
+    }
+
+    override fun saveRunCheckpoint(checkpoint: RunCheckpoint) {
+        // commit() is intentional: once submitRun returns, the checkpoint must
+        // be durable before Android can tear down the Activity/process.
+        preferences.edit()
+            .putString("run_host_id", checkpoint.hostId)
+            .putString("run_session_id", checkpoint.sessionId)
+            .putString("run_id", checkpoint.runId)
+            .commit()
+    }
+
+    override fun clearRunCheckpoint() {
+        preferences.edit()
+            .remove("run_host_id")
+            .remove("run_session_id")
+            .remove("run_id")
+            .apply()
+    }
+
+    override fun loadNotificationHostIds(): Set<String> =
+        preferences.getStringSet("notification_host_ids", emptySet()).orEmpty().toSet()
+
+    override fun saveNotificationHostIds(hostIds: Set<String>) {
+        preferences.edit().putStringSet("notification_host_ids", hostIds.toSet()).apply()
+    }
+
+    override fun loadOverlayEnabled(): Boolean = preferences.getBoolean("overlay_enabled", false)
+
+    override fun saveOverlayEnabled(enabled: Boolean) {
+        preferences.edit().putBoolean("overlay_enabled", enabled).apply()
+    }
+
+    override fun loadInstallationId(): String? = preferences.getString("installation_id", null)
+
+    override fun getOrCreateInstallationId(): String = loadInstallationId() ?: java.util.UUID.randomUUID().toString().also {
+        preferences.edit().putString("installation_id", it).commit()
+    }
 }
 
 class SecureHostStore(context: Context) : HostStore {
