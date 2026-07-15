@@ -19,7 +19,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - Live assistant deltas and structured tool start/completion cards
 - Collapsible live Hermes activity cards for host-provided reasoning progress
 - Tool-run approval cards (`approval.request` → approve/deny via `POST /v1/runs/{id}/approval`)
-- Compact ongoing "Hermes is working" notification and draggable active-work pill with an expandable session panel
+- Compact ongoing "Hermes is working" notification and a draggable icon that snaps to either screen edge, opens an attached active-session panel with the latest safe activity update, and can be dropped onto a close target to hide it until the next run
 - Scheduled job listing with pause/resume and run-now
 - Connected, connecting, empty, authentication-error, network-error, and retry states
 

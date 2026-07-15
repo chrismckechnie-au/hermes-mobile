@@ -29,6 +29,9 @@ interface SettingsStore {
     fun loadRunCheckpoint(): RunCheckpoint? = null
     fun saveRunCheckpoint(checkpoint: RunCheckpoint) = Unit
     fun clearRunCheckpoint() = Unit
+    fun loadRunStatus(runId: String): String? = null
+    fun saveRunStatus(runId: String, status: String) = Unit
+    fun clearRunStatus(runId: String) = Unit
     fun loadNotificationHostIds(): Set<String> = emptySet()
     fun saveNotificationHostIds(hostIds: Set<String>) = Unit
     fun loadOverlayEnabled(): Boolean = false
@@ -40,6 +43,7 @@ interface SettingsStore {
 private class InMemorySettingsStore : SettingsStore {
     private var mode = ThemeMode.System
     private var checkpoint: RunCheckpoint? = null
+    private val runStatuses = mutableMapOf<String, String>()
     private var notificationHosts = emptySet<String>()
     private var overlay = false
     override fun loadThemeMode(): ThemeMode = mode
@@ -49,6 +53,9 @@ private class InMemorySettingsStore : SettingsStore {
     override fun loadRunCheckpoint(): RunCheckpoint? = checkpoint
     override fun saveRunCheckpoint(checkpoint: RunCheckpoint) { this.checkpoint = checkpoint }
     override fun clearRunCheckpoint() { checkpoint = null }
+    override fun loadRunStatus(runId: String): String? = runStatuses[runId]
+    override fun saveRunStatus(runId: String, status: String) { runStatuses[runId] = status }
+    override fun clearRunStatus(runId: String) { runStatuses.remove(runId) }
     override fun loadNotificationHostIds(): Set<String> = notificationHosts
     override fun saveNotificationHostIds(hostIds: Set<String>) { notificationHosts = hostIds }
     override fun loadOverlayEnabled(): Boolean = overlay
@@ -666,6 +673,7 @@ class HermesViewModel(
                     ),
                 )
                 persistRunCoordinates(run)
+                updateRunStatus(run.runId, "Starting task…")
                 logRun("run started runId=$runId sessionId=${run.sessionId}")
                 mutableState.update { it.copy(isSending = false, activeRun = run) }
                 driveRun(run)
@@ -698,6 +706,7 @@ class HermesViewModel(
     /** Returns true for terminal events. Ignores events for a Run that is no longer active. */
     private fun handleRunEvent(run: ActiveRun, event: HermesRunEvent): Boolean {
         var terminal = false
+        runStatusText(event)?.let { updateRunStatus(run.runId, it) }
         mutableState.update { state ->
             val current = state.activeRun
             if (current == null || current.runId != run.runId) return@update state
@@ -756,6 +765,26 @@ class HermesViewModel(
             }
         }
         return terminal
+    }
+
+    private fun runStatusText(event: HermesRunEvent): String? = when (event) {
+        is HermesRunEvent.ReasoningAvailable -> event.text
+            .trim()
+            .replace(Regex("\\s+"), " ")
+            .take(MAX_OVERLAY_STATUS_LENGTH)
+            .takeIf { it.isNotBlank() }
+        is HermesRunEvent.ToolStarted -> "Using ${event.tool.replace('_', ' ').replace('-', ' ')}…"
+        is HermesRunEvent.ToolCompleted -> if (event.failed) "A tool needs attention…" else "Continuing after ${event.tool.replace('_', ' ')}…"
+        is HermesRunEvent.ApprovalRequested -> "Waiting for your approval"
+        is HermesRunEvent.ApprovalResponded -> "Continuing after approval…"
+        is HermesRunEvent.MessageDelta -> "Writing the response…"
+        is HermesRunEvent.Completed -> "Finishing the task…"
+        is HermesRunEvent.Failed -> "The task hit an issue"
+        HermesRunEvent.Cancelled -> "The task was stopped"
+    }
+
+    private fun updateRunStatus(runId: String, status: String) {
+        if (settingsStore.loadRunStatus(runId) != status) settingsStore.saveRunStatus(runId, status)
     }
 
     private fun insertBeforeAssistant(run: ActiveRun, item: ChatUiItem): List<ChatUiItem> {
@@ -1066,6 +1095,9 @@ class HermesViewModel(
             approvalDetailsLost = true,
         )
         mutableState.update { it.copy(activeRun = run) }
+        if (settingsStore.loadRunStatus(runId).isNullOrBlank()) {
+            updateRunStatus(runId, "Reconnected to the active task…")
+        }
         viewModelScope.launch {
             val result = runCatching { gateway.getRunStatus(host, runId) }
             val status = result.getOrNull()
@@ -1085,10 +1117,12 @@ class HermesViewModel(
     }
 
     private fun clearRunCoordinates() {
+        val runId = savedState.get<String>(KEY_RUN_ID) ?: settingsStore.loadRunCheckpoint()?.runId
         savedState.remove<String>(KEY_RUN_HOST)
         savedState.remove<String>(KEY_RUN_SESSION)
         savedState.remove<String>(KEY_RUN_ID)
         settingsStore.clearRunCheckpoint()
+        runId?.let(settingsStore::clearRunStatus)
     }
 
     private fun applyLoadedMessages(requestedId: String, page: HermesMessagesPage) {
@@ -1154,6 +1188,7 @@ class HermesViewModel(
     companion object {
         private const val MAX_REASONING_UPDATES = 12
         private const val MAX_REASONING_UPDATE_LENGTH = 8_000
+        private const val MAX_OVERLAY_STATUS_LENGTH = 180
         private const val KEY_RUN_HOST = "run.hostId"
         private const val KEY_RUN_SESSION = "run.sessionId"
         private const val KEY_RUN_ID = "run.runId"

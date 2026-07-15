@@ -100,6 +100,17 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
             .apply()
     }
 
+    override fun loadRunStatus(runId: String): String? =
+        preferences.getString("run_status.$runId", null)
+
+    override fun saveRunStatus(runId: String, status: String) {
+        preferences.edit().putString("run_status.$runId", status.take(240)).apply()
+    }
+
+    override fun clearRunStatus(runId: String) {
+        preferences.edit().remove("run_status.$runId").apply()
+    }
+
     override fun loadNotificationHostIds(): Set<String> =
         preferences.getStringSet("notification_host_ids", emptySet()).orEmpty().toSet()
 

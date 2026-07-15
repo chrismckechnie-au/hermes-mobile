@@ -102,6 +102,14 @@ class HermesMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val event = MobilePushEvent.from(message.data) ?: return
+        event.runId?.let { runId ->
+            val settings = PreferencesSettingsStore(applicationContext)
+            when {
+                event.isTerminal -> settings.clearRunStatus(runId)
+                event.event == "approval.required" -> settings.saveRunStatus(runId, "Waiting for your approval")
+                settings.loadRunStatus(runId).isNullOrBlank() -> settings.saveRunStatus(runId, "Working on the task…")
+            }
+        }
         HermesNotificationCoordinator(applicationContext).post(event)
         HermesOverlayService.onPush(applicationContext, event)
     }

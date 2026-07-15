@@ -1,0 +1,86 @@
+package au.com.chrismckechnie.hermesmobile
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Test
+
+class OverlayGeometryTest {
+    @Test
+    fun `icon snaps to the nearest screen edge`() {
+        assertEquals(12, snapOverlayX(currentX = 30, chipWidth = 56, screenWidth = 400, margin = 12))
+        assertEquals(332, snapOverlayX(currentX = 300, chipWidth = 56, screenWidth = 400, margin = 12))
+    }
+
+    @Test
+    fun `icon dismisses only when dropped over the close target`() {
+        assertEquals(
+            true,
+            isOverlayDismissDrop(
+                chipX = 172,
+                chipY = 704,
+                chipSize = 56,
+                targetX = 166,
+                targetY = 700,
+                targetSize = 68,
+            ),
+        )
+        assertEquals(
+            false,
+            isOverlayDismissDrop(
+                chipX = 12,
+                chipY = 300,
+                chipSize = 56,
+                targetX = 166,
+                targetY = 700,
+                targetSize = 68,
+            ),
+        )
+    }
+
+    @Test
+    fun `panel anchors below the icon and follows it`() {
+        val first = anchoredPanelPosition(
+            chipX = 12,
+            chipY = 100,
+            chipSize = 56,
+            panelWidth = 320,
+            panelHeight = 240,
+            screenWidth = 400,
+            screenHeight = 800,
+            margin = 12,
+            gap = 8,
+        )
+        val moved = anchoredPanelPosition(
+            chipX = 332,
+            chipY = 200,
+            chipSize = 56,
+            panelWidth = 320,
+            panelHeight = 240,
+            screenWidth = 400,
+            screenHeight = 800,
+            margin = 12,
+            gap = 8,
+        )
+
+        assertEquals(OverlayPoint(12, 164), first)
+        assertEquals(OverlayPoint(68, 264), moved)
+        assertNotEquals(first, moved)
+    }
+
+    @Test
+    fun `panel flips above an icon near the bottom edge`() {
+        val point = anchoredPanelPosition(
+            chipX = 332,
+            chipY = 700,
+            chipSize = 56,
+            panelWidth = 320,
+            panelHeight = 240,
+            screenWidth = 400,
+            screenHeight = 800,
+            margin = 12,
+            gap = 8,
+        )
+
+        assertEquals(OverlayPoint(68, 452), point)
+    }
+}

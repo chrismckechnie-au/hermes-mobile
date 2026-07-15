@@ -123,6 +123,7 @@ private class FakeHostStore(
 private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsStore {
     var savedMode: ThemeMode? = null
     var checkpoint: RunCheckpoint? = null
+    val runStatuses = mutableMapOf<String, String>()
 
     override fun loadThemeMode(): ThemeMode = initialMode
     override fun saveThemeMode(mode: ThemeMode) {
@@ -131,6 +132,9 @@ private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsSt
     override fun loadRunCheckpoint(): RunCheckpoint? = checkpoint
     override fun saveRunCheckpoint(checkpoint: RunCheckpoint) { this.checkpoint = checkpoint }
     override fun clearRunCheckpoint() { checkpoint = null }
+    override fun loadRunStatus(runId: String): String? = runStatuses[runId]
+    override fun saveRunStatus(runId: String, status: String) { runStatuses[runId] = status }
+    override fun clearRunStatus(runId: String) { runStatuses.remove(runId) }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -245,7 +249,8 @@ class HermesViewModelTest {
 
     @Test
     fun `reasoning progress is grouped into one live activity item`() = runVmTest {
-        val (viewModel, gateway) = buildViewModel()
+        val settings = FakeSettingsStore(ThemeMode.System)
+        val (viewModel, gateway) = buildViewModel(settingsStore = settings)
         viewModel.selectSession("s1")
         advanceUntilIdle()
         viewModel.setComposerText("think through this")
@@ -263,6 +268,7 @@ class HermesViewModelTest {
             listOf("Checking the current state", "Comparing the available options"),
             reasoning.single().updates,
         )
+        assertEquals("Comparing the available options", settings.runStatuses["run-1"])
 
         gateway.events.send(HermesRunEvent.Completed("done"))
         gateway.events.close()
