@@ -75,25 +75,63 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
         preferences.edit().putString("theme_mode", mode.name).apply()
     }
 
-    override fun loadRunCheckpoint(): RunCheckpoint? {
-        val hostId = preferences.getString("run_host_id", null) ?: return null
-        val sessionId = preferences.getString("run_session_id", null) ?: return null
-        val runId = preferences.getString("run_id", null) ?: return null
-        return RunCheckpoint(hostId, sessionId, runId)
+    override fun loadRunCheckpoints(): List<RunCheckpoint> {
+        preferences.getString(RUN_CHECKPOINTS_KEY, null)?.let { raw ->
+            return runCatching {
+                val array = JSONArray(raw)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val hostId = item.optString("hostId")
+                        val sessionId = item.optString("sessionId")
+                        val runId = item.optString("runId")
+                        if (hostId.isNotBlank() && sessionId.isNotBlank() && runId.isNotBlank()) {
+                            add(RunCheckpoint(hostId, sessionId, runId))
+                        }
+                    }
+                }.distinct()
+            }.getOrDefault(emptyList())
+        }
+
+        // v1 stored one checkpoint in three separate preferences. Keep it
+        // recoverable, then write v2 on the next checkpoint update.
+        val hostId = preferences.getString("run_host_id", null) ?: return emptyList()
+        val sessionId = preferences.getString("run_session_id", null) ?: return emptyList()
+        val runId = preferences.getString("run_id", null) ?: return emptyList()
+        return listOf(RunCheckpoint(hostId, sessionId, runId))
     }
 
-    override fun saveRunCheckpoint(checkpoint: RunCheckpoint) {
+    override fun saveRunCheckpoints(checkpoints: List<RunCheckpoint>) {
         // commit() is intentional: once submitRun returns, the checkpoint must
         // be durable before Android can tear down the Activity/process.
         preferences.edit()
-            .putString("run_host_id", checkpoint.hostId)
-            .putString("run_session_id", checkpoint.sessionId)
-            .putString("run_id", checkpoint.runId)
+            .putString(
+                RUN_CHECKPOINTS_KEY,
+                JSONArray().apply {
+                    checkpoints.distinct().forEach { checkpoint ->
+                        put(JSONObject().apply {
+                            put("hostId", checkpoint.hostId)
+                            put("sessionId", checkpoint.sessionId)
+                            put("runId", checkpoint.runId)
+                        })
+                    }
+                }.toString(),
+            )
+            .remove("run_host_id")
+            .remove("run_session_id")
+            .remove("run_id")
             .commit()
+    }
+
+    override fun loadRunCheckpoint(): RunCheckpoint? = loadRunCheckpoints().firstOrNull()
+
+    override fun saveRunCheckpoint(checkpoint: RunCheckpoint) {
+        saveRunCheckpoints(listOf(checkpoint))
     }
 
     override fun clearRunCheckpoint() {
         preferences.edit()
+            .remove(RUN_CHECKPOINTS_KEY)
             .remove("run_host_id")
             .remove("run_session_id")
             .remove("run_id")
@@ -124,10 +162,57 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
         preferences.edit().putBoolean("overlay_enabled", enabled).apply()
     }
 
+    override fun loadAttentionItems(): List<AttentionItem> = preferences
+        .getString(ATTENTION_ITEMS_KEY, null)
+        ?.let { raw ->
+            runCatching {
+                val array = JSONArray(raw)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val hostId = item.optString("hostId")
+                        val sessionId = item.optString("sessionId")
+                        if (hostId.isNotBlank() && sessionId.isNotBlank()) {
+                            add(
+                                AttentionItem(
+                                    hostId = hostId,
+                                    sessionId = sessionId,
+                                    title = item.optString("title").ifBlank { "Hermes session" },
+                                    state = item.optString("state").ifBlank { "updated" },
+                                ),
+                            )
+                        }
+                    }
+                }.distinctBy { it.hostId to it.sessionId }
+            }.getOrDefault(emptyList())
+        }
+        .orEmpty()
+
+    override fun saveAttentionItems(items: List<AttentionItem>) {
+        preferences.edit().putString(
+            ATTENTION_ITEMS_KEY,
+            JSONArray().apply {
+                items.distinctBy { it.hostId to it.sessionId }.forEach { item ->
+                    put(JSONObject().apply {
+                        put("hostId", item.hostId)
+                        put("sessionId", item.sessionId)
+                        put("title", item.title.take(120))
+                        put("state", item.state.take(80))
+                    })
+                }
+            }.toString(),
+        ).apply()
+    }
+
     override fun loadInstallationId(): String? = preferences.getString("installation_id", null)
 
     override fun getOrCreateInstallationId(): String = loadInstallationId() ?: java.util.UUID.randomUUID().toString().also {
         preferences.edit().putString("installation_id", it).commit()
+    }
+
+    private companion object {
+        const val RUN_CHECKPOINTS_KEY = "run_checkpoints_v2"
+        const val ATTENTION_ITEMS_KEY = "attention_items_v1"
     }
 }
 

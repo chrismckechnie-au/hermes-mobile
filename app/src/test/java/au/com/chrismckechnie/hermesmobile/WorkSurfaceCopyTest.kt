@@ -46,6 +46,21 @@ class WorkSurfaceCopyTest {
         assertEquals("Hermes needs approval", activeWorkCopy(listOf("Desktop" to session)).title)
     }
 
+    @Test
+    fun `attention labels make terminal states scannable`() {
+        assertEquals("Needs approval", attentionLabel("waiting_for_approval"))
+        assertEquals("Failed", attentionLabel("failed"))
+        assertEquals("Finished", attentionLabel("completed"))
+    }
+
+    @Test
+    fun `only session outcomes that need review create attention`() {
+        assertTrue(event("approval.required").requiresAttention)
+        assertTrue(event("session.completed").requiresAttention)
+        assertFalse(event("session.started").requiresAttention)
+        assertFalse(event("job.failed").requiresAttention)
+    }
+
     private fun event(type: String) = MobilePushEvent(
         event = type,
         hostProfileId = "host-1",

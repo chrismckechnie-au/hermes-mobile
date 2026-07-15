@@ -36,7 +36,8 @@ private class FakeGateway : HermesGateway {
     val resolvedIds = mutableMapOf<String, String>()
     var skills = listOf(HermesSkill("grill-me", "A relentless interview"))
     var models = listOf("hermes-agent", "hermes-fast", "gpt-5.6-terra")
-    var events = Channel<HermesRunEvent>(Channel.UNLIMITED)
+    private val eventStreams = mutableMapOf<String, Channel<HermesRunEvent>>()
+    val events: Channel<HermesRunEvent> get() = eventsFor("run-1")
     var runStatus = HermesRunStatus("run-1", "completed")
     var submitError: Throwable? = null
     val submits = mutableListOf<SubmitCall>()
@@ -49,6 +50,9 @@ private class FakeGateway : HermesGateway {
     val created = mutableListOf<HermesSession>()
 
     data class SubmitCall(val sessionId: String, val input: String, val history: List<HermesMessage>, val model: String?, val reasoningEffort: String?)
+
+    fun eventsFor(runId: String): Channel<HermesRunEvent> =
+        eventStreams.getOrPut(runId) { Channel(Channel.UNLIMITED) }
 
     override suspend fun probe(host: HostProfile) = capabilities
     override suspend fun listSessions(host: HostProfile, limit: Int, offset: Int) = HermesSessionPage(
@@ -77,11 +81,11 @@ private class FakeGateway : HermesGateway {
     override suspend fun submitRun(host: HostProfile, sessionId: String, input: String, history: List<HermesMessage>, model: String?, reasoningEffort: String?): String {
         submitError?.let { throw it }
         submits += SubmitCall(sessionId, input, history, model, reasoningEffort)
-        return "run-1"
+        return "run-${submits.size}"
     }
 
     override suspend fun streamRunEvents(host: HostProfile, runId: String, onEvent: (HermesRunEvent) -> Unit) {
-        for (event in events) onEvent(event)
+        for (event in eventsFor(runId)) onEvent(event)
     }
 
     override suspend fun getRunStatus(host: HostProfile, runId: String): HermesRunStatus {
@@ -122,19 +126,27 @@ private class FakeHostStore(
 
 private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsStore {
     var savedMode: ThemeMode? = null
-    var checkpoint: RunCheckpoint? = null
+    var checkpoints = emptyList<RunCheckpoint>()
+    var checkpoint: RunCheckpoint?
+        get() = checkpoints.firstOrNull()
+        set(value) { checkpoints = listOfNotNull(value) }
     val runStatuses = mutableMapOf<String, String>()
+    var attentionItems = emptyList<AttentionItem>()
 
     override fun loadThemeMode(): ThemeMode = initialMode
     override fun saveThemeMode(mode: ThemeMode) {
         savedMode = mode
     }
+    override fun loadRunCheckpoints(): List<RunCheckpoint> = checkpoints
+    override fun saveRunCheckpoints(checkpoints: List<RunCheckpoint>) { this.checkpoints = checkpoints.distinct() }
     override fun loadRunCheckpoint(): RunCheckpoint? = checkpoint
     override fun saveRunCheckpoint(checkpoint: RunCheckpoint) { this.checkpoint = checkpoint }
     override fun clearRunCheckpoint() { checkpoint = null }
     override fun loadRunStatus(runId: String): String? = runStatuses[runId]
     override fun saveRunStatus(runId: String, status: String) { runStatuses[runId] = status }
     override fun clearRunStatus(runId: String) { runStatuses.remove(runId) }
+    override fun loadAttentionItems(): List<AttentionItem> = attentionItems
+    override fun saveAttentionItems(items: List<AttentionItem>) { attentionItems = items }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -245,6 +257,18 @@ class HermesViewModelTest {
         assertEquals("hermes-fast", gateway.submits.single().model)
         gateway.events.close()
         advanceUntilIdle()
+    }
+
+    @Test
+    fun `opening a session clears its durable attention marker`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System).apply {
+            attentionItems = listOf(AttentionItem("h1", "s1", "Task complete", "completed"))
+        }
+        val (viewModel, _) = buildViewModel(settingsStore = settings)
+
+        viewModel.selectSession("s1")
+
+        assertTrue(settings.attentionItems.isEmpty())
     }
 
     @Test
@@ -433,7 +457,7 @@ class HermesViewModelTest {
     }
 
     @Test
-    fun `host switching is blocked while a run is active`() = runVmTest {
+    fun `host switching allows an independent run while another host is active`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
         viewModel.selectSession("s1")
         advanceUntilIdle()
@@ -442,11 +466,60 @@ class HermesViewModelTest {
         advanceUntilIdle()
 
         viewModel.selectHost("h2")
-        assertEquals("h1", viewModel.state.value.activeHostId)
-        assertTrue(viewModel.state.value.errorMessage!!.contains("Stop it"))
+        advanceUntilIdle()
+        assertEquals("h2", viewModel.state.value.activeHostId)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("independent work")
+        assertEquals("independent work", viewModel.state.value.composerText)
+        viewModel.sendMessage()
+        advanceUntilIdle()
 
-        gateway.events.send(HermesRunEvent.Completed("done"))
-        gateway.events.close()
+        assertEquals(listOf("run-1", "run-2"), viewModel.state.value.activeRuns.values.map { it.runId }.sorted())
+        assertEquals("run-2", viewModel.state.value.activeRun?.runId)
+        assertEquals("run-1", viewModel.state.value.otherActiveRuns.single().runId)
+
+        gateway.eventsFor("run-1").send(HermesRunEvent.Completed("done"))
+        gateway.eventsFor("run-2").send(HermesRunEvent.Completed("done"))
+        gateway.eventsFor("run-1").close()
+        gateway.eventsFor("run-2").close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `different sessions on the same host run independently`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            sessions += HermesSession("s2", "Second", null, "api_server", null, null, 0)
+            messages["s2"] = mutableListOf()
+        }
+        val (viewModel, _) = buildViewModel(gateway)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("first task")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        viewModel.selectSession("s2")
+        advanceUntilIdle()
+        viewModel.setComposerText("second task")
+        assertEquals("second task", viewModel.state.value.composerText)
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals(setOf(SessionKey("h1", "s1"), SessionKey("h1", "s2")), viewModel.state.value.activeRuns.keys)
+        assertEquals("run-2", viewModel.state.value.activeRun?.runId)
+        assertEquals("run-1", viewModel.state.value.otherActiveRuns.single().runId)
+
+        gateway.eventsFor("run-1").send(HermesRunEvent.Completed("first done"))
+        gateway.eventsFor("run-1").close()
+        advanceUntilIdle()
+
+        assertEquals("s2", viewModel.state.value.activeSessionId)
+        assertEquals("run-2", viewModel.state.value.activeRun?.runId)
+        assertTrue(SessionKey("h1", "s1") !in viewModel.state.value.activeRuns)
+
+        gateway.eventsFor("run-2").send(HermesRunEvent.Completed("second done"))
+        gateway.eventsFor("run-2").close()
         advanceUntilIdle()
     }
 

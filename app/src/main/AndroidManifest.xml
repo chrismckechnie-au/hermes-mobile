@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
+        android:name=".HermesMobileApplication"
         android:allowBackup="false"
         android:icon="@drawable/hermes_official"
         android:label="Hermes Mobile"

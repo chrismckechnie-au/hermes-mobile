@@ -18,6 +18,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.ImageView
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -40,6 +41,7 @@ class HermesOverlayService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var windowManager: WindowManager
     private var chip: View? = null
+    private var chipBadge: TextView? = null
     private var chipParams: WindowManager.LayoutParams? = null
     private var panel: View? = null
     private var panelParams: WindowManager.LayoutParams? = null
@@ -48,19 +50,27 @@ class HermesOverlayService : Service() {
     private var dismissArmed = false
     private var pollJob: Job? = null
     private var sessions = emptyList<OverlaySession>()
-    private var localRunHint: LocalRunHint? = null
+    private var localRunHints = emptyMap<String, LocalRunHint>()
+    private var appInForeground = false
     private val serviceStartedAt = System.currentTimeMillis()
     private val positionPreferences by lazy { getSharedPreferences("hermes_overlay_position", MODE_PRIVATE) }
+    private val visibilityPreferences by lazy { getSharedPreferences(VISIBILITY_PREFERENCES, MODE_PRIVATE) }
 
     override fun onCreate() {
         super.onCreate()
+        serviceRunning = true
         windowManager = getSystemService(WindowManager::class.java)
+        appInForeground = visibilityPreferences.getBoolean(APP_FOREGROUND_KEY, false)
         createForegroundChannel()
         startForeground(HermesNotificationCoordinator.WORK_NOTIFICATION_ID, foregroundNotification(emptyList()))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        intent?.localRunHint()?.let { localRunHint = it }
+        if (intent?.hasExtra(EXTRA_APP_FOREGROUND) == true) {
+            appInForeground = intent.getBooleanExtra(EXTRA_APP_FOREGROUND, false)
+            visibilityPreferences.edit().putBoolean(APP_FOREGROUND_KEY, appInForeground).apply()
+        }
+        intent?.localRunHint()?.let { hint -> localRunHints = localRunHints + (hint.runId to hint) }
         if (pollJob == null) {
             pollJob = scope.launch {
                 while (true) {
@@ -79,21 +89,22 @@ class HermesOverlayService : Service() {
             val settings = PreferencesSettingsStore(applicationContext)
             val enabled = settings.loadNotificationHostIds()
             val hosts = SecureHostStore(applicationContext).load().snapshot.hosts.filter { it.id in enabled }
+            val attention = settings.loadAttentionItems().filter { it.hostId in hosts.map(HostProfile::id) }
             val gateway = HermesHttpGateway()
             val remote = hosts.flatMap { host ->
                 runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList()).map { session ->
                     OverlaySession(host, session)
                 }
             }
-            val hint = localRunHint ?: settings.loadRunCheckpoint()?.let { checkpoint ->
+            val hints = (localRunHints.values + settings.loadRunCheckpoints().map { checkpoint ->
                 LocalRunHint(checkpoint.hostId, checkpoint.sessionId, checkpoint.runId, "Hermes task")
-            }
-            val local = hint?.let { value ->
-                val host = hosts.firstOrNull { it.id == value.hostId } ?: return@let null
+            }).distinctBy(LocalRunHint::runId)
+            val local = hints.mapNotNull { value ->
+                val host = hosts.firstOrNull { it.id == value.hostId } ?: return@mapNotNull null
                 val alreadyReported = remote.any {
                     it.host.id == value.hostId && it.session.sessionId == value.sessionId
                 }
-                if (alreadyReported) return@let null
+                if (alreadyReported) return@mapNotNull null
                 val status = runCatching { gateway.getRunStatus(host, value.runId) }.getOrNull()
                 if (status?.isTerminal == true) null else OverlaySession(
                     host,
@@ -106,10 +117,32 @@ class HermesOverlayService : Service() {
                     ),
                 )
             }
-            (remote + listOfNotNull(local))
+            val active = (remote + local)
                 .distinctBy { it.host.id to it.session.sessionId }
                 .map { item ->
-                    item.copy(latestStatus = item.session.runId?.let(settings::loadRunStatus))
+                    item.copy(
+                        latestStatus = item.session.runId?.let(settings::loadRunStatus),
+                        attention = attention.firstOrNull {
+                            it.hostId == item.host.id && it.sessionId == item.session.sessionId
+                        },
+                    )
+                }
+            active + attention.filter { item -> active.none { it.host.id == item.hostId && it.session.sessionId == item.sessionId } }
+                .mapNotNull { item ->
+                    hosts.firstOrNull { it.id == item.hostId }?.let { host ->
+                        OverlaySession(
+                            host = host,
+                            session = HermesActiveSession(
+                                sessionId = item.sessionId,
+                                runId = null,
+                                title = item.title,
+                                state = item.state,
+                                surface = "mobile_update",
+                            ),
+                            latestStatus = item.state,
+                            attention = item,
+                        )
+                    }
                 }
         }
 
@@ -128,7 +161,7 @@ class HermesOverlayService : Service() {
         val settings = PreferencesSettingsStore(applicationContext)
         val sessionSignature = activeSessionSignature()
         val dismissedForCurrentSessions = positionPreferences.getString("dismissed_sessions", null) == sessionSignature
-        if (settings.loadOverlayEnabled() && Settings.canDrawOverlays(this) && !dismissedForCurrentSessions) {
+        if (!appInForeground && settings.loadOverlayEnabled() && Settings.canDrawOverlays(this) && !dismissedForCurrentSessions) {
             if (positionPreferences.contains("dismissed_sessions")) {
                 positionPreferences.edit().remove("dismissed_sessions").apply()
             }
@@ -142,23 +175,38 @@ class HermesOverlayService : Service() {
     @SuppressLint("ClickableViewAccessibility")
     private fun showOrUpdateChip() {
         chip?.let {
-            it.contentDescription = activeSessionDescription(sessions.size)
+            updateChipBadge()
             return
         }
 
-        val view = object : ImageView(this) {
+        val view = object : FrameLayout(this) {
             override fun performClick(): Boolean {
                 super.performClick()
                 return true
             }
         }.apply {
-            setImageResource(R.drawable.hermes_official)
-            scaleType = ImageView.ScaleType.CENTER_CROP
             clipToOutline = true
             elevation = 8.dp.toFloat()
             background = roundedBackground(Color.WHITE, 16.dp.toFloat())
             contentDescription = activeSessionDescription(sessions.size)
             setOnClickListener { if (panel == null) showPanel() else hidePanel() }
+            addView(ImageView(context).apply {
+                setImageResource(R.drawable.hermes_official)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+            }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            val badge = overlayText("", 10f, Color.WHITE, bold = true).apply {
+                gravity = Gravity.CENTER
+                minWidth = 20.dp
+                minHeight = 20.dp
+                setPadding(4.dp, 0, 4.dp, 0)
+                background = roundedBackground(0xFFC94747.toInt(), 10.dp.toFloat())
+                elevation = 10.dp.toFloat()
+            }
+            addView(badge, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 20.dp, Gravity.TOP or Gravity.END).apply {
+                topMargin = (-4).dp
+                marginEnd = (-4).dp
+            })
+            chipBadge = badge
         }
         val params = initialChipParams()
         var downX = 0f
@@ -211,6 +259,19 @@ class HermesOverlayService : Service() {
         windowManager.addView(view, params)
         chip = view
         chipParams = params
+        updateChipBadge()
+    }
+
+    private fun updateChipBadge() {
+        val attentionCount = sessions.count { it.attention != null }
+        chip?.contentDescription = activeSessionDescription(sessions.size, attentionCount)
+        chipBadge?.apply {
+            visibility = if (attentionCount == 0) View.GONE else View.VISIBLE
+            text = when {
+                attentionCount > 9 -> "9+"
+                else -> attentionCount.toString()
+            }
+        }
     }
 
     private fun settleChipPosition(view: View, params: WindowManager.LayoutParams) {
@@ -252,13 +313,20 @@ class HermesOverlayService : Service() {
                 }, LinearLayout.LayoutParams(40.dp, 40.dp))
             })
             sessions.forEach { item ->
-                val stateLabel = when (item.session.state.lowercase()) {
+                val stateLabel = when {
+                    item.attention != null -> attentionLabel(item.attention.state)
+                    else -> when (item.session.state.lowercase()) {
                     "waiting_for_approval", "approval_required" -> "Needs approval"
                     "queued" -> "Queued"
                     "stopping" -> "Stopping"
                     else -> "Working"
+                    }
                 }
-                val stateColor = if (stateLabel == "Needs approval") 0xFFFFC66D.toInt() else 0xFF9FD3B4.toInt()
+                val stateColor = when (stateLabel) {
+                    "Needs approval" -> 0xFFFFC66D.toInt()
+                    "Failed" -> 0xFFC94747.toInt()
+                    else -> 0xFF9FD3B4.toInt()
+                }
                 addView(LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(13.dp, 11.dp, 13.dp, 11.dp)
@@ -267,7 +335,7 @@ class HermesOverlayService : Service() {
                         maxLines = 2
                         ellipsize = android.text.TextUtils.TruncateAt.END
                     })
-                    item.latestStatus?.takeIf { it.isNotBlank() }?.let { status ->
+                    (item.latestStatus ?: item.attention?.state)?.takeIf { it.isNotBlank() }?.let { status ->
                         addView(overlayText(status, 12f, 0xFFD1D1D1.toInt()).apply {
                             maxLines = 3
                             ellipsize = android.text.TextUtils.TruncateAt.END
@@ -305,7 +373,7 @@ class HermesOverlayService : Service() {
         val scroll = ScrollView(this).apply { addView(list) }
         val maxHeight = (resources.displayMetrics.heightPixels * 0.72f).toInt()
         val sessionContentHeight = sessions.fold(0) { height, item ->
-            height + if (item.latestStatus.isNullOrBlank()) 76 else 112
+            height + if ((item.latestStatus ?: item.attention?.state).isNullOrBlank()) 76 else 112
         }
         val panelHeight = (170 + sessionContentHeight).dp.coerceAtMost(maxHeight)
         val panelWidth = 320.dp.coerceAtMost(screenWidth - OVERLAY_MARGIN_DP.dp * 2)
@@ -386,6 +454,7 @@ class HermesOverlayService : Service() {
         hidePanel()
         chip?.let { runCatching { windowManager.removeView(it) } }
         chip = null
+        chipBadge = null
         chipParams = null
     }
 
@@ -393,6 +462,7 @@ class HermesOverlayService : Service() {
         pollJob?.cancel()
         removeWindows()
         scope.cancel()
+        serviceRunning = false
         super.onDestroy()
     }
 
@@ -445,7 +515,17 @@ class HermesOverlayService : Service() {
 
     private fun foregroundNotification(active: List<OverlaySession>): android.app.Notification {
         val first = active.firstOrNull()
-        val copy = activeWorkCopy(active.map { it.host.name to it.session })
+        val working = active.filter { it.session.runId != null || it.attention == null }
+        val copy = if (working.isNotEmpty()) {
+            activeWorkCopy(working.map { it.host.name to it.session })
+        } else {
+            ActiveWorkCopy(
+                title = "Hermes has ${active.size} update${if (active.size == 1) "" else "s"}",
+                text = first?.session?.title ?: "Open Hermes Mobile to review",
+                summary = first?.host?.name,
+                count = active.size,
+            )
+        }
         val openIntent = first?.let {
             HermesNotificationCoordinator.sessionIntent(this, it.host.id, it.session.sessionId)
         } ?: Intent(this, MainActivity::class.java)
@@ -468,7 +548,7 @@ class HermesOverlayService : Service() {
             .setSilent(true)
             .setColor(0xFF1B1B1B.toInt())
             .setWhen(serviceStartedAt)
-            .setUsesChronometer(active.isNotEmpty())
+            .setUsesChronometer(working.isNotEmpty())
             .setContentInfo(copy.count.takeIf { it > 1 }?.toString())
             .setContentIntent(pending)
             .addAction(0, "Open", pending)
@@ -507,7 +587,10 @@ class HermesOverlayService : Service() {
         if (bold) setTypeface(typeface, Typeface.BOLD)
     }
 
-    private fun activeSessionDescription(count: Int) = "$count active Hermes ${if (count == 1) "session" else "sessions"}"
+    private fun activeSessionDescription(count: Int, attentionCount: Int = 0): String = buildString {
+        append("$count Hermes ${if (count == 1) "session" else "sessions"}")
+        if (attentionCount > 0) append(", $attentionCount update${if (attentionCount == 1) "" else "s"} to review")
+    }
     private val screenWidth: Int get() = resources.displayMetrics.widthPixels
     private val screenHeight: Int get() = resources.displayMetrics.heightPixels
     private val Int.dp: Int get() = (this * resources.displayMetrics.density).toInt()
@@ -521,6 +604,10 @@ class HermesOverlayService : Service() {
         private const val POLL_INTERVAL_MS = 5_000L
         private const val EXTRA_RUN_ID = "active_run_id"
         private const val EXTRA_RUN_TITLE = "active_run_title"
+        private const val EXTRA_APP_FOREGROUND = "app_foreground"
+        private const val VISIBILITY_PREFERENCES = "hermes_overlay_visibility"
+        private const val APP_FOREGROUND_KEY = "app_foreground"
+        @Volatile private var serviceRunning = false
 
         fun startForRun(context: Context, run: ActiveRun) {
             val intent = Intent(context, HermesOverlayService::class.java).apply {
@@ -532,8 +619,24 @@ class HermesOverlayService : Service() {
             runCatching { ContextCompat.startForegroundService(context, intent) }
         }
 
+        fun startForRuns(context: Context, runs: Collection<ActiveRun>) {
+            runs.forEach { run -> startForRun(context, run) }
+        }
+
+        fun setAppForeground(context: Context, foreground: Boolean) {
+            context.getSharedPreferences(VISIBILITY_PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(APP_FOREGROUND_KEY, foreground)
+                .apply()
+            if (serviceRunning) runCatching {
+                context.startService(Intent(context, HermesOverlayService::class.java).apply {
+                    putExtra(EXTRA_APP_FOREGROUND, foreground)
+                })
+            }
+        }
+
         fun onPush(context: Context, event: MobilePushEvent) {
-            if (event.activeCount == 0 && event.isTerminal) return
+            if (event.activeCount == 0 && event.isTerminal && !event.requiresAttention) return
             runCatching { ContextCompat.startForegroundService(context, Intent(context, HermesOverlayService::class.java)) }
         }
 
@@ -560,6 +663,7 @@ private data class OverlaySession(
     val host: HostProfile,
     val session: HermesActiveSession,
     val latestStatus: String? = null,
+    val attention: AttentionItem? = null,
 )
 private data class LocalRunHint(val hostId: String, val sessionId: String, val runId: String, val title: String)
 
@@ -634,4 +738,12 @@ internal fun activeWorkCopy(active: List<Pair<String, HermesActiveSession>>): Ac
         summary = first?.first,
         count = count,
     )
+}
+
+internal fun attentionLabel(state: String): String = when (state.lowercase()) {
+    "waiting_for_approval", "approval_required" -> "Needs approval"
+    "failed", "error" -> "Failed"
+    "cancelled" -> "Stopped"
+    "completed", "complete" -> "Finished"
+    else -> "New update"
 }

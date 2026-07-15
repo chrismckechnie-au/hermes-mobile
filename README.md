@@ -13,13 +13,13 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - Capability discovery and authenticated connection status
 - Session listing with pagination (`has_more`), pull-to-refresh, creation, rename, delete, history loading, and selection
 - Host model discovery with per-run model and reasoning-effort selection from the Chat model sheet
-- Streaming chat over `/v1/runs` Server-Sent Events with stop/cancel, process-death recovery, and unknown-submit protection
+- Independent streaming runs per host/session, with stop/cancel, multi-run process-death recovery, and unknown-submit protection
 - Local slash commands and host skill suggestions from the message composer
 - Markdown rendering of assistant replies (code blocks with copy, headings, bullets, bold/italic/inline code, links)
 - Live assistant deltas and structured tool start/completion cards
 - Collapsible live Hermes activity cards for host-provided reasoning progress
 - Tool-run approval cards (`approval.request` → approve/deny via `POST /v1/runs/{id}/approval`)
-- Compact ongoing "Hermes is working" notification and a draggable icon that snaps to either screen edge, opens an attached active-session panel with the latest safe activity update, and can be dropped onto a close target to hide it until the next run
+- Compact ongoing work notification and a draggable edge icon that opens an attached session panel with latest safe activity; it hides while Hermes Mobile is open, restores when the app backgrounds, shows a count for updates to review, and can be dropped onto a close target to hide it until the next run
 - Scheduled job listing with pause/resume and run-now
 - Connected, connecting, empty, authentication-error, network-error, and retry states
 
@@ -80,9 +80,10 @@ Entering a URL ending in `/v1` is also supported; the client normalizes it to th
 ## Background runs, notifications, Bubbles, and overlay
 
 Runs execute on the Hermes host and continue when the Android activity or app
-process closes. Hermes Mobile durably stores the active host/session/run
-coordinates, reconnects to `/v1/runs/{run_id}`, and reconciles long-running
-work after the live SSE connection is lost.
+process closes. Hermes Mobile durably stores every active host/session/run
+coordinate, reconnects to each `/v1/runs/{run_id}`, and reconciles long-running
+work after a live SSE connection is lost. A run in one session never prevents
+drafting or starting work in another session or host.
 
 Push delivery is opt-in per saved host under **Settings → Notifications**. The
 same section enables the optional Android draw-over-other-apps session overlay.
@@ -91,6 +92,8 @@ tool output, commands, and credentials are never included in FCM payloads.
 Runs started in Hermes Mobile also show an ongoing local work notification;
 this does not require Firebase. The overlay is seeded from the local run and
 then reconciled against `/v1/active-sessions`, avoiding first-poll races.
+Terminal outcomes and approval requests remain counted until their session is
+opened, so an update is not lost when the phone is locked or the app is away.
 
 Firebase is deliberately user-owned:
 

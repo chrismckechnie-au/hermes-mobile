@@ -38,6 +38,9 @@ data class MobilePushEvent(
     val isTerminal: Boolean get() = event in setOf(
         "session.completed", "session.failed", "session.cancelled", "job.completed", "job.failed",
     )
+    val requiresAttention: Boolean get() = event in setOf(
+        "approval.required", "session.completed", "session.failed", "session.cancelled",
+    )
 
     companion object {
         fun from(data: Map<String, String>): MobilePushEvent? {
@@ -102,13 +105,23 @@ class HermesMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val event = MobilePushEvent.from(message.data) ?: return
+        val settings = PreferencesSettingsStore(applicationContext)
         event.runId?.let { runId ->
-            val settings = PreferencesSettingsStore(applicationContext)
             when {
                 event.isTerminal -> settings.clearRunStatus(runId)
                 event.event == "approval.required" -> settings.saveRunStatus(runId, "Waiting for your approval")
                 settings.loadRunStatus(runId).isNullOrBlank() -> settings.saveRunStatus(runId, "Working on the task…")
             }
+        }
+        if (event.requiresAttention) {
+            settings.markAttention(
+                AttentionItem(
+                    hostId = event.hostProfileId,
+                    sessionId = event.sessionId,
+                    title = event.title,
+                    state = event.state,
+                ),
+            )
         }
         HermesNotificationCoordinator(applicationContext).post(event)
         HermesOverlayService.onPush(applicationContext, event)
@@ -144,6 +157,7 @@ class HermesNotificationCoordinator(private val context: Context) {
             .setOnlyAlertOnce(copy.ongoing)
             .setSilent(copy.silent)
             .setColor(0xFF1B1B1B.toInt())
+            .setGroup(NOTIFICATION_GROUP)
             .setContentIntent(contentPending)
             .addAction(0, if (event.event == "approval.required") "Review" else "Open", contentPending)
         if (!isJob) {
@@ -213,6 +227,7 @@ class HermesNotificationCoordinator(private val context: Context) {
         const val OVERLAY_CHANNEL = "hermes_overlay"
         const val WORK_CHANNEL = "hermes_active_work"
         const val WORK_NOTIFICATION_ID = 9042
+        const val NOTIFICATION_GROUP = "hermes_session_updates"
         const val EXTRA_HOST_ID = "host_id"
         const val EXTRA_SESSION_ID = "session_id"
         const val EXTRA_SESSION_TITLE = "session_title"

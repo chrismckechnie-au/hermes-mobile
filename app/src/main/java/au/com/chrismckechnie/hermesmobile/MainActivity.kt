@@ -39,7 +39,7 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             val state by viewModel.state.collectAsStateWithLifecycle()
-            LaunchedEffect(state.notificationHostIds, state.overlayEnabled, state.activeRun?.runId) {
+            LaunchedEffect(state.notificationHostIds, state.overlayEnabled, state.activeRuns.keys) {
                 configureMobileBackground(state)
             }
             HermesMobileApp(state = state, viewModel = viewModel)
@@ -82,9 +82,9 @@ class MainActivity : ComponentActivity() {
                 Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
             )
         }
-        val monitoredRun = state.activeRun?.takeIf { it.host.id in state.notificationHostIds }
+        val monitoredRuns = state.activeRuns.values.filter { it.host.id in state.notificationHostIds }
         when {
-            monitoredRun != null -> HermesOverlayService.startForRun(applicationContext, monitoredRun)
+            monitoredRuns.isNotEmpty() -> HermesOverlayService.startForRuns(applicationContext, monitoredRuns)
             state.overlayEnabled -> HermesOverlayService.startIfAllowed(applicationContext)
             else -> HermesOverlayService.stop(applicationContext)
         }

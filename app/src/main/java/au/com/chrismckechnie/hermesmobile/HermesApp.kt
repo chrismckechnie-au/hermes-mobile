@@ -384,7 +384,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
 @Composable
 private fun RunBanner(state: HermesUiState, viewModel: HermesViewModel) {
     AnimatedVisibility(visible = state.runBannerVisible) {
-        val run = state.activeRun ?: return@AnimatedVisibility
+        val run = state.otherActiveRuns.firstOrNull() ?: state.activeRun ?: return@AnimatedVisibility
         Row(
             Modifier.fillMaxWidth().background(T.Cream.copy(alpha = 0.06f))
                 .padding(start = 14.dp, end = 5.dp, top = 7.dp, bottom = 7.dp),
@@ -945,8 +945,9 @@ private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
                 },
             )
             Spacer(Modifier.width(7.dp))
-            if (state.activeRun != null) {
-                val stopping = state.activeRun.stopping
+            val activeRun = state.activeRun
+            if (activeRun != null) {
+                val stopping = activeRun.stopping
                 Box(
                     modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard))
                         .background(T.Error.copy(alpha = 0.12f))

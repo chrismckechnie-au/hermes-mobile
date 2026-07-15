@@ -26,6 +26,15 @@ enum class ThemeMode { System, Dark, Light }
 interface SettingsStore {
     fun loadThemeMode(): ThemeMode
     fun saveThemeMode(mode: ThemeMode)
+    /**
+     * All host-owned Runs that still need recovery after Android tears down the
+     * process. The singular methods remain as a migration seam for existing
+     * stores and tests.
+     */
+    fun loadRunCheckpoints(): List<RunCheckpoint> = listOfNotNull(loadRunCheckpoint())
+    fun saveRunCheckpoints(checkpoints: List<RunCheckpoint>) {
+        checkpoints.firstOrNull()?.let(::saveRunCheckpoint) ?: clearRunCheckpoint()
+    }
     fun loadRunCheckpoint(): RunCheckpoint? = null
     fun saveRunCheckpoint(checkpoint: RunCheckpoint) = Unit
     fun clearRunCheckpoint() = Unit
@@ -36,23 +45,38 @@ interface SettingsStore {
     fun saveNotificationHostIds(hostIds: Set<String>) = Unit
     fun loadOverlayEnabled(): Boolean = false
     fun saveOverlayEnabled(enabled: Boolean) = Unit
+    fun loadAttentionItems(): List<AttentionItem> = emptyList()
+    fun saveAttentionItems(items: List<AttentionItem>) = Unit
+    fun markAttention(item: AttentionItem) {
+        saveAttentionItems(loadAttentionItems().filterNot {
+            it.hostId == item.hostId && it.sessionId == item.sessionId
+        } + item)
+    }
+    fun clearAttention(hostId: String, sessionId: String) {
+        saveAttentionItems(loadAttentionItems().filterNot {
+            it.hostId == hostId && it.sessionId == sessionId
+        })
+    }
     fun loadInstallationId(): String? = null
     fun getOrCreateInstallationId(): String = UUID.randomUUID().toString()
 }
 
 private class InMemorySettingsStore : SettingsStore {
     private var mode = ThemeMode.System
-    private var checkpoint: RunCheckpoint? = null
+    private var checkpoints = emptyList<RunCheckpoint>()
     private val runStatuses = mutableMapOf<String, String>()
     private var notificationHosts = emptySet<String>()
     private var overlay = false
+    private var attentionItems = emptyList<AttentionItem>()
     override fun loadThemeMode(): ThemeMode = mode
     override fun saveThemeMode(mode: ThemeMode) {
         this.mode = mode
     }
-    override fun loadRunCheckpoint(): RunCheckpoint? = checkpoint
-    override fun saveRunCheckpoint(checkpoint: RunCheckpoint) { this.checkpoint = checkpoint }
-    override fun clearRunCheckpoint() { checkpoint = null }
+    override fun loadRunCheckpoints(): List<RunCheckpoint> = checkpoints
+    override fun saveRunCheckpoints(checkpoints: List<RunCheckpoint>) { this.checkpoints = checkpoints.distinct() }
+    override fun loadRunCheckpoint(): RunCheckpoint? = checkpoints.firstOrNull()
+    override fun saveRunCheckpoint(checkpoint: RunCheckpoint) { checkpoints = listOf(checkpoint) }
+    override fun clearRunCheckpoint() { checkpoints = emptyList() }
     override fun loadRunStatus(runId: String): String? = runStatuses[runId]
     override fun saveRunStatus(runId: String, status: String) { runStatuses[runId] = status }
     override fun clearRunStatus(runId: String) { runStatuses.remove(runId) }
@@ -60,6 +84,8 @@ private class InMemorySettingsStore : SettingsStore {
     override fun saveNotificationHostIds(hostIds: Set<String>) { notificationHosts = hostIds }
     override fun loadOverlayEnabled(): Boolean = overlay
     override fun saveOverlayEnabled(enabled: Boolean) { overlay = enabled }
+    override fun loadAttentionItems(): List<AttentionItem> = attentionItems
+    override fun saveAttentionItems(items: List<AttentionItem>) { attentionItems = items.distinctBy { it.hostId to it.sessionId } }
 }
 
 /** Durable, non-secret coordinates used to reconnect to a host-owned run. */
@@ -67,6 +93,20 @@ data class RunCheckpoint(
     val hostId: String,
     val sessionId: String,
     val runId: String,
+)
+
+/** A durable, non-secret indication that a session has an update to review. */
+data class AttentionItem(
+    val hostId: String,
+    val sessionId: String,
+    val title: String,
+    val state: String,
+)
+
+/** A session identifier is only unique inside its Hermes host. */
+data class SessionKey(
+    val hostId: String,
+    val sessionId: String,
 )
 
 sealed interface ChatUiItem {
@@ -167,13 +207,15 @@ data class HermesUiState(
     val jobs: List<HermesJob> = emptyList(),
     val skills: List<HermesSkill> = emptyList(),
     val models: List<String> = emptyList(),
-    val selectedModel: String? = null,
-    val selectedReasoningEffort: String? = null,
-    val composerText: String = "",
-    val isSending: Boolean = false,
+    val modelSelections: Map<SessionKey, String> = emptyMap(),
+    val reasoningSelections: Map<SessionKey, String> = emptyMap(),
+    val composerDrafts: Map<SessionKey, String> = emptyMap(),
+    val newSessionDrafts: Map<String, String> = emptyMap(),
+    val sendingSessions: Set<SessionKey> = emptySet(),
+    val creatingRunHosts: Set<String> = emptySet(),
     val isRefreshing: Boolean = false,
-    val activeRun: ActiveRun? = null,
-    val unknownOutcome: UnknownOutcome? = null,
+    val activeRuns: Map<SessionKey, ActiveRun> = emptyMap(),
+    val unknownOutcomes: Map<SessionKey, UnknownOutcome> = emptyMap(),
     val sessionActionsFor: String? = null,
     val confirmDeleteSessionId: String? = null,
     val errorMessage: String? = null,
@@ -184,6 +226,20 @@ data class HermesUiState(
     val activeHost: HostProfile? get() = hosts.firstOrNull { it.id == activeHostId }
     val activeSession: HermesSession? get() = sessions.firstOrNull { it.id == activeSessionId }
     val editingHost: HostProfile? get() = hosts.firstOrNull { it.id == editingHostId }
+    val activeSessionKey: SessionKey? get() = activeHostId?.let { hostId ->
+        activeSessionId?.let { sessionId -> SessionKey(hostId, sessionId) }
+    }
+    val selectedModel: String? get() = activeSessionKey?.let(modelSelections::get)
+    val selectedReasoningEffort: String? get() = activeSessionKey?.let(reasoningSelections::get)
+    val composerText: String get() = activeSessionKey?.let { composerDrafts[it] }
+        ?: activeHostId?.let { newSessionDrafts[it] }
+        .orEmpty()
+    val isSending: Boolean get() = activeSessionKey?.let(sendingSessions::contains) == true ||
+        (activeSessionKey == null && activeHostId in creatingRunHosts)
+    val activeRun: ActiveRun? get() = activeSessionKey?.let(activeRuns::get)
+    val unknownOutcome: UnknownOutcome? get() = activeSessionKey?.let(unknownOutcomes::get)
+    val otherActiveRuns: List<ActiveRun>
+        get() = activeRuns.filterKeys { it != activeSessionKey }.values.toList()
 
     /** Loaded messages plus the live Run tail (and Approval card) when its Session is displayed. */
     val displayedMessages: List<ChatUiItem>
@@ -198,7 +254,12 @@ data class HermesUiState(
 
     /** Run banner is shown whenever the Run's Session is not the visible chat. */
     val runBannerVisible: Boolean
-        get() = activeRun != null && (screen != DeckScreen.Chat || activeRun.sessionId != activeSessionId)
+        get() = otherActiveRuns.isNotEmpty() || (activeRun != null && screen != DeckScreen.Chat)
+
+    fun isSessionBusy(hostId: String, sessionId: String): Boolean =
+        SessionKey(hostId, sessionId) in activeRuns
+
+    fun hasActiveRunOnHost(hostId: String): Boolean = activeRuns.keys.any { it.hostId == hostId }
 
     fun slashSuggestions(): List<SlashSuggestion> {
         if (!composerText.startsWith("/") || composerText.contains(' ') || composerText.contains('\n')) return emptyList()
@@ -220,6 +281,58 @@ class HermesViewModel(
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(HermesUiState())
     val state: StateFlow<HermesUiState> = mutableState.asStateFlow()
+
+    private fun ActiveRun.key(): SessionKey = SessionKey(host.id, sessionId)
+
+    private fun HermesUiState.withDraft(key: SessionKey?, value: String): HermesUiState {
+        val trimmed = value.take(MAX_COMPOSER_LENGTH)
+        if (key != null) return copy(composerDrafts = composerDrafts + (key to trimmed))
+        val hostId = activeHostId ?: return this
+        return copy(newSessionDrafts = newSessionDrafts + (hostId to trimmed))
+    }
+
+    private fun HermesUiState.withModelSelection(key: SessionKey?, model: String?): HermesUiState {
+        if (key == null) return this
+        val nextModels = model?.let { modelSelections + (key to it) } ?: modelSelections - key
+        return copy(modelSelections = nextModels)
+    }
+
+    private fun HermesUiState.withReasoningSelection(key: SessionKey?, reasoning: String?): HermesUiState {
+        if (key == null) return this
+        val nextReasoning = reasoning?.let { reasoningSelections + (key to it) } ?: reasoningSelections - key
+        return copy(reasoningSelections = nextReasoning)
+    }
+
+    private fun HermesUiState.withSending(key: SessionKey, sending: Boolean): HermesUiState = copy(
+        sendingSessions = if (sending) sendingSessions + key else sendingSessions - key,
+    )
+
+    private fun HermesUiState.withNewSessionSending(hostId: String, sending: Boolean): HermesUiState = copy(
+        creatingRunHosts = if (sending) creatingRunHosts + hostId else creatingRunHosts - hostId,
+    )
+
+    private fun HermesUiState.withRun(key: SessionKey, run: ActiveRun?): HermesUiState = copy(
+        activeRuns = if (run == null) activeRuns - key else activeRuns + (key to run),
+    )
+
+    private fun HermesUiState.withUnknownOutcome(key: SessionKey, outcome: UnknownOutcome?): HermesUiState = copy(
+        unknownOutcomes = if (outcome == null) unknownOutcomes - key else unknownOutcomes + (key to outcome),
+    )
+
+    private fun HermesUiState.rekeySession(oldKey: SessionKey, newKey: SessionKey): HermesUiState {
+        if (oldKey == newKey) return this
+        fun <T> Map<SessionKey, T>.move(value: (T) -> T = { it }): Map<SessionKey, T> =
+            this[oldKey]?.let { (this - oldKey) + (newKey to value(it)) } ?: this
+        return copy(
+            activeSessionId = if (activeHostId == oldKey.hostId && activeSessionId == oldKey.sessionId) newKey.sessionId else activeSessionId,
+            modelSelections = modelSelections.move(),
+            reasoningSelections = reasoningSelections.move(),
+            composerDrafts = composerDrafts.move(),
+            sendingSessions = if (oldKey in sendingSessions) (sendingSessions - oldKey) + newKey else sendingSessions,
+            activeRuns = activeRuns.move { run -> run.copy(sessionId = newKey.sessionId) },
+            unknownOutcomes = unknownOutcomes.move { pending -> pending.copy(sessionId = newKey.sessionId) },
+        )
+    }
 
     init {
         val loadResult = hostStore.load()
@@ -265,6 +378,7 @@ class HermesViewModel(
 
     fun openSessionFromNotification(hostId: String, sessionId: String) {
         val host = mutableState.value.hosts.firstOrNull { it.id == hostId } ?: return
+        settingsStore.clearAttention(hostId, sessionId)
         if (mutableState.value.activeHostId != hostId) {
             mutableState.update {
                 it.copy(activeHostId = hostId, screen = DeckScreen.Chat, activeSessionId = sessionId, messages = emptyList())
@@ -281,7 +395,7 @@ class HermesViewModel(
     }
 
     fun setComposerText(value: String) {
-        mutableState.update { it.copy(composerText = value.take(8_000)) }
+        mutableState.update { state -> state.withDraft(state.activeSessionKey, value) }
     }
 
     fun showHostPicker() {
@@ -309,9 +423,8 @@ class HermesViewModel(
         apiKey: String,
         allowInsecureHttp: Boolean,
     ) {
-        if (mutableState.value.activeRun != null) {
-            // Saving always switches the active host; that orphans the Run.
-            mutableState.update { it.copy(errorMessage = "A run is still active. Stop it before changing hosts.") }
+        if (existingId != null && mutableState.value.hasActiveRunOnHost(existingId)) {
+            mutableState.update { it.copy(errorMessage = "A run is active on this host. Stop it before editing the host.") }
             return
         }
         val existing = existingId?.let { id -> mutableState.value.hosts.firstOrNull { it.id == id } }
@@ -350,10 +463,6 @@ class HermesViewModel(
             mutableState.update { it.copy(showHostPicker = false, editingHostId = null, errorMessage = null) }
             return
         }
-        if (mutableState.value.activeRun != null && mutableState.value.activeHostId != hostId) {
-            mutableState.update { it.copy(errorMessage = "A run is still active. Stop it before switching hosts.") }
-            return
-        }
         persist(HostSnapshot(mutableState.value.hosts, hostId))
         mutableState.update {
             it.copy(
@@ -375,7 +484,7 @@ class HermesViewModel(
     }
 
     fun deleteHost(hostId: String) {
-        if (hostId == mutableState.value.activeRun?.host?.id) {
+        if (mutableState.value.hasActiveRunOnHost(hostId)) {
             mutableState.update { it.copy(errorMessage = "A run is active on this host. Stop it before deleting the host.") }
             return
         }
@@ -404,12 +513,19 @@ class HermesViewModel(
                     notificationHostIds = notificationHostIds,
                 )
             } else {
-                HermesUiState(
+                state.copy(
                     hosts = hosts,
                     activeHostId = selected,
                     showHostPicker = hosts.isEmpty(),
                     connectionPhase = if (selected == null) HostConnectionPhase.NoHost else HostConnectionPhase.Connecting,
-                    themeMode = state.themeMode,
+                    capabilities = null,
+                    sessions = emptyList(),
+                    sessionsHasMore = false,
+                    activeSessionId = null,
+                    messages = emptyList(),
+                    jobs = emptyList(),
+                    skills = emptyList(),
+                    models = emptyList(),
                     notificationHostIds = notificationHostIds,
                     overlayEnabled = state.overlayEnabled && notificationHostIds.isNotEmpty(),
                 )
@@ -488,6 +604,7 @@ class HermesViewModel(
 
     fun selectSession(sessionId: String) {
         val host = mutableState.value.activeHost ?: return
+        settingsStore.clearAttention(host.id, sessionId)
         mutableState.update { it.copy(activeSessionId = sessionId, screen = DeckScreen.Chat, messages = emptyList(), errorMessage = null) }
         viewModelScope.launch {
             runCatching { gateway.loadMessages(host, sessionId) }
@@ -498,12 +615,16 @@ class HermesViewModel(
 
     /** null selects the Host default; unknown aliases fall back host-side anyway. */
     fun selectModel(model: String?) {
-        mutableState.update { it.copy(selectedModel = model?.takeIf { m -> m in it.models }) }
+        mutableState.update { state ->
+            state.withModelSelection(state.activeSessionKey, model?.takeIf { it in state.models })
+        }
     }
 
     /** null selects the Host default reasoning effort. */
     fun selectReasoningEffort(effort: String?) {
-        mutableState.update { it.copy(selectedReasoningEffort = effort?.takeIf { e -> e in REASONING_EFFORTS }) }
+        mutableState.update { state ->
+            state.withReasoningSelection(state.activeSessionKey, effort?.takeIf { it in REASONING_EFFORTS })
+        }
     }
 
     fun toggleJob(job: HermesJob) {
@@ -531,11 +652,11 @@ class HermesViewModel(
     }
 
     fun returnToRunSession() {
-        val run = mutableState.value.activeRun ?: return
-        if (mutableState.value.activeSessionId == run.sessionId) {
+        val run = mutableState.value.otherActiveRuns.firstOrNull() ?: mutableState.value.activeRun ?: return
+        if (mutableState.value.activeHostId == run.host.id && mutableState.value.activeSessionId == run.sessionId) {
             mutableState.update { it.copy(screen = DeckScreen.Chat) }
         } else {
-            selectSession(run.sessionId)
+            openSessionFromNotification(run.host.id, run.sessionId)
         }
     }
 
@@ -554,11 +675,13 @@ class HermesViewModel(
         when (suggestion.kind) {
             // Typed dispatch: a Skill row never re-parses slash text, so a
             // skill named like a reserved command stays reachable.
-            SlashKind.Skill -> mutableState.update { it.copy(composerText = "Use the ${suggestion.name} skill: ") }
+            SlashKind.Skill -> mutableState.update { state ->
+                state.withDraft(state.activeSessionKey, "Use the ${suggestion.name} skill: ")
+            }
             SlashKind.Command -> when (suggestion.name) {
-                "rename" -> mutableState.update { it.copy(composerText = "/rename ") }
+                "rename" -> mutableState.update { state -> state.withDraft(state.activeSessionKey, "/rename ") }
                 else -> {
-                    mutableState.update { it.copy(composerText = "") }
+                    mutableState.update { state -> state.withDraft(state.activeSessionKey, "") }
                     dispatchLocalCommand("/${suggestion.name}")
                 }
             }
@@ -571,13 +694,7 @@ class HermesViewModel(
         val args = text.substringAfter(' ', "").trim()
         if (LOCAL_COMMANDS.none { it.name == command }) return false
 
-        val run = mutableState.value.activeRun
-        if (run != null && command != "stop") {
-            mutableState.update { it.copy(errorMessage = "A run is in progress. Use /stop to interrupt it first.") }
-            return true
-        }
-
-        mutableState.update { it.copy(composerText = "") }
+        mutableState.update { state -> state.withDraft(state.activeSessionKey, "") }
         when (command) {
             "new" -> createSession()
             "stop" -> stopActiveRun()
@@ -604,7 +721,7 @@ class HermesViewModel(
         val host = snapshot.activeHost ?: return
         if (snapshot.connectionPhase != HostConnectionPhase.Connected) return
         if (snapshot.activeRun != null) {
-            mutableState.update { it.copy(errorMessage = "A run is in progress. Use /stop to interrupt it first.") }
+            mutableState.update { it.copy(errorMessage = "This session is still running. You can keep drafting and send when it finishes.") }
             return
         }
         if (snapshot.unknownOutcome != null) return
@@ -616,7 +733,12 @@ class HermesViewModel(
             return
         }
 
-        mutableState.update { it.copy(composerText = "", isSending = true, errorMessage = null) }
+        val initialKey = snapshot.activeSessionKey
+        mutableState.update { state ->
+            if (initialKey == null) state.withNewSessionSending(host.id, true)
+                .copy(newSessionDrafts = state.newSessionDrafts - host.id, errorMessage = null)
+            else state.withDraft(initialKey, "").withSending(initialKey, true).copy(errorMessage = null)
+        }
 
         viewModelScope.launch {
             try {
@@ -627,10 +749,20 @@ class HermesViewModel(
                         }
                     }
 
+                var runKey = SessionKey(host.id, session.id)
+                mutableState.update { state ->
+                    state.withNewSessionSending(host.id, false).withSending(runKey, true)
+                }
+
                 // Pre-submit refresh: narrows multi-writer staleness, resolves a
                 // rotated session, and is the exact history the run executes on.
                 val page = gateway.loadMessages(host, session.id)
                 applyLoadedMessages(requestedId = session.id, page = page)
+                val resolvedKey = SessionKey(host.id, page.sessionId)
+                if (resolvedKey != runKey) {
+                    mutableState.update { state -> state.rekeySession(runKey, resolvedKey) }
+                    runKey = resolvedKey
+                }
 
                 val current = mutableState.value
                 val runId = try {
@@ -639,24 +771,23 @@ class HermesViewModel(
                         page.sessionId,
                         text,
                         page.messages,
-                        current.selectedModel,
-                        current.selectedReasoningEffort.takeIf { capabilities.supportsReasoningEffort },
+                        current.modelSelections[runKey],
+                        current.reasoningSelections[runKey].takeIf { capabilities.supportsReasoningEffort },
                     )
                 } catch (error: HermesApiException) {
                     // The host answered: the run was not accepted.
                     showFailure(error)
-                    mutableState.update { it.copy(isSending = false) }
+                    mutableState.update { state -> state.withSending(runKey, false).withNewSessionSending(host.id, false) }
                     return@launch
                 } catch (error: Throwable) {
                     // Response lost — the host may be executing the turn.
                     logRun("submit outcome unknown session=${page.sessionId}")
-                    mutableState.update {
-                        it.copy(
-                            isSending = false,
-                            unknownOutcome = UnknownOutcome(page.sessionId, page.messages.size, text),
-                        )
+                    mutableState.update { state ->
+                        state.withSending(runKey, false)
+                            .withNewSessionSending(host.id, false)
+                            .withUnknownOutcome(runKey, UnknownOutcome(page.sessionId, page.messages.size, text))
                     }
-                    watchUnknownOutcome(host)
+                    watchUnknownOutcome(host, runKey)
                     return@launch
                 }
 
@@ -675,11 +806,14 @@ class HermesViewModel(
                 persistRunCoordinates(run)
                 updateRunStatus(run.runId, "Starting task…")
                 logRun("run started runId=$runId sessionId=${run.sessionId}")
-                mutableState.update { it.copy(isSending = false, activeRun = run) }
+                mutableState.update { state -> state.withSending(runKey, false).withRun(runKey, run) }
                 driveRun(run)
             } catch (error: Throwable) {
                 showFailure(error)
-                mutableState.update { it.copy(isSending = false) }
+                mutableState.update { state ->
+                    initialKey?.let { state.withSending(it, false) }?.withNewSessionSending(host.id, false)
+                        ?: state.withNewSessionSending(host.id, false)
+                }
             }
         }
     }
@@ -706,49 +840,42 @@ class HermesViewModel(
     /** Returns true for terminal events. Ignores events for a Run that is no longer active. */
     private fun handleRunEvent(run: ActiveRun, event: HermesRunEvent): Boolean {
         var terminal = false
+        val key = run.key()
         runStatusText(event)?.let { updateRunStatus(run.runId, it) }
         mutableState.update { state ->
-            val current = state.activeRun
+            val current = state.activeRuns[key]
             if (current == null || current.runId != run.runId) return@update state
             when (event) {
                 is HermesRunEvent.MessageDelta -> state.copy(
-                    activeRun = current.copy(tail = current.tail.map { item ->
+                    activeRuns = state.activeRuns + (key to current.copy(tail = current.tail.map { item ->
                         if (item is ChatUiItem.Assistant && item.id == current.assistantId) item.copy(text = item.text + event.delta) else item
-                    })
+                    }))
                 )
                 is HermesRunEvent.ReasoningAvailable -> {
                     val text = event.text.trim().take(MAX_REASONING_UPDATE_LENGTH)
-                    if (text.isBlank()) state else state.copy(
-                        activeRun = current.copy(tail = upsertReasoning(current, text))
-                    )
+                    if (text.isBlank()) state else state.withRun(key, current.copy(tail = upsertReasoning(current, text)))
                 }
-                is HermesRunEvent.ToolStarted -> state.copy(
-                    activeRun = current.copy(tail = insertBeforeAssistant(current, ChatUiItem.Tool(
+                is HermesRunEvent.ToolStarted -> state.withRun(key, current.copy(tail = insertBeforeAssistant(current, ChatUiItem.Tool(
                         id = "${current.runId}:${event.tool}:${current.tail.size}",
                         name = event.tool,
                         preview = event.preview,
                         running = true,
-                    )))
-                )
-                is HermesRunEvent.ToolCompleted -> state.copy(
-                    activeRun = current.copy(tail = current.tail.map { item ->
+                    ))))
+                is HermesRunEvent.ToolCompleted -> state.withRun(key, current.copy(tail = current.tail.map { item ->
                         if (item is ChatUiItem.Tool && item.name == event.tool && item.running) {
                             item.copy(running = false, failed = event.failed)
                         } else item
-                    })
-                )
-                is HermesRunEvent.ApprovalRequested -> state.copy(
+                    }))
+                is HermesRunEvent.ApprovalRequested -> state.withRun(key,
                     // One actionable card per Run: a second request keeps the
                     // first card until it resolves (host queue is FIFO).
-                    activeRun = if (current.awaitingApproval) current
+                    if (current.awaitingApproval) current
                     else current.copy(awaitingApproval = true, approvalCommand = event.command, approvalDetailsLost = false)
                 )
-                is HermesRunEvent.ApprovalResponded -> state.copy(
-                    activeRun = current.copy(awaitingApproval = false, approvalCommand = null)
-                )
+                is HermesRunEvent.ApprovalResponded -> state.withRun(key, current.copy(awaitingApproval = false, approvalCommand = null))
                 is HermesRunEvent.Completed -> {
                     terminal = true
-                    state.copy(activeRun = current.copy(tail = current.tail.map { item ->
+                    state.withRun(key, current.copy(tail = current.tail.map { item ->
                         if (item is ChatUiItem.Assistant && item.id == current.assistantId) {
                             item.copy(text = event.output.ifBlank { item.text }, streaming = false)
                         } else item
@@ -810,10 +937,11 @@ class HermesViewModel(
     /** Capped-backoff status polling. Returns true when the Run reached a terminal state. */
     private suspend fun pollUntilTerminal(run: ActiveRun): Boolean {
         var delayMs = 2_000L
+        val key = run.key()
         // The run belongs to the host, not the Activity. Keep reconciling when
         // Android backgrounds the UI; durable coordinates restore this loop
         // after process death.
-        while (mutableState.value.activeRun?.runId == run.runId) {
+        while (mutableState.value.activeRuns[key]?.runId == run.runId) {
             delay(delayMs)
             delayMs = (delayMs * 2).coerceAtMost(30_000L)
             val result = runCatching { gateway.getRunStatus(run.host, run.runId) }
@@ -825,8 +953,9 @@ class HermesViewModel(
                 // The SSE queue died with the approval payload; only the host
                 // (or Stop) can resolve this safely.
                 mutableState.update { state ->
-                    if (state.activeRun?.runId != run.runId) state
-                    else state.copy(activeRun = state.activeRun.copy(awaitingApproval = true, approvalDetailsLost = true))
+                    val current = state.activeRuns[key]
+                    if (current?.runId != run.runId) state
+                    else state.withRun(key, current.copy(awaitingApproval = true, approvalDetailsLost = true))
                 }
             }
         }
@@ -835,11 +964,12 @@ class HermesViewModel(
 
     private suspend fun finalizeRun(run: ActiveRun) {
         logRun("run finalize runId=${run.runId}")
-        clearRunCoordinates()
+        val key = run.key()
+        clearRunCoordinates(run)
         val page = runCatching { gateway.loadMessages(run.host, run.sessionId) }.getOrNull()
         mutableState.update { state ->
-            val cleared = if (state.activeRun?.runId == run.runId) state.copy(activeRun = null, isSending = false) else state
-            if (page != null && cleared.activeSessionId == run.sessionId) {
+            val cleared = if (state.activeRuns[key]?.runId == run.runId) state.withRun(key, null).withSending(key, false) else state
+            if (page != null && cleared.activeHostId == run.host.id && cleared.activeSessionId == run.sessionId) {
                 cleared.copy(
                     activeSessionId = page.sessionId,
                     messages = page.messages.mapNotNull(::mapStoredMessage),
@@ -851,6 +981,7 @@ class HermesViewModel(
 
     fun respondApproval(choice: String) {
         val run = mutableState.value.activeRun ?: return
+        val key = run.key()
         viewModelScope.launch {
             logRun("approval response runId=${run.runId} choice=$choice")
             runCatching { gateway.respondApproval(run.host, run.runId, choice) }
@@ -860,8 +991,9 @@ class HermesViewModel(
                     if ((error as? HermesApiException)?.statusCode != 409) showFailure(error)
                 }
             mutableState.update { state ->
-                if (state.activeRun?.runId != run.runId) state
-                else state.copy(activeRun = state.activeRun.copy(awaitingApproval = false, approvalCommand = null))
+                val current = state.activeRuns[key]
+                if (current?.runId != run.runId) state
+                else state.withRun(key, current.copy(awaitingApproval = false, approvalCommand = null))
             }
         }
     }
@@ -876,16 +1008,18 @@ class HermesViewModel(
             mutableState.update { it.copy(errorMessage = "No run is active.") }
             return
         }
+        val key = run.key()
         mutableState.update { state ->
-            if (state.activeRun?.runId != run.runId) state
-            else state.copy(activeRun = state.activeRun.copy(stopping = true))
+            val current = state.activeRuns[key]
+            if (current?.runId != run.runId) state
+            else state.withRun(key, current.copy(stopping = true))
         }
         viewModelScope.launch {
             logRun("stop requested runId=${run.runId}")
             runCatching { gateway.stopRun(run.host, run.runId) }.onFailure(::showFailure)
             // Stop is not terminal ("stopping"): the live stream/poll drives to
             // run.cancelled. If the stream is already gone, poll here.
-            if (mutableState.value.activeRun?.runId == run.runId && run.approvalDetailsLost) {
+            if (mutableState.value.activeRuns[key]?.runId == run.runId && run.approvalDetailsLost) {
                 if (pollUntilTerminal(run)) finalizeRun(run)
             }
         }
@@ -897,12 +1031,12 @@ class HermesViewModel(
     // Unknown submission outcome
     // ------------------------------------------------------------------
 
-    private fun watchUnknownOutcome(host: HostProfile) {
+    private fun watchUnknownOutcome(host: HostProfile, key: SessionKey) {
         viewModelScope.launch {
             var delayMs = 2_000L
             var waited = 0L
             while (waited < 120_000L) {
-                val pending = mutableState.value.unknownOutcome ?: return@launch
+                val pending = mutableState.value.unknownOutcomes[key] ?: return@launch
                 delay(delayMs)
                 waited += delayMs
                 delayMs = (delayMs * 2).coerceAtMost(30_000L)
@@ -911,13 +1045,13 @@ class HermesViewModel(
                 // older identical text proves nothing.
                 if (page.messages.size > pending.baselineCount) {
                     mutableState.update { state ->
-                        state.unknownOutcome?.let { state.copy(unknownOutcome = it.copy(evidence = true)) } ?: state
+                        state.unknownOutcomes[key]?.let { state.withUnknownOutcome(key, it.copy(evidence = true)) } ?: state
                     }
                     return@launch
                 }
             }
             mutableState.update { state ->
-                state.unknownOutcome?.let { state.copy(unknownOutcome = it.copy(timedOut = true)) } ?: state
+                state.unknownOutcomes[key]?.let { state.withUnknownOutcome(key, it.copy(timedOut = true)) } ?: state
             }
         }
     }
@@ -926,7 +1060,8 @@ class HermesViewModel(
     fun acknowledgeUnknownOutcome() {
         val pending = mutableState.value.unknownOutcome ?: return
         val host = mutableState.value.activeHost
-        mutableState.update { it.copy(unknownOutcome = null) }
+        val key = mutableState.value.activeSessionKey ?: return
+        mutableState.update { state -> state.withUnknownOutcome(key, null) }
         if (host != null && mutableState.value.activeSessionId == pending.sessionId) {
             selectSession(pending.sessionId)
         }
@@ -1016,7 +1151,8 @@ class HermesViewModel(
     }
 
     private fun guardSessionBusy(sessionId: String): Boolean {
-        if (mutableState.value.activeRun?.sessionId == sessionId) {
+        val hostId = mutableState.value.activeHostId
+        if (hostId != null && mutableState.value.isSessionBusy(hostId, sessionId)) {
             mutableState.update { it.copy(errorMessage = "A run is active in this session. Stop it first.", sessionActionsFor = null) }
             return true
         }
@@ -1054,7 +1190,7 @@ class HermesViewModel(
                         jobs = jobs,
                         skills = skills,
                         models = models,
-                        selectedModel = it.selectedModel?.takeIf { model -> model in models },
+                        modelSelections = it.modelSelections.filter { (key, model) -> key.hostId != hostId || model in models },
                         activeSessionId = it.activeSessionId?.takeIf { id -> sessionPage.sessions.any { session -> session.id == id } },
                         errorMessage = null,
                     )
@@ -1074,64 +1210,82 @@ class HermesViewModel(
     }
 
     private fun recoverRunAfterProcessDeath(snapshot: HostSnapshot) {
-        val durable = settingsStore.loadRunCheckpoint()
-        val hostId = durable?.hostId ?: savedState.get<String>(KEY_RUN_HOST) ?: return
-        val sessionId = durable?.sessionId ?: savedState.get<String>(KEY_RUN_SESSION) ?: return
-        val runId = durable?.runId ?: savedState.get<String>(KEY_RUN_ID) ?: return
-        val host = snapshot.hosts.firstOrNull { it.id == hostId }
-        if (host == null) {
-            clearRunCoordinates()
-            return
+        val legacy = savedState.get<String>(KEY_RUN_HOST)?.let { hostId ->
+            val sessionId = savedState.get<String>(KEY_RUN_SESSION)
+            val runId = savedState.get<String>(KEY_RUN_ID)
+            if (!sessionId.isNullOrBlank() && !runId.isNullOrBlank()) RunCheckpoint(hostId, sessionId, runId) else null
         }
-        logRun("recovering run after process death runId=$runId")
-        val run = ActiveRun(
-            host = host,
-            sessionId = sessionId,
-            sessionTitle = null,
-            runId = runId,
-            recovered = true,
-            // The SSE queue died with the process; live output and approval
-            // payloads are unrecoverable. Status polling + Stop remain.
-            approvalDetailsLost = true,
-        )
-        mutableState.update { it.copy(activeRun = run) }
-        if (settingsStore.loadRunStatus(runId).isNullOrBlank()) {
-            updateRunStatus(runId, "Reconnected to the active task…")
-        }
-        viewModelScope.launch {
-            val result = runCatching { gateway.getRunStatus(host, runId) }
-            val status = result.getOrNull()
-            if (status?.isTerminal == true || (result.exceptionOrNull() as? HermesApiException)?.statusCode == 404) {
-                finalizeRun(run)
-                return@launch
+        val checkpoints = (settingsStore.loadRunCheckpoints() + listOfNotNull(legacy))
+            .distinctBy(RunCheckpoint::runId)
+        if (checkpoints.isEmpty()) return
+
+        checkpoints.forEach { checkpoint ->
+            val host = snapshot.hosts.firstOrNull { it.id == checkpoint.hostId }
+            if (host == null) {
+                clearRunCoordinates(checkpoint)
+                return@forEach
             }
-            if (pollUntilTerminal(run)) finalizeRun(run)
+            val run = ActiveRun(
+                host = host,
+                sessionId = checkpoint.sessionId,
+                sessionTitle = null,
+                runId = checkpoint.runId,
+                recovered = true,
+                // The SSE queue died with the process; live output and approval
+                // payloads are unrecoverable. Status polling + Stop remain.
+                approvalDetailsLost = true,
+            )
+            val key = run.key()
+            logRun("recovering run after process death runId=${run.runId}")
+            mutableState.update { state -> state.withRun(key, run) }
+            if (settingsStore.loadRunStatus(run.runId).isNullOrBlank()) {
+                updateRunStatus(run.runId, "Reconnected to the active task…")
+            }
+            viewModelScope.launch {
+                val result = runCatching { gateway.getRunStatus(host, run.runId) }
+                val status = result.getOrNull()
+                if (status?.isTerminal == true || (result.exceptionOrNull() as? HermesApiException)?.statusCode == 404) {
+                    finalizeRun(run)
+                    return@launch
+                }
+                if (pollUntilTerminal(run)) finalizeRun(run)
+            }
         }
     }
 
     private fun persistRunCoordinates(run: ActiveRun) {
-        savedState[KEY_RUN_HOST] = run.host.id
-        savedState[KEY_RUN_SESSION] = run.sessionId
-        savedState[KEY_RUN_ID] = run.runId
-        settingsStore.saveRunCheckpoint(RunCheckpoint(run.host.id, run.sessionId, run.runId))
+        val checkpoints = (mutableState.value.activeRuns.values + run)
+            .map { active -> RunCheckpoint(active.host.id, active.sessionId, active.runId) }
+            .distinctBy(RunCheckpoint::runId)
+        settingsStore.saveRunCheckpoints(checkpoints)
     }
 
-    private fun clearRunCoordinates() {
-        val runId = savedState.get<String>(KEY_RUN_ID) ?: settingsStore.loadRunCheckpoint()?.runId
-        savedState.remove<String>(KEY_RUN_HOST)
-        savedState.remove<String>(KEY_RUN_SESSION)
-        savedState.remove<String>(KEY_RUN_ID)
-        settingsStore.clearRunCheckpoint()
-        runId?.let(settingsStore::clearRunStatus)
+    private fun clearRunCoordinates(run: ActiveRun) {
+        clearRunCoordinates(RunCheckpoint(run.host.id, run.sessionId, run.runId))
+    }
+
+    private fun clearRunCoordinates(checkpoint: RunCheckpoint) {
+        val remaining = settingsStore.loadRunCheckpoints().filterNot { it.runId == checkpoint.runId }
+        settingsStore.saveRunCheckpoints(remaining)
+        settingsStore.clearRunStatus(checkpoint.runId)
+        if (savedState.get<String>(KEY_RUN_ID) == checkpoint.runId) {
+            savedState.remove<String>(KEY_RUN_HOST)
+            savedState.remove<String>(KEY_RUN_SESSION)
+            savedState.remove<String>(KEY_RUN_ID)
+        }
     }
 
     private fun applyLoadedMessages(requestedId: String, page: HermesMessagesPage) {
+        val hostId = mutableState.value.activeHostId
         mutableState.update { state ->
+            val requestedKey = hostId?.let { SessionKey(it, requestedId) }
+            val resolvedKey = hostId?.let { SessionKey(it, page.sessionId) }
+            val rekeyed = if (requestedKey != null && resolvedKey != null) state.rekeySession(requestedKey, resolvedKey) else state
             // Adopt the resolved id only when the user still displays the
             // Session that was loaded — a background load must not hijack
             // navigation, only re-key.
-            if (state.activeSessionId != requestedId) state
-            else state.copy(
+            if (rekeyed.activeHostId != hostId || rekeyed.activeSessionId != page.sessionId) rekeyed
+            else rekeyed.copy(
                 activeSessionId = page.sessionId,
                 messages = page.messages.mapNotNull(::mapStoredMessage),
             )
@@ -1169,7 +1323,7 @@ class HermesViewModel(
     }
 
     private fun showFailure(error: Throwable) {
-        mutableState.update { it.copy(errorMessage = friendlyMessage(error), isSending = false) }
+        mutableState.update { it.copy(errorMessage = friendlyMessage(error)) }
     }
 
     private fun friendlyMessage(error: Throwable): String = when (error) {
@@ -1189,6 +1343,7 @@ class HermesViewModel(
         private const val MAX_REASONING_UPDATES = 12
         private const val MAX_REASONING_UPDATE_LENGTH = 8_000
         private const val MAX_OVERLAY_STATUS_LENGTH = 180
+        private const val MAX_COMPOSER_LENGTH = 8_000
         private const val KEY_RUN_HOST = "run.hostId"
         private const val KEY_RUN_SESSION = "run.sessionId"
         private const val KEY_RUN_ID = "run.runId"
