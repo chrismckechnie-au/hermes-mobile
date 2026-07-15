@@ -21,8 +21,10 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - Session listing with pagination (`has_more`), pull-to-refresh, request-derived titles for new chats, direct chat-header rename, delete, history loading, and selection
 - On-device session search plus All, Running, Approval, Mobile, and Desktop filter pills across loaded sessions, with host-default model aliases resolved to the configured model and explicit Android sharing of user/assistant transcripts without tool previews or progress details
 - Host model discovery with compact model, reasoning-effort, and permission controls directly above the Chat composer
-- Independent streaming runs per host/session, with stop/cancel, follow-up messages that interrupt and replace the current run, multi-run process-death recovery, and unknown-submit protection
-- Sessions are sorted by latest activity, with active work pinned first, visible-list liveness refresh, missed-terminal reconciliation, and clear running, queued, approval, stopping, and no-recent-activity indicators
+- Capability-gated live task, subagent, and workspace-change pills, including a bounded per-file diff sheet when the host exposes `run_workspace_updates`
+- Independent streaming runs per host/session, with stop/cancel, follow-up messages that interrupt and replace the current run, durable event-cursor replay after network/process loss, and idempotent submit retry protection
+- Sessions are sorted by latest activity, with active work pinned first, visible-list liveness refresh, missed-terminal reconciliation, distinct Running and Stalled filters, and safe manual cleanup for stale host activity
+- Host-backed `/goal` and installed-skill `/plan` commands appear in composer autocomplete with a command indicator when the host advertises slash-command Run support
 - Browse host skills and toolsets from the Host tab; start a skill in Chat or inspect the concrete host tools it exposes, including plugin-contributed tools when available
 - Optional Android system dictation from the composer, appending the recognizer result to the current draft
 - Markdown rendering of assistant replies (code blocks with copy, headings, bullets, bold/italic/inline code, links)
@@ -48,6 +50,7 @@ The client uses the following Hermes HTTP surface:
 - `GET /v1/skills`
 - `GET /v1/toolsets`
 - `GET /v1/active-sessions`
+- `DELETE /v1/active-sessions/{lease_id}` (only for host-confirmed stale activity)
 - `PUT` / `DELETE /v1/mobile/devices/{installation_id}`
 - `POST /v1/runs`
 - `GET /v1/runs/{id}` / `GET /v1/runs/{id}/events`
@@ -109,8 +112,10 @@ Entering a URL ending in `/v1` is also supported; the client normalizes it to th
 
 Runs execute on the Hermes host and continue when the Android activity or app
 process closes. Hermes Mobile durably stores every active host/session/run
-coordinate, reconnects to each `/v1/runs/{run_id}`, and reconciles long-running
-work after a live SSE connection is lost. A run in one session never prevents
+coordinate and its latest SSE event cursor, reconnects to each
+`/v1/runs/{run_id}/events`, and reconciles long-running work after a live SSE
+connection is lost. Retry-safe hosts also receive one stable `Idempotency-Key`
+per logical submission. A run in one session never prevents
 drafting or starting work in another session or host.
 
 Push delivery is opt-in per saved host under **Settings → Notifications**. The

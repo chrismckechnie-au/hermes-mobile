@@ -87,7 +87,7 @@ class HermesOverlayService : Service() {
     private suspend fun refreshSessions() {
         val next = withContext(Dispatchers.IO) {
             val settings = PreferencesSettingsStore(applicationContext)
-            val enabled = settings.loadNotificationHostIds()
+            val enabled = settings.loadMonitoredHostIds()
             val hosts = SecureHostStore(applicationContext).load().snapshot.hosts.filter { it.id in enabled }
             val attention = settings.loadAttentionItems().filter { it.hostId in hosts.map(HostProfile::id) }
             val gateway = HermesHttpGateway()

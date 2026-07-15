@@ -115,6 +115,39 @@ object HostSnapshotCodec {
     }
 }
 
+/** Pure codec so queued follow-up migrations stay JVM-testable. */
+object QueuedInterruptRecordCodec {
+    fun encode(records: List<QueuedInterruptRecord>): String = JSONArray().apply {
+        records.distinctBy(QueuedInterruptRecord::runId).forEach { record ->
+            put(JSONObject().apply {
+                put("hostId", record.hostId)
+                put("sessionId", record.sessionId)
+                put("runId", record.runId)
+                put("text", record.text.take(8_000))
+                put("mode", record.mode.name.lowercase())
+            })
+        }
+    }.toString()
+
+    fun decode(raw: String): List<QueuedInterruptRecord> = runCatching {
+        val array = JSONArray(raw)
+        buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val hostId = item.optString("hostId")
+                val sessionId = item.optString("sessionId")
+                val runId = item.optString("runId")
+                val text = item.optString("text")
+                if (hostId.isBlank() || sessionId.isBlank() || runId.isBlank() || text.isBlank()) continue
+                val mode = FollowUpMode.entries.firstOrNull {
+                    it.name.equals(item.optString("mode"), ignoreCase = true)
+                } ?: FollowUpMode.Interrupt
+                add(QueuedInterruptRecord(hostId, sessionId, runId, text, mode))
+            }
+        }.distinctBy(QueuedInterruptRecord::runId)
+    }.getOrDefault(emptyList())
+}
+
 /** Plain (unencrypted) SharedPreferences store for non-sensitive app settings. */
 class PreferencesSettingsStore(context: Context) : SettingsStore {
     private val preferences = context.getSharedPreferences("hermes_mobile_settings", Context.MODE_PRIVATE)
@@ -139,7 +172,16 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
                         val sessionId = item.optString("sessionId")
                         val runId = item.optString("runId")
                         if (hostId.isNotBlank() && sessionId.isNotBlank() && runId.isNotBlank()) {
-                            add(RunCheckpoint(hostId, sessionId, runId))
+                            add(
+                                RunCheckpoint(
+                                    hostId,
+                                    sessionId,
+                                    runId,
+                                    item.optLong("lastEventId").takeIf {
+                                        item.has("lastEventId") && it > 0L
+                                    },
+                                ),
+                            )
                         }
                     }
                 }.distinct()
@@ -166,6 +208,7 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
                             put("hostId", checkpoint.hostId)
                             put("sessionId", checkpoint.sessionId)
                             put("runId", checkpoint.runId)
+                            checkpoint.lastEventId?.let { put("lastEventId", it) }
                         })
                     }
                 }.toString(),
@@ -251,38 +294,13 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
 
     override fun loadQueuedInterruptRecords(): List<QueuedInterruptRecord> = preferences
         .getString(QUEUED_INTERRUPTS_KEY, null)
-        ?.let { raw ->
-            runCatching {
-                val array = JSONArray(raw)
-                buildList {
-                    for (index in 0 until array.length()) {
-                        val item = array.optJSONObject(index) ?: continue
-                        val hostId = item.optString("hostId")
-                        val sessionId = item.optString("sessionId")
-                        val runId = item.optString("runId")
-                        val text = item.optString("text")
-                        if (hostId.isNotBlank() && sessionId.isNotBlank() && runId.isNotBlank() && text.isNotBlank()) {
-                            add(QueuedInterruptRecord(hostId, sessionId, runId, text))
-                        }
-                    }
-                }.distinctBy(QueuedInterruptRecord::runId)
-            }.getOrDefault(emptyList())
-        }
+        ?.let(QueuedInterruptRecordCodec::decode)
         .orEmpty()
 
     override fun saveQueuedInterruptRecords(records: List<QueuedInterruptRecord>) {
         preferences.edit().putString(
             QUEUED_INTERRUPTS_KEY,
-            JSONArray().apply {
-                records.distinctBy(QueuedInterruptRecord::runId).forEach { record ->
-                    put(JSONObject().apply {
-                        put("hostId", record.hostId)
-                        put("sessionId", record.sessionId)
-                        put("runId", record.runId)
-                        put("text", record.text.take(8_000))
-                    })
-                }
-            }.toString(),
+            QueuedInterruptRecordCodec.encode(records),
         ).commit()
     }
 
@@ -291,6 +309,16 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
 
     override fun saveNotificationHostIds(hostIds: Set<String>) {
         preferences.edit().putStringSet("notification_host_ids", hostIds.toSet()).apply()
+    }
+
+    override fun loadMonitoredHostIds(): Set<String> = if (preferences.contains("monitored_host_ids")) {
+        preferences.getStringSet("monitored_host_ids", emptySet()).orEmpty().toSet()
+    } else {
+        loadNotificationHostIds()
+    }
+
+    override fun saveMonitoredHostIds(hostIds: Set<String>) {
+        preferences.edit().putStringSet("monitored_host_ids", hostIds.toSet()).apply()
     }
 
     fun loadMobileRegistrationStatuses(): List<MobileRegistrationStatus> =

@@ -47,6 +47,15 @@ class SessionOrderingTest {
                 approvalSessionIds = setOf("approval"),
             ).map(HermesSession::id),
         )
+        assertEquals(
+            listOf("desktop"),
+            filterSessions(
+                sessions,
+                "",
+                SessionFilter.Stalled,
+                stalledSessionIds = setOf("desktop"),
+            ).map(HermesSession::id),
+        )
         assertEquals(listOf("mobile"), filterSessions(sessions, "", SessionFilter.Mobile).map(HermesSession::id))
         assertEquals(
             listOf("desktop"),

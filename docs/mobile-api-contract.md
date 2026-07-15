@@ -54,6 +54,10 @@ be assumed solely because a host is reachable.
 | Capability | Current experimental name | Endpoint | Stock support |
 | --- | --- | --- | --- |
 | Active work recovery | `active_session_registry` | `GET /v1/active-sessions` | Not implemented |
+| Safe stale-work cleanup | `active_session_cleanup` | `DELETE /v1/active-sessions/{lease_id}` | Not implemented |
+| Replayable Run events | `run_event_replay` | `Last-Event-ID` on Run SSE | Not implemented |
+| Retry-safe Run submit | `run_submission_idempotency` | `Idempotency-Key` on `POST /v1/runs` | Not implemented |
+| Run slash commands | `run_slash_commands` | `/goal` and installed skill commands in Run input | Not implemented |
 | Push wake registration | `mobile_notifications` | `PUT`/`DELETE /v1/mobile/devices/{installation_id}` | Not implemented |
 | Per-run reasoning | `run_reasoning_effort` | Run request field | Not implemented |
 | Per-run permissions | `run_permission_mode` | `permission_mode` Run request field | Not implemented |
@@ -62,6 +66,7 @@ be assumed solely because a host is reachable.
 | Complete model inventory | No stock flag | Extended `/v1/models` contract | Not implemented |
 | Live task plan | `run_task_updates` | `tasks.updated` Run SSE event | Not implemented |
 | Live delegated-work status | `run_subagent_updates` | `subagent.updated` Run SSE event | Not implemented |
+| Live workspace changes | `run_workspace_updates` | `workspace.updated` Run SSE event | Not implemented |
 | Desktop active marker | `is_active` session field | `GET /api/sessions` rows | Not implemented |
 
 An absent optional flag means “unsupported”, not “empty”. If a host advertises
@@ -76,6 +81,7 @@ reasoning or raw tool output:
 ```json
 {"event":"tasks.updated","tasks":[{"id":"plan","content":"Plan the work","status":"in_progress"}]}
 {"event":"subagent.updated","subagent":{"id":"agent-1","status":"working","task_index":0,"task_count":2,"tool_count":1,"goal":"Inspect the API","activity":"Reading run events"}}
+{"event":"workspace.updated","files":[{"path":"app/Main.kt","status":"modified","additions":3,"deletions":1,"diff":"@@ -1 +1 @@"}],"truncated":false}
 ```
 
 Task status is one of `pending`, `in_progress`, `completed`, or `cancelled`.
@@ -85,6 +91,11 @@ must remain absent unless the host has independently approved that progress for
 the connected API surface. A session list row may set `is_active: true` when
 the same desktop-visible session has recent unfinished work; mobile uses this
 as a fallback when its mobile-run registry has no matching entry.
+
+Workspace updates are optional, bounded summaries. Mobile accepts at most 100
+files, 320 characters per path, and 20,000 diff characters per file; it marks
+the result partial when the host or client truncates it. Hosts should omit
+`diff` when policy does not permit exposing source changes.
 
 ## Proposed `hermes.mobile` 1.0 extension
 
@@ -125,7 +136,8 @@ The 1.0 behavior target is:
    `latest_status` and its epoch timestamp as `updated_at`. It must work for
    runs started by other clients.
 2. **Replayable events.** Every run event has a stable monotonic sequence/cursor.
-   Reconnect accepts an `after` cursor, replays retained events in order, and
+   The experimental host uses SSE `id`, JSON `event_id`, and `Last-Event-ID`;
+   reconnect replays retained events in order and
    then follows live events without gaps. Duplicate delivery is allowed; event
    identity must let clients de-duplicate it. Terminal state remains queryable
    for a documented retention period.

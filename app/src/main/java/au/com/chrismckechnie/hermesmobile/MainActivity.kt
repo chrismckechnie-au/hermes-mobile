@@ -1,9 +1,9 @@
 package au.com.chrismckechnie.hermesmobile
 
-import android.graphics.Color
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -12,16 +12,41 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 class MainActivity : ComponentActivity() {
     private val viewModel: HermesViewModel by viewModels { HermesViewModel.Factory }
-    private var overlayPromptLaunched = false
-    private var notificationPromptLaunched = false
+    private var permissionHealth by mutableStateOf(
+        PermissionHealth(
+            notifications = notificationPermissionStatus(
+                sdkInt = Build.VERSION.SDK_INT,
+                permissionGranted = false,
+                notificationsEnabled = true,
+            ),
+            overlay = PermissionStatus.Denied,
+            canRequestNotificationPermission = Build.VERSION.SDK_INT >= 33,
+        )
+    )
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        refreshPermissionHealth()
+        configureMobileBackground(viewModel.state.value)
+    }
+    private val permissionSettingsLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        refreshPermissionHealth()
+        configureMobileBackground(viewModel.state.value)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,15 +60,28 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 29) {
             window.isNavigationBarContrastEnforced = false
         }
+        refreshPermissionHealth()
         setContent {
             val state by viewModel.state.collectAsStateWithLifecycle()
-            LaunchedEffect(state.notificationHostIds, state.overlayEnabled, state.activeRuns.keys) {
+            LaunchedEffect(state.monitoredHostIds, state.overlayEnabled, state.activeRuns.keys) {
                 configureMobileBackground(state)
+            }
+            LaunchedEffect(state.notificationHostIds, state.monitoredHostIds, permissionHealth.notifications) {
+                maybeAutomaticallyRequestNotificationPermission(
+                    hasNotificationSubscriptions = state.notificationHostIds.isNotEmpty() || state.monitoredHostIds.isNotEmpty()
+                )
             }
             LaunchedEffect(state.hosts.map(HostProfile::id), state.notificationHostIds, state.overlayEnabled) {
                 MobileRegistration.enqueue(applicationContext, state.notificationHostIds)
             }
-            HermesMobileApp(state = state, viewModel = viewModel)
+            HermesMobileApp(
+                state = state,
+                viewModel = viewModel,
+                permissionHealth = permissionHealth,
+                onRequestNotificationPermission = ::requestNotificationPermission,
+                onOpenNotificationSettings = ::openNotificationSettings,
+                onOpenOverlaySettings = ::openOverlaySettings,
+            )
         }
         handleIntent(intent)
     }
@@ -56,6 +94,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        refreshPermissionHealth()
         configureMobileBackground(viewModel.state.value)
     }
 
@@ -70,24 +109,101 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun configureMobileBackground(state: HermesUiState) {
-        if (state.notificationHostIds.isNotEmpty() && Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
-            !notificationPromptLaunched
-        ) {
-            notificationPromptLaunched = true
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 4201)
-        }
-        if (state.overlayEnabled && !Settings.canDrawOverlays(this) && !overlayPromptLaunched) {
-            overlayPromptLaunched = true
-            startActivity(
-                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-            )
-        }
-        val monitoredRuns = state.activeRuns.values.filter { it.host.id in state.notificationHostIds }
+        val monitoredRuns = state.activeRuns.values.filter { it.host.id in state.monitoredHostIds }
         when {
             monitoredRuns.isNotEmpty() -> HermesOverlayService.startForRuns(applicationContext, monitoredRuns)
             state.overlayEnabled -> HermesOverlayService.startIfAllowed(applicationContext)
             else -> HermesOverlayService.stop(applicationContext)
         }
+    }
+
+    private fun refreshPermissionHealth() {
+        val notificationPermissionGranted = Build.VERSION.SDK_INT < 33 ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+        permissionHealth = PermissionHealth(
+            notifications = notificationPermissionStatus(
+                sdkInt = Build.VERSION.SDK_INT,
+                permissionGranted = notificationPermissionGranted,
+                notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled(),
+            ),
+            overlay = overlayPermissionStatus(Settings.canDrawOverlays(this)),
+            canRequestNotificationPermission =
+                Build.VERSION.SDK_INT >= 33 && !notificationPermissionGranted,
+        )
+    }
+
+    private fun maybeAutomaticallyRequestNotificationPermission(hasNotificationSubscriptions: Boolean) {
+        val preferences = getSharedPreferences(PERMISSION_HEALTH_PREFERENCES, MODE_PRIVATE)
+        val shouldRequest = shouldAutomaticallyRequestNotificationPermission(
+            hasNotificationSubscriptions = hasNotificationSubscriptions,
+            notificationStatus = permissionHealth.notifications,
+            canRequestPermission = permissionHealth.canRequestNotificationPermission,
+            hasRequestedAutomatically = preferences.getBoolean(
+                KEY_NOTIFICATION_AUTO_REQUESTED,
+                false,
+            ),
+        )
+        if (!shouldRequest) return
+
+        preferences.edit().putBoolean(KEY_NOTIFICATION_AUTO_REQUESTED, true).apply()
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun requestNotificationPermission() {
+        if (permissionHealth.notifications != PermissionStatus.Denied) {
+            refreshPermissionHealth()
+            return
+        }
+        if (!permissionHealth.canRequestNotificationPermission) {
+            openNotificationSettings()
+            return
+        }
+        markNotificationPermissionHandled()
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun openNotificationSettings() {
+        markNotificationPermissionHandled()
+        launchPermissionSettings(
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+            }
+        )
+    }
+
+    private fun openOverlaySettings() {
+        launchPermissionSettings(
+            Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName"),
+            )
+        )
+    }
+
+    private fun launchPermissionSettings(intent: Intent) {
+        val resolvableIntent = if (intent.resolveActivity(packageManager) != null) {
+            intent
+        } else {
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:$packageName"),
+            )
+        }
+        permissionSettingsLauncher.launch(resolvableIntent)
+    }
+
+    private fun markNotificationPermissionHandled() {
+        getSharedPreferences(PERMISSION_HEALTH_PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_NOTIFICATION_AUTO_REQUESTED, true)
+            .apply()
+    }
+
+    private companion object {
+        const val PERMISSION_HEALTH_PREFERENCES = "permission_health"
+        const val KEY_NOTIFICATION_AUTO_REQUESTED = "notification_auto_requested"
     }
 }

@@ -13,14 +13,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * Apple-style system palettes (iOS Human Interface colors): true-black
- * grouped backgrounds with #0A84FF blue in dark, white/#F2F2F7 grouped
- * with #007AFF blue in light. Flat and clean — no glow, no grain.
+ * Hermes Precision Utility palette: compact, calm and operationally clear.
+ * Material components provide the platform grammar while these tokens keep
+ * the Command Deck recognisably Hermes. All normal-sized accent text and
+ * solid accent controls meet WCAG AA contrast in both themes.
  *
- * Role names are historical (Abyss = canvas, Cream = primary accent) from
- * the earlier Hermes Teal port; values are now iOS system colors. All
- * colors and text styles in the app come from a palette — no literals at
- * call sites.
+ * Abyss/Cream remain as compatibility names while call sites migrate to the
+ * semantic Canvas/Accent* roles below.
  */
 class HermesPalette(
     val isDark: Boolean,
@@ -59,20 +58,27 @@ class HermesPalette(
     val Scrim: Color,
     val ColorScheme: ColorScheme,
 ) {
+    val Canvas: Color get() = Abyss
+    val AccentFill: Color get() = Cream
+    val AccentText: Color get() = CreamSoft
+    val AccentSubtle: Color get() = CreamDim
+
     val Mono = FontFamily(
         Font(R.font.jetbrains_mono_regular, FontWeight.Normal),
         Font(R.font.jetbrains_mono_bold, FontWeight.Bold),
     )
 
     // Text styles — every Text/BasicTextField call site uses one of these.
-    val ScreenTitle = TextStyle(fontSize = 21.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.45).sp, color = TextPrimary)
-    val SheetTitle = TextStyle(fontSize = 23.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.6).sp, color = TextPrimary)
+    val ScreenTitle = TextStyle(fontSize = 18.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.35).sp, color = TextPrimary)
+    val SheetTitle = TextStyle(fontSize = 19.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.4).sp, color = TextPrimary)
     val CardTitle = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-    val Body = TextStyle(fontSize = 14.sp, lineHeight = 21.sp, color = TextSoft)
+    val Body = TextStyle(fontSize = 13.sp, lineHeight = 19.sp, color = TextSoft)
     val BodyMuted = TextStyle(fontSize = 12.sp, lineHeight = 18.sp, color = Muted)
     val Label = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
     val Micro = TextStyle(fontSize = 9.sp, letterSpacing = 1.2.sp, color = Muted)
-    val MicroBold = TextStyle(fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp, color = Cream)
+    val MicroBold = TextStyle(fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp, color = AccentText)
+    val Action = TextStyle(fontSize = 12.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold, color = AccentText)
+    val Status = TextStyle(fontSize = 11.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold, color = TextSoft)
     val MonoBody = TextStyle(fontFamily = Mono, fontSize = 11.sp, color = Muted)
     val MonoSmall = TextStyle(fontFamily = Mono, fontSize = 9.sp, color = Muted)
 
@@ -80,6 +86,18 @@ class HermesPalette(
     val RadiusSmall = 8.dp
     val RadiusCard = 12.dp
     val RadiusSheet = 16.dp
+
+    // Shared density and interaction scale.
+    val SpaceXs = 4.dp
+    val SpaceSm = 8.dp
+    val SpaceMd = 12.dp
+    val SpaceLg = 16.dp
+    val SpaceXl = 24.dp
+    val ControlMin = 48.dp
+    val ControlComfortable = 56.dp
+    val IconSm = 16.dp
+    val IconMd = 20.dp
+    val IconLg = 24.dp
 }
 
 /** iOS dark: true black, elevated grays, system blue. Every M3 role explicit. */
@@ -91,11 +109,11 @@ val HermesDark = HermesPalette(
     SurfaceOne = Color(0xFF1C1C1E),
     SurfaceTwo = Color(0xFF2C2C2E),
     SurfaceHigh = Color(0xFF3A3A3C),
-    BubbleUser = Color(0xFF0A84FF),
-    Cream = Color(0xFF0A84FF),
-    CreamSoft = Color(0xFF7CB8FF),
+    BubbleUser = Color(0xFF409CFF),
+    Cream = Color(0xFF409CFF),
+    CreamSoft = Color(0xFF64B5FF),
     CreamDim = Color(0xFF5EA2EF),
-    OnAccent = Color(0xFFFFFFFF),
+    OnAccent = Color(0xFF000000),
     Ok = Color(0xFF30D158),
     TextPrimary = Color(0xFFFFFFFF),
     TextSoft = Color(0xFFEBEBF0),
@@ -111,8 +129,8 @@ val HermesDark = HermesPalette(
     GrainAlpha = 0f,
     Scrim = Color(0xB8000000),
     ColorScheme = darkColorScheme(
-        primary = Color(0xFF0A84FF),
-        onPrimary = Color(0xFFFFFFFF),
+        primary = Color(0xFF409CFF),
+        onPrimary = Color(0xFF000000),
         primaryContainer = Color(0xFF123B63),
         onPrimaryContainer = Color(0xFFB8D9FF),
         inversePrimary = Color(0xFF007AFF),
@@ -130,7 +148,7 @@ val HermesDark = HermesPalette(
         onSurface = Color(0xFFFFFFFF),
         surfaceVariant = Color(0xFF2C2C2E),
         onSurfaceVariant = Color(0xFF98989F),
-        surfaceTint = Color(0xFF0A84FF),
+        surfaceTint = Color(0xFF409CFF),
         inverseSurface = Color(0xFFF2F2F7),
         inverseOnSurface = Color(0xFF1C1C1E),
         error = Color(0xFFFF453A),
@@ -159,12 +177,12 @@ val HermesLight = HermesPalette(
     SurfaceOne = Color(0xFFFFFFFF),
     SurfaceTwo = Color(0xFFE5E5EA),
     SurfaceHigh = Color(0xFFD1D1D6),
-    BubbleUser = Color(0xFF007AFF),
-    Cream = Color(0xFF007AFF),
-    CreamSoft = Color(0xFF0060DF),
+    BubbleUser = Color(0xFF005FCC),
+    Cream = Color(0xFF005FCC),
+    CreamSoft = Color(0xFF0057B8),
     CreamDim = Color(0xFF2F7CD6),
     OnAccent = Color(0xFFFFFFFF),
-    Ok = Color(0xFF34C759),
+    Ok = Color(0xFF248A3D),
     TextPrimary = Color(0xFF000000),
     TextSoft = Color(0xFF1C1C1E),
     Muted = Color(0xFF6D6D72),
@@ -172,14 +190,14 @@ val HermesLight = HermesPalette(
     LineStrong = Color(0x33000000),
     FocusRing = Color(0x66007AFF),
     Warn = Color(0xFFC93400), // darkened system orange for text contrast on white
-    Error = Color(0xFFFF3B30),
+    Error = Color(0xFFC62828),
     ErrorSoft = Color(0xFF99271D),
     Tool = Color(0xFF248A3D), // darkened system green for text contrast
     WarmGlow = Color(0x00000000),
     GrainAlpha = 0f,
     Scrim = Color(0x66000000),
     ColorScheme = lightColorScheme(
-        primary = Color(0xFF007AFF),
+        primary = Color(0xFF005FCC),
         onPrimary = Color(0xFFFFFFFF),
         primaryContainer = Color(0xFFD6E8FF),
         onPrimaryContainer = Color(0xFF00325E),
@@ -198,7 +216,7 @@ val HermesLight = HermesPalette(
         onSurface = Color(0xFF000000),
         surfaceVariant = Color(0xFFE5E5EA),
         onSurfaceVariant = Color(0xFF6D6D72),
-        surfaceTint = Color(0xFF007AFF),
+        surfaceTint = Color(0xFF005FCC),
         inverseSurface = Color(0xFF1C1C1E),
         inverseOnSurface = Color(0xFFF2F2F7),
         error = Color(0xFFFF3B30),
