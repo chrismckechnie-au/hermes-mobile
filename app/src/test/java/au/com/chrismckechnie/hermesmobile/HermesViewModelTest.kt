@@ -524,6 +524,61 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `sending a follow-up interrupts then starts the next run in the same session`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("first task")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        viewModel.setComposerText("change direction")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals(listOf("run-1"), gateway.stops)
+        assertTrue(viewModel.state.value.activeRun!!.stopping)
+        assertTrue(viewModel.state.value.composerText.isEmpty())
+
+        gateway.eventsFor("run-1").send(HermesRunEvent.Cancelled)
+        gateway.eventsFor("run-1").close()
+        advanceUntilIdle()
+
+        assertEquals(listOf("first task", "change direction"), gateway.submits.map { it.input })
+        assertEquals("run-2", viewModel.state.value.activeRun?.runId)
+        gateway.eventsFor("run-2").close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `queued follow-up stays with its session when navigation changes during interruption`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            sessions += HermesSession("s2", "Second", null, "api_server", null, null, 0)
+            messages["s2"] = mutableListOf()
+        }
+        val (viewModel, _) = buildViewModel(gateway)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("first task")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+        viewModel.setComposerText("change direction")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        viewModel.selectSession("s2")
+        advanceUntilIdle()
+        gateway.eventsFor("run-1").send(HermesRunEvent.Cancelled)
+        gateway.eventsFor("run-1").close()
+        advanceUntilIdle()
+
+        assertEquals(listOf("first task"), gateway.submits.map { it.input })
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        assertEquals("change direction", viewModel.state.value.composerText)
+    }
+
+    @Test
     fun `deleting another host preserves the active run`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
         viewModel.selectSession("s1")

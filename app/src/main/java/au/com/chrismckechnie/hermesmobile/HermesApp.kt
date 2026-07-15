@@ -869,7 +869,7 @@ private fun ApprovalCard(item: ChatUiItem.Approval, viewModel: HermesViewModel) 
 @Composable
 private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
     val enabled = state.connectionPhase == HostConnectionPhase.Connected &&
-        !state.isSending && state.activeRun == null && state.unknownOutcome == null
+        !state.isSending && state.unknownOutcome == null
     val focusManager = LocalFocusManager.current
     val context = LocalContext.current
     val dictationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -956,7 +956,7 @@ private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
                             when {
                                 state.activeHost == null -> "Choose a host to begin"
                                 state.connectionPhase != HostConnectionPhase.Connected -> "Waiting for host…"
-                                state.activeRun != null -> "Run in progress — /stop to interrupt"
+                                state.activeRun != null -> "Type a follow-up to interrupt…"
                                 else -> "Message Hermes, or / for commands"
                             },
                             style = T.Body.copy(color = T.Muted),
@@ -968,15 +968,31 @@ private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
             Spacer(Modifier.width(7.dp))
             val activeRun = state.activeRun
             if (activeRun != null) {
-                val stopping = activeRun.stopping
+                val canInterrupt = enabled && state.composerText.isNotBlank()
                 Box(
                     modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard))
-                        .background(T.Error.copy(alpha = 0.12f))
-                        .clickable(enabled = !stopping) { viewModel.stopActiveRun() },
+                        .background(
+                            when {
+                                activeRun.stopping -> T.Warn.copy(alpha = 0.12f)
+                                canInterrupt -> T.Cream
+                                else -> T.Error.copy(alpha = 0.12f)
+                            },
+                        )
+                        .clickable(enabled = !activeRun.stopping || canInterrupt) {
+                            if (canInterrupt) {
+                                focusManager.clearFocus()
+                                viewModel.sendMessage()
+                            } else {
+                                viewModel.stopActiveRun()
+                            }
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
-                    if (stopping) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Error)
-                    else Icon(Lucide.Square, "Stop run", tint = T.Error, modifier = Modifier.size(18.dp))
+                    when {
+                        activeRun.stopping -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Warn)
+                        canInterrupt -> Icon(Lucide.Send, "Interrupt and send", tint = T.OnAccent, modifier = Modifier.size(19.dp))
+                        else -> Icon(Lucide.Square, "Stop run", tint = T.Error, modifier = Modifier.size(18.dp))
+                    }
                 }
             } else if (state.isSending) {
                 Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {

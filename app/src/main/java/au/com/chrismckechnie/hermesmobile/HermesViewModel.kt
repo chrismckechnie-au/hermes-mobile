@@ -215,6 +215,7 @@ data class HermesUiState(
     val creatingRunHosts: Set<String> = emptySet(),
     val isRefreshing: Boolean = false,
     val activeRuns: Map<SessionKey, ActiveRun> = emptyMap(),
+    val queuedInterrupts: Map<SessionKey, String> = emptyMap(),
     val unknownOutcomes: Map<SessionKey, UnknownOutcome> = emptyMap(),
     val sessionActionsFor: String? = null,
     val confirmDeleteSessionId: String? = null,
@@ -330,6 +331,7 @@ class HermesViewModel(
             composerDrafts = composerDrafts.move(),
             sendingSessions = if (oldKey in sendingSessions) (sendingSessions - oldKey) + newKey else sendingSessions,
             activeRuns = activeRuns.move { run -> run.copy(sessionId = newKey.sessionId) },
+            queuedInterrupts = queuedInterrupts.move(),
             unknownOutcomes = unknownOutcomes.move { pending -> pending.copy(sessionId = newKey.sessionId) },
         )
     }
@@ -668,7 +670,22 @@ class HermesViewModel(
         val text = mutableState.value.composerText.trim()
         if (text.isBlank()) return
         if (text.startsWith("/") && dispatchLocalCommand(text)) return
+        mutableState.value.activeRun?.let { run ->
+            interruptAndSubmit(run, text)
+            return
+        }
         submitChat(text)
+    }
+
+    private fun interruptAndSubmit(run: ActiveRun, text: String) {
+        val key = run.key()
+        mutableState.update { state ->
+            state.withDraft(key, "").copy(
+                queuedInterrupts = state.queuedInterrupts + (key to text),
+                errorMessage = null,
+            )
+        }
+        if (!run.stopping) requestStop(run)
     }
 
     fun applySuggestion(suggestion: SlashSuggestion) {
@@ -967,8 +984,14 @@ class HermesViewModel(
         val key = run.key()
         clearRunCoordinates(run)
         val page = runCatching { gateway.loadMessages(run.host, run.sessionId) }.getOrNull()
+        var queuedText: String? = null
         mutableState.update { state ->
-            val cleared = if (state.activeRuns[key]?.runId == run.runId) state.withRun(key, null).withSending(key, false) else state
+            val cleared = if (state.activeRuns[key]?.runId == run.runId) {
+                queuedText = state.queuedInterrupts[key]
+                state.withRun(key, null)
+                    .withSending(key, false)
+                    .copy(queuedInterrupts = state.queuedInterrupts - key)
+            } else state
             if (page != null && cleared.activeHostId == run.host.id && cleared.activeSessionId == run.sessionId) {
                 cleared.copy(
                     activeSessionId = page.sessionId,
@@ -977,6 +1000,10 @@ class HermesViewModel(
             } else cleared
         }
         refreshSessionsAndJobs(run.host)
+        queuedText?.let { text ->
+            if (mutableState.value.activeSessionKey == key) submitChat(text)
+            else mutableState.update { state -> state.withDraft(key, text) }
+        }
     }
 
     fun respondApproval(choice: String) {
@@ -1008,15 +1035,27 @@ class HermesViewModel(
             mutableState.update { it.copy(errorMessage = "No run is active.") }
             return
         }
+        requestStop(run)
+    }
+
+    private fun requestStop(run: ActiveRun) {
         val key = run.key()
+        val current = mutableState.value.activeRuns[key]
+        if (current?.runId != run.runId || current.stopping) return
         mutableState.update { state ->
-            val current = state.activeRuns[key]
-            if (current?.runId != run.runId) state
-            else state.withRun(key, current.copy(stopping = true))
+            val active = state.activeRuns[key]
+            if (active?.runId != run.runId || active.stopping) state
+            else state.withRun(key, active.copy(stopping = true))
         }
         viewModelScope.launch {
             logRun("stop requested runId=${run.runId}")
-            runCatching { gateway.stopRun(run.host, run.runId) }.onFailure(::showFailure)
+            runCatching { gateway.stopRun(run.host, run.runId) }.onFailure { error ->
+                showFailure(error)
+                mutableState.update { state ->
+                    val current = state.activeRuns[key]
+                    if (current?.runId != run.runId) state else state.withRun(key, current.copy(stopping = false))
+                }
+            }
             // Stop is not terminal ("stopping"): the live stream/poll drives to
             // run.cancelled. If the stream is already gone, poll here.
             if (mutableState.value.activeRuns[key]?.runId == run.runId && run.approvalDetailsLost) {
