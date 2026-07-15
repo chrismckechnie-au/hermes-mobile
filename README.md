@@ -6,7 +6,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 
 ## Implemented
 
-- Native Command Deck interface for Android, styled in an Apple-inspired dark/light system palette (switchable in Settings) with Lucide icons, JetBrains Mono, and a custom wing mark
+- Native Command Deck interface for Android, styled in an Apple-inspired dark/light system palette (switchable in Settings) with the official Hermes app icon, Lucide icons, and JetBrains Mono
 - Multiple saved Hermes hosts with quick switching, editing, and confirmed deletion
 - HTTPS by default, with explicit opt-in for private-network HTTP; scheme-downgrade redirects are refused
 - API keys encrypted at rest with Android Keystore (AES-GCM); unlock failures surface a notice instead of silently wiping hosts
@@ -19,6 +19,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - Live assistant deltas and structured tool start/completion cards
 - Collapsible live Hermes activity cards for host-provided reasoning progress
 - Tool-run approval cards (`approval.request` → approve/deny via `POST /v1/runs/{id}/approval`)
+- Ongoing "Hermes is working" notification and optional floating active-session overlay
 - Scheduled job listing with pause/resume and run-now
 - Connected, connecting, empty, authentication-error, network-error, and retry states
 
@@ -87,6 +88,9 @@ Push delivery is opt-in per saved host under **Settings → Notifications**. The
 same section enables the optional Android draw-over-other-apps session overlay.
 Notifications contain status and the session title only; prompts, responses,
 tool output, commands, and credentials are never included in FCM payloads.
+Runs started in Hermes Mobile also show an ongoing local work notification;
+this does not require Firebase. The overlay is seeded from the local run and
+then reconciled against `/v1/active-sessions`, avoiding first-poll races.
 
 Firebase is deliberately user-owned:
 
@@ -104,10 +108,10 @@ Firebase is deliberately user-owned:
      project_id: your-firebase-project-id
    ```
 
-Without `google-services.json`, device registration and push delivery remain
-inactive. Notification, Bubble, and overlay permissions remain user-controlled.
-The overlay only runs as a visible foreground service while opted-in hosts
-report active sessions.
+Without `google-services.json`, remote device registration and push delivery
+remain inactive. Local working status still functions. Notification, Bubble,
+and overlay permissions remain user-controlled. The overlay only runs as a
+visible foreground service while opted-in hosts report active sessions.
 
 ## Build
 

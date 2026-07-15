@@ -1,6 +1,7 @@
 package au.com.chrismckechnie.hermesmobile
 
 import android.app.Activity
+import android.provider.Settings
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -9,6 +10,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -78,10 +80,12 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -146,6 +150,16 @@ private fun phaseColor(phase: HostConnectionPhase): Color = when (phase) {
     HostConnectionPhase.Connecting -> T.Warn
     HostConnectionPhase.Failed -> T.Error
     HostConnectionPhase.NoHost -> T.Muted
+}
+
+@Composable
+private fun HermesAvatar(modifier: Modifier = Modifier) {
+    Image(
+        painter = painterResource(R.drawable.hermes_official),
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = modifier.clip(RoundedCornerShape(T.RadiusSmall)),
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -221,10 +235,7 @@ private fun CommandHeader(state: HermesUiState, onChooseHost: () -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier.size(34.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.08f)),
-                contentAlignment = Alignment.Center,
-            ) { Icon(HermesWing, null, tint = T.Cream, modifier = Modifier.size(18.dp)) }
+            HermesAvatar(Modifier.size(34.dp))
             Spacer(Modifier.width(10.dp))
             Column {
                 Text("HERMES", style = T.Label.copy(letterSpacing = 1.8.sp))
@@ -308,6 +319,7 @@ private fun ConnectionNotice(
 private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val listState = rememberLazyListState()
     val displayedMessages = state.displayedMessages
+    val assistantAvatarIds = remember(displayedMessages) { firstAssistantIdsByTurn(displayedMessages) }
     val lastAssistantLength = (displayedMessages.lastOrNull { it is ChatUiItem.Assistant } as? ChatUiItem.Assistant)?.text?.length ?: 0
     // Follow the stream: react to new items AND to the growing text of the last
     // assistant bubble, but never fight the user's own scrolling.
@@ -353,7 +365,11 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 items(displayedMessages, key = { it.id }) { item ->
                     when (item) {
                         is ChatUiItem.User -> UserBubble(item.text)
-                        is ChatUiItem.Assistant -> AssistantMessage(item.text, item.streaming)
+                        is ChatUiItem.Assistant -> AssistantMessage(
+                            item.text,
+                            item.streaming,
+                            showAvatar = item.id in assistantAvatarIds,
+                        )
                         is ChatUiItem.Reasoning -> ReasoningCard(item)
                         is ChatUiItem.Tool -> LiveToolCard(item)
                         is ChatUiItem.Approval -> ApprovalCard(item, viewModel)
@@ -545,10 +561,14 @@ private fun EmptyConversation(state: HermesUiState, modifier: Modifier = Modifie
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Box(
-            Modifier.size(54.dp).clip(RoundedCornerShape(T.RadiusSheet)).background(T.Cream.copy(alpha = 0.07f)),
-            contentAlignment = Alignment.Center,
-        ) { Icon(if (state.activeHost == null) Lucide.Server else HermesWing, null, tint = T.Cream, modifier = Modifier.size(25.dp)) }
+        if (state.activeHost == null) {
+            Box(
+                Modifier.size(54.dp).clip(RoundedCornerShape(T.RadiusSheet)).background(T.Cream.copy(alpha = 0.07f)),
+                contentAlignment = Alignment.Center,
+            ) { Icon(Lucide.Server, null, tint = T.Cream, modifier = Modifier.size(25.dp)) }
+        } else {
+            HermesAvatar(Modifier.size(54.dp))
+        }
         Spacer(Modifier.height(17.dp))
         Text(
             when (state.connectionPhase) {
@@ -586,11 +606,9 @@ private fun UserBubble(text: String) {
 }
 
 @Composable
-private fun AssistantMessage(text: String, streaming: Boolean) {
+private fun AssistantMessage(text: String, streaming: Boolean, showAvatar: Boolean) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-        Box(Modifier.size(29.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.08f)), contentAlignment = Alignment.Center) {
-            Icon(HermesWing, null, tint = T.Cream, modifier = Modifier.size(15.dp))
-        }
+        if (showAvatar) HermesAvatar(Modifier.size(29.dp)) else Spacer(Modifier.width(29.dp))
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             if (text.isBlank() && streaming) {
@@ -605,6 +623,17 @@ private fun AssistantMessage(text: String, streaming: Boolean) {
                     Text("STREAMING", style = T.MicroBold, modifier = Modifier.padding(top = 6.dp))
                 }
             }
+        }
+    }
+}
+
+internal fun firstAssistantIdsByTurn(messages: List<ChatUiItem>): Set<String> = buildSet {
+    var assistantSeenInTurn = false
+    messages.forEach { item ->
+        if (item is ChatUiItem.User) assistantSeenInTurn = false
+        if (item is ChatUiItem.Assistant && !assistantSeenInTurn) {
+            add(item.id)
+            assistantSeenInTurn = true
         }
     }
 }
@@ -1173,6 +1202,7 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
     var showLicenses by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val firebaseConfigured = remember(context) { FirebaseApp.getApps(context).isNotEmpty() }
+    val overlayPermissionGranted = Settings.canDrawOverlays(context)
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 15.dp)) {
         ScreenHeading("Settings", "Appearance and app options")
         Text("APPEARANCE", style = T.Micro, modifier = Modifier.padding(bottom = 8.dp))
@@ -1228,7 +1258,7 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
         Text("NOTIFICATIONS", style = T.Micro, modifier = Modifier.padding(top = 14.dp, bottom = 8.dp))
         if (!firebaseConfigured) {
             Text(
-                "Push notifications and Android Bubbles require a Firebase-configured APK. The active-session overlay can still run locally.",
+                "Remote push and Android Bubbles require a Firebase-configured APK. Ongoing status and the active-session overlay work for runs started here.",
                 style = T.BodyMuted,
                 modifier = Modifier.padding(bottom = 8.dp),
             )
@@ -1239,7 +1269,7 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(host.name, style = T.Label)
-                            Text("Run status, approvals, failures, and completion", style = T.BodyMuted)
+                            Text("Ongoing working status, approvals, failures, and completion", style = T.BodyMuted)
                         }
                         Switch(
                             checked = host.id in state.notificationHostIds,
@@ -1253,7 +1283,16 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("Floating active-session overlay", style = T.Label)
-                        Text("Shows opted-in hosts while sessions are active", style = T.BodyMuted)
+                        Text(
+                            when {
+                                !state.overlayEnabled -> "Shows opted-in hosts while sessions are active"
+                                overlayPermissionGranted -> "Ready — appears while Hermes is actively working"
+                                else -> "Android display-over-other-apps permission is required"
+                            },
+                            style = T.BodyMuted.copy(
+                                color = if (state.overlayEnabled && !overlayPermissionGranted) T.Warn else T.Muted,
+                            ),
+                        )
                     }
                     Switch(
                         checked = state.overlayEnabled,

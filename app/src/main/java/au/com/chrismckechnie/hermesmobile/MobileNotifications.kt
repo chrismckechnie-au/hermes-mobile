@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
+import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
 import android.os.Build
 import androidx.core.app.ActivityCompat
@@ -104,14 +105,13 @@ class HermesMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         val event = MobilePushEvent.from(message.data) ?: return
         HermesNotificationCoordinator(applicationContext).post(event)
-        if (PreferencesSettingsStore(this).loadOverlayEnabled()) {
-            HermesOverlayService.onPush(applicationContext, event)
-        }
+        HermesOverlayService.onPush(applicationContext, event)
     }
 }
 
 class HermesNotificationCoordinator(private val context: Context) {
     private val manager = context.getSystemService(NotificationManager::class.java)
+    private val officialIcon by lazy { BitmapFactory.decodeResource(context.resources, R.drawable.hermes_official) }
 
     fun post(event: MobilePushEvent) {
         createChannels()
@@ -133,15 +133,17 @@ class HermesNotificationCoordinator(private val context: Context) {
             "session.completed" -> "Run completed"
             "job.completed" -> "Scheduled job completed"
             "job.failed" -> "Scheduled job failed"
-            else -> "Run active"
+            else -> "Hermes is working"
         }
         val builder = NotificationCompat.Builder(context, RUN_CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setSmallIcon(R.drawable.ic_hermes_notification)
+            .setLargeIcon(officialIcon)
             .setContentTitle(event.title)
             .setContentText(status)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(event.isTerminal)
+            .setOngoing(!event.isTerminal)
             .setOnlyAlertOnce(event.event == "session.started")
             .setContentIntent(contentPending)
         if (!isJob) {
@@ -172,7 +174,7 @@ class HermesNotificationCoordinator(private val context: Context) {
             builder.setBubbleMetadata(
                 NotificationCompat.BubbleMetadata.Builder(
                     bubblePending,
-                    IconCompat.createWithResource(context, android.R.drawable.sym_def_app_icon),
+                    IconCompat.createWithResource(context, R.drawable.hermes_official),
                 ).setDesiredHeight(420).build()
             )
         }
@@ -198,7 +200,7 @@ class HermesNotificationCoordinator(private val context: Context) {
             .setShortLabel(event.title.take(40))
             .setLongLived(true)
             .setPerson(Person.Builder().setName("Hermes").setKey("hermes-agent").build())
-            .setIcon(Icon.createWithResource(context, android.R.drawable.sym_def_app_icon))
+            .setIcon(Icon.createWithResource(context, R.drawable.hermes_official))
             .setIntent(sessionIntent(context, event.hostProfileId, event.sessionId))
             .build()
         context.getSystemService(ShortcutManager::class.java).addDynamicShortcuts(listOf(shortcut))
@@ -209,6 +211,7 @@ class HermesNotificationCoordinator(private val context: Context) {
     companion object {
         const val RUN_CHANNEL = "hermes_runs"
         const val OVERLAY_CHANNEL = "hermes_overlay"
+        const val WORK_CHANNEL = "hermes_active_work"
         const val EXTRA_HOST_ID = "host_id"
         const val EXTRA_SESSION_ID = "session_id"
         const val EXTRA_SESSION_TITLE = "session_title"

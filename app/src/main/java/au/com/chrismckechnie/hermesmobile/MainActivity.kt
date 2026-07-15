@@ -81,8 +81,12 @@ class MainActivity : ComponentActivity() {
             startActivity(
                 Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
             )
-        } else if (state.overlayEnabled) {
-            HermesOverlayService.startIfAllowed(applicationContext)
+        }
+        val monitoredRun = state.activeRun?.takeIf { it.host.id in state.notificationHostIds }
+        when {
+            monitoredRun != null -> HermesOverlayService.startForRun(applicationContext, monitoredRun)
+            state.overlayEnabled -> HermesOverlayService.startIfAllowed(applicationContext)
+            else -> HermesOverlayService.stop(applicationContext)
         }
         lifecycleScope.launch { MobileRegistration.sync(applicationContext) }
     }

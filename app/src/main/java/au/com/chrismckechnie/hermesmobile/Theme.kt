@@ -5,10 +5,6 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.PathFillType
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -224,42 +220,3 @@ val HermesLight = HermesPalette(
 
 /** Active palette; HermesMobileApp provides it from ThemeMode + system setting. */
 val LocalHermes = staticCompositionLocalOf { HermesDark }
-
-/**
- * Minimal Hermes wing — three swept feathers, tinted at the call site.
- * Decorative brand mark (always pass contentDescription = null).
- */
-val HermesWing: ImageVector by lazy {
-    ImageVector.Builder(
-        name = "HermesWing",
-        defaultWidth = 24.dp,
-        defaultHeight = 24.dp,
-        viewportWidth = 24f,
-        viewportHeight = 24f,
-    ).apply {
-        path(fill = SolidColor(Color.White), pathFillType = PathFillType.NonZero) {
-            // top feather
-            moveTo(2.5f, 7.5f)
-            curveTo(7f, 3f, 15.5f, 2.5f, 21.5f, 5.5f)
-            curveTo(17f, 7.2f, 10.5f, 7.6f, 5.5f, 9.5f)
-            curveTo(4.3f, 9.1f, 3.2f, 8.4f, 2.5f, 7.5f)
-            close()
-        }
-        path(fill = SolidColor(Color.White), pathFillType = PathFillType.NonZero) {
-            // middle feather
-            moveTo(5f, 12.5f)
-            curveTo(9.5f, 9.8f, 16f, 9.4f, 20.5f, 10.8f)
-            curveTo(16.5f, 12.8f, 11.5f, 13.4f, 7.8f, 14.8f)
-            curveTo(6.7f, 14.2f, 5.7f, 13.4f, 5f, 12.5f)
-            close()
-        }
-        path(fill = SolidColor(Color.White), pathFillType = PathFillType.NonZero) {
-            // lower feather
-            moveTo(8f, 17.2f)
-            curveTo(11.5f, 15.2f, 16f, 14.8f, 19f, 15.6f)
-            curveTo(16.2f, 17.6f, 12.6f, 18.4f, 10.2f, 20f)
-            curveTo(9.3f, 19.2f, 8.5f, 18.2f, 8f, 17.2f)
-            close()
-        }
-    }.build()
-}

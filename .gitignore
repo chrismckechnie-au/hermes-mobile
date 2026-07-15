@@ -8,6 +8,7 @@ app/google-services.json
 /build/
 **/build/
 *.png
+!app/src/main/res/drawable-nodpi/hermes_official.png
 window_dump.xml
 captures/
 __pycache__/
