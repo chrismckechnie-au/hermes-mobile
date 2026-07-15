@@ -379,6 +379,22 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `direct rename rejects an empty title and updates the active session`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+
+        viewModel.renameSession("s1", "   ")
+        assertTrue(gateway.renames.isEmpty())
+        assertTrue(viewModel.state.value.errorMessage!!.contains("cannot be empty"))
+
+        viewModel.renameSession("s1", "Release follow-up")
+        advanceUntilIdle()
+        assertEquals("s1" to "Release follow-up", gateway.renames.single())
+        assertEquals("Release follow-up", viewModel.state.value.activeSession?.title)
+    }
+
+    @Test
     fun `approval card appears and responding posts the choice`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
         viewModel.selectSession("s1")

@@ -1121,9 +1121,14 @@ class HermesViewModel(
     fun renameSession(sessionId: String, title: String) {
         val host = mutableState.value.activeHost ?: return
         if (guardSessionBusy(sessionId)) return
+        val trimmedTitle = title.trim()
+        if (trimmedTitle.isBlank()) {
+            mutableState.update { it.copy(errorMessage = "Session name cannot be empty.") }
+            return
+        }
         mutableState.update { it.copy(sessionActionsFor = null) }
         viewModelScope.launch {
-            runCatching { gateway.renameSession(host, sessionId, title.trim()) }
+            runCatching { gateway.renameSession(host, sessionId, trimmedTitle) }
                 .onSuccess { updated ->
                     mutableState.update { state ->
                         state.copy(sessions = state.sessions.map { if (it.id == updated.id) updated else it }, errorMessage = null)

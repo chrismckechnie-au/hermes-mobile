@@ -323,6 +323,9 @@ private fun ConnectionNotice(
 @Composable
 private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val listState = rememberLazyListState()
+    val activeSession = state.activeSession
+    var renameOpen by remember(activeSession?.id) { mutableStateOf(false) }
+    var renameText by remember(activeSession?.id) { mutableStateOf(activeSession?.title.orEmpty()) }
     val displayedMessages = state.displayedMessages
     val assistantAvatarIds = remember(displayedMessages) { firstAssistantIdsByTurn(displayedMessages) }
     val lastAssistantLength = (displayedMessages.lastOrNull { it is ChatUiItem.Assistant } as? ChatUiItem.Assistant)?.text?.length ?: 0
@@ -351,6 +354,21 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
             }
             ModelChip(state, viewModel)
             Spacer(Modifier.width(8.dp))
+            if (activeSession != null && state.capabilities?.supportsSessionEdit == true) {
+                IconButton(
+                    onClick = { renameOpen = true },
+                    enabled = state.activeRun == null,
+                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.SurfaceLow),
+                ) {
+                    Icon(
+                        Lucide.Pencil,
+                        "Rename session",
+                        tint = if (state.activeRun == null) T.Cream else T.Muted,
+                        modifier = Modifier.size(17.dp),
+                    )
+                }
+                Spacer(Modifier.width(5.dp))
+            }
             IconButton(
                 onClick = viewModel::createSession,
                 enabled = state.connectionPhase == HostConnectionPhase.Connected,
@@ -383,6 +401,35 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
             }
         }
         Composer(state, viewModel)
+    }
+
+    if (renameOpen && activeSession != null) {
+        AlertDialog(
+            onDismissRequest = { renameOpen = false },
+            containerColor = T.SurfaceLow,
+            title = { Text("Rename session", fontSize = 16.sp) },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    singleLine = true,
+                    textStyle = T.Body.copy(fontSize = 14.sp),
+                    label = { Text("Session name") },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.renameSession(activeSession.id, renameText)
+                        renameOpen = false
+                    },
+                    enabled = renameText.isNotBlank(),
+                ) { Text("Save", style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameOpen = false }) { Text("Cancel", style = T.BodyMuted.copy(fontSize = 13.sp)) }
+            },
+        )
     }
 }
 

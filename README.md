@@ -11,7 +11,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - HTTPS by default, with explicit opt-in for private-network HTTP; scheme-downgrade redirects are refused
 - API keys encrypted at rest with Android Keystore (AES-GCM); unlock failures surface a notice instead of silently wiping hosts
 - Capability discovery and authenticated connection status
-- Session listing with pagination (`has_more`), pull-to-refresh, creation, rename, delete, history loading, and selection
+- Session listing with pagination (`has_more`), pull-to-refresh, creation, direct chat-header rename, delete, history loading, and selection
 - Host model discovery with per-run model and reasoning-effort selection from the Chat model sheet
 - Independent streaming runs per host/session, with stop/cancel, follow-up messages that interrupt and replace the current run, multi-run process-death recovery, and unknown-submit protection
 - Local slash commands and host skill suggestions from the message composer
