@@ -50,6 +50,7 @@ data class HermesCapabilities(
     val model: String,
     val platform: String,
     val features: Set<String>,
+    val version: String? = null,
 ) {
     // The full Run-control bundle; anything less recreates the silent-approval
     // hang the /v1/runs transport exists to fix (docs/adr/0001).
@@ -61,7 +62,24 @@ data class HermesCapabilities(
     val supportsReasoningEffort: Boolean get() = "run_reasoning_effort" in features
     val supportsSessionEdit: Boolean get() = "session_resources" in features
     val supportsSessionFork: Boolean get() = "session_fork" in features
+    /** The host explicitly opts in before mobile exposes a remote updater. */
+    val supportsHostUpdate: Boolean get() = "host_update_api" in features
 }
+
+/** A host-reported update check. `canApply` is false for managed installs such as Docker. */
+data class HermesHostUpdate(
+    val currentVersion: String,
+    val updateAvailable: Boolean,
+    val canApply: Boolean,
+    val message: String? = null,
+    val updateCommand: String? = null,
+)
+
+/** The acknowledgement received before the host restarts itself to apply an update. */
+data class HermesHostUpdateStart(
+    val accepted: Boolean,
+    val message: String? = null,
+)
 
 data class HermesSession(
     val id: String,
@@ -155,6 +173,9 @@ class HermesApiException(
 
 interface HermesGateway {
     suspend fun probe(host: HostProfile): HermesCapabilities
+    suspend fun getHostVersion(host: HostProfile): String? = null
+    suspend fun getHostUpdate(host: HostProfile, force: Boolean = false): HermesHostUpdate? = null
+    suspend fun updateHost(host: HostProfile): HermesHostUpdateStart? = null
     suspend fun listSessions(host: HostProfile, limit: Int = 50, offset: Int = 0): HermesSessionPage
     suspend fun createSession(host: HostProfile, title: String? = null): HermesSession
     suspend fun loadMessages(host: HostProfile, sessionId: String): HermesMessagesPage

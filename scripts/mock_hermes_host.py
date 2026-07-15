@@ -115,6 +115,7 @@ class Handler(BaseHTTPRequestHandler):
                 "object": "hermes.api_server.capabilities",
                 "platform": "hermes-agent",
                 "model": "hermes-agent",
+                "version": "2026.7.15",
                 "features": {
                     "session_list": True,
                     "session_create": True,
@@ -129,8 +130,19 @@ class Handler(BaseHTTPRequestHandler):
                     "run_reasoning_effort": True,
                     "skills_api": True,
                     "toolsets_api": True,
+                    "host_update_api": True,
                     "jobs": True,
                 },
+            })
+        elif path == "/health":
+            self._json(200, {"status": "ok", "platform": "hermes-agent", "version": "2026.7.15"})
+        elif path == "/v1/host-update":
+            self._json(200, {
+                "current_version": "2026.7.15",
+                "update_available": True,
+                "can_apply": True,
+                "message": "A newer Hermes Agent release is available.",
+                "update_command": "hermes update",
             })
         elif path == "/v1/skills":
             self._json(200, {"object": "list", "data": SKILLS})
@@ -186,6 +198,8 @@ class Handler(BaseHTTPRequestHandler):
             }
             SESSIONS.insert(0, session)
             self._json(201, {"object": "hermes.session", "session": session})
+        elif path == "/v1/host-update":
+            self._json(202, {"accepted": True, "message": "Host update started. Hermes will restart when ready."})
         elif path == "/v1/runs":
             effort = body.get("reasoning_effort")
             if effort is not None and effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}:

@@ -10,7 +10,8 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - Multiple saved Hermes hosts with quick switching, editing, and confirmed deletion
 - HTTPS by default, with explicit opt-in for private-network HTTP; scheme-downgrade redirects are refused
 - API keys encrypted at rest with Android Keystore (AES-GCM); unlock failures surface a notice instead of silently wiping hosts
-- Capability discovery and authenticated connection status
+- Capability discovery, host-version display, and authenticated connection status
+- Capability-gated Hermes host update checks and confirmed remote updates when the host explicitly exposes the update API
 - Session listing with pagination (`has_more`), pull-to-refresh, creation, direct chat-header rename, delete, history loading, and selection
 - Host model discovery with per-run model and reasoning-effort selection from the Chat model sheet
 - Independent streaming runs per host/session, with stop/cancel, follow-up messages that interrupt and replace the current run, multi-run process-death recovery, and unknown-submit protection
@@ -29,9 +30,11 @@ Not implemented: file upload (the Hermes API server currently rejects file conte
 
 ## Hermes API endpoints
 
-The client uses Hermes' supported HTTP surface:
+The client uses the following Hermes HTTP surface:
 
 - `GET /v1/capabilities`
+- `GET /health`
+- `GET` / `POST /v1/host-update` (only on hosts that advertise `host_update_api`)
 - `GET /v1/models`
 - `GET /v1/skills`
 - `GET /v1/toolsets`
@@ -50,6 +53,10 @@ The client uses Hermes' supported HTTP surface:
 - `POST /api/jobs/{id}/pause` / `POST /api/jobs/{id}/resume` / `POST /api/jobs/{id}/run`
 
 Every request uses `Authorization: Bearer <API_SERVER_KEY>`.
+
+Host-update controls are deliberately hidden unless the connected host advertises
+`host_update_api`. This prevents a phone from attempting an update through an
+older or managed Hermes installation that cannot safely apply one in place.
 
 ## Configure a Hermes host
 

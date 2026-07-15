@@ -324,6 +324,7 @@ private fun ConnectionNotice(
 private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val listState = rememberLazyListState()
     val activeSession = state.activeSession
+    val canRenameSession = activeSession != null && state.capabilities?.supportsSessionEdit == true
     var renameOpen by remember(activeSession?.id) { mutableStateOf(false) }
     var renameText by remember(activeSession?.id) { mutableStateOf(activeSession?.title.orEmpty()) }
     val displayedMessages = state.displayedMessages
@@ -350,24 +351,17 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     style = T.ScreenTitle,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = if (canRenameSession) {
+                        Modifier
+                            .clip(RoundedCornerShape(T.RadiusSmall))
+                            .clickable(onClickLabel = "Rename session") { renameOpen = true }
+                            .semantics { contentDescription = "Rename session" }
+                            .padding(vertical = 5.dp)
+                    } else Modifier,
                 )
             }
             ModelChip(state, viewModel)
             Spacer(Modifier.width(8.dp))
-            if (activeSession != null && state.capabilities?.supportsSessionEdit == true) {
-                IconButton(
-                    onClick = { renameOpen = true },
-                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.SurfaceLow),
-                ) {
-                    Icon(
-                        Lucide.Pencil,
-                        "Rename session",
-                        tint = T.Cream,
-                        modifier = Modifier.size(17.dp),
-                    )
-                }
-                Spacer(Modifier.width(5.dp))
-            }
             IconButton(
                 onClick = viewModel::createSession,
                 enabled = state.connectionPhase == HostConnectionPhase.Connected,
@@ -1373,6 +1367,7 @@ private fun JobCard(job: HermesJob, onToggle: () -> Unit, onRunNow: () -> Unit) 
 private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val host = state.activeHost
     var libraryOpen by remember { mutableStateOf(false) }
+    var confirmHostUpdate by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 15.dp)) {
         ScreenHeading("Host", "Connection and capability status", Lucide.Server, "Manage hosts", viewModel::showHostPicker)
         if (host == null) {
@@ -1405,8 +1400,18 @@ private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
         }
         Spacer(Modifier.height(10.dp))
         HostStatusRow(Lucide.Wifi, "Hermes API", state.capabilities?.platform ?: "Waiting for capabilities", if (state.connectionPhase == HostConnectionPhase.Connected) "READY" else "OFFLINE", if (state.connectionPhase == HostConnectionPhase.Connected) T.Cream else T.Error)
+        HostStatusRow(
+            Lucide.Server,
+            "Hermes Agent",
+            state.capabilities?.version?.let { "Version $it" } ?: "Version unavailable on this host",
+            if (state.capabilities?.version != null) "VERSION" else "UNKNOWN",
+            if (state.capabilities?.version != null) T.Cream else T.Muted,
+        )
         HostStatusRow(Lucide.ShieldCheck, "Authentication", "Bearer key stored with Android Keystore encryption", "SECURE", T.Cream)
         HostStatusRow(Lucide.Globe, "Transport", if (host.baseUrl.startsWith("https")) "HTTPS encrypted connection" else "Explicit private-network HTTP", if (host.baseUrl.startsWith("https")) "TLS" else "PRIVATE", if (host.baseUrl.startsWith("https")) T.Cream else T.Warn)
+        if (state.capabilities?.supportsHostUpdate == true) {
+            HostUpdateCard(state, onCheck = viewModel::checkHostUpdate, onUpdate = { confirmHostUpdate = true })
+        }
         Text("SKILLS & TOOLS", style = T.Micro, modifier = Modifier.padding(top = 12.dp, bottom = 8.dp))
         Surface(
             color = T.SurfaceLow,
@@ -1447,6 +1452,81 @@ private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 libraryOpen = false
             },
         )
+    }
+    if (confirmHostUpdate) {
+        AlertDialog(
+            onDismissRequest = { confirmHostUpdate = false },
+            containerColor = T.SurfaceLow,
+            title = { Text("Update Hermes Agent?", fontSize = 16.sp) },
+            text = {
+                Text(
+                    "The host will download and apply the update, then may briefly disconnect or restart. Active work must be stopped first.",
+                    style = T.Body.copy(fontSize = 13.sp, lineHeight = 18.sp),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.updateHost()
+                    confirmHostUpdate = false
+                }) { Text("Update host", style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmHostUpdate = false }) { Text("Cancel", style = T.BodyMuted.copy(fontSize = 13.sp)) }
+            },
+        )
+    }
+}
+
+@Composable
+private fun HostUpdateCard(
+    state: HermesUiState,
+    onCheck: () -> Unit,
+    onUpdate: () -> Unit,
+) {
+    val update = state.hostUpdate
+    Card(
+        modifier = Modifier.padding(bottom = 8.dp),
+        colors = CardDefaults.cardColors(containerColor = T.SurfaceLow),
+        border = BorderStroke(1.dp, if (update?.updateAvailable == true) T.Warn.copy(alpha = 0.35f) else T.Line),
+        shape = RoundedCornerShape(T.RadiusCard),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 13.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Host updates", style = T.Label)
+                    Text(
+                        when {
+                            state.hostUpdateChecking -> "Checking for an update…"
+                            update == null -> "Check whether this Hermes host has an update."
+                            update.updateAvailable -> update.message ?: "An update is available for ${update.currentVersion}."
+                            else -> update.message ?: "${update.currentVersion} is up to date."
+                        },
+                        style = T.BodyMuted,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 3.dp),
+                    )
+                }
+                TextButton(onClick = onCheck, enabled = !state.hostUpdateChecking && !state.hostUpdateStarting) {
+                    Text("Check", style = T.MicroBold.copy(color = T.Cream))
+                }
+            }
+            if (update?.updateAvailable == true) {
+                HorizontalDivider(color = T.Line, modifier = Modifier.padding(top = 9.dp))
+                Row(Modifier.fillMaxWidth().padding(top = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (update.canApply) "Ready to update from this phone" else update.updateCommand ?: "Update this host from its install environment",
+                        style = T.Micro.copy(color = if (update.canApply) T.Cream else T.Warn, letterSpacing = 0.sp),
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (update.canApply) {
+                        TextButton(onClick = onUpdate, enabled = !state.hostUpdateStarting) {
+                            Text(if (state.hostUpdateStarting) "Starting…" else "Update", style = T.MicroBold.copy(color = T.Cream))
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1660,11 +1740,34 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
         }
         Text("ABOUT", style = T.Micro, modifier = Modifier.padding(top = 14.dp, bottom = 8.dp))
         Surface(color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
-            LicensesRow { showLicenses = true }
+            Column {
+                AppVersionRow()
+                HorizontalDivider(color = T.Line)
+                LicensesRow { showLicenses = true }
+            }
         }
         Spacer(Modifier.height(16.dp))
     }
     if (showLicenses) LicensesDialog { showLicenses = false }
+}
+
+@Composable
+private fun AppVersionRow() {
+    val context = LocalContext.current
+    val version = remember(context) {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty().ifBlank { "Unknown" }
+    }
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 13.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Lucide.MessageCircle, null, tint = T.Muted, modifier = Modifier.size(15.dp))
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text("Hermes Mobile", style = T.BodyMuted)
+            Text("Version $version", style = T.Micro.copy(letterSpacing = 0.sp), modifier = Modifier.padding(top = 2.dp))
+        }
+    }
 }
 
 @Composable

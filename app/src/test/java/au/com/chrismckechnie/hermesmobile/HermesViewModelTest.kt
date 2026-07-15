@@ -21,7 +21,7 @@ import java.io.IOException
 
 private val RUN_BUNDLE = setOf(
     "run_submission", "run_events_sse", "run_stop", "approval_events", "run_approval_response",
-    "skills_api", "session_resources", "session_fork", "run_reasoning_effort",
+    "skills_api", "session_resources", "session_fork", "run_reasoning_effort", "host_update_api",
 )
 
 private class FakeGateway : HermesGateway {
@@ -38,6 +38,14 @@ private class FakeGateway : HermesGateway {
     var toolsets = listOf(HermesToolset("terminal", "Terminal", "Run commands", enabled = true, configured = true, tools = listOf("shell_command")))
     var models = listOf("hermes-agent", "hermes-fast", "gpt-5.6-terra")
     var activeSessions = emptyList<HermesActiveSession>()
+    var hostVersion: String? = "2026.7.15"
+    var hostUpdate: HermesHostUpdate? = HermesHostUpdate(
+        currentVersion = "2026.7.15",
+        updateAvailable = true,
+        canApply = true,
+        message = "Update available",
+    )
+    var hostUpdateStarts = 0
     private val eventStreams = mutableMapOf<String, Channel<HermesRunEvent>>()
     val events: Channel<HermesRunEvent> get() = eventsFor("run-1")
     var runStatus = HermesRunStatus("run-1", "completed")
@@ -57,6 +65,12 @@ private class FakeGateway : HermesGateway {
         eventStreams.getOrPut(runId) { Channel(Channel.UNLIMITED) }
 
     override suspend fun probe(host: HostProfile) = capabilities
+    override suspend fun getHostVersion(host: HostProfile) = hostVersion
+    override suspend fun getHostUpdate(host: HostProfile, force: Boolean) = hostUpdate
+    override suspend fun updateHost(host: HostProfile): HermesHostUpdateStart {
+        hostUpdateStarts += 1
+        return HermesHostUpdateStart(accepted = true, message = "Update started")
+    }
     override suspend fun listSessions(host: HostProfile, limit: Int, offset: Int) = HermesSessionPage(
         sessions = sessions.drop(offset).take(limit),
         hasMore = offset + limit < sessions.size,
@@ -211,6 +225,27 @@ class HermesViewModelTest {
         assertEquals(listOf("grill-me"), state.skills.map { it.name })
         assertEquals(listOf("terminal"), state.toolsets.map { it.name })
         assertEquals(listOf("hermes-agent", "hermes-fast", "gpt-5.6-terra"), state.models)
+        assertEquals("2026.7.15", state.capabilities?.version)
+        assertTrue(state.hostUpdate?.updateAvailable == true)
+    }
+
+    @Test
+    fun `host update is checked and cannot start while work is active`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+
+        viewModel.checkHostUpdate()
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.hostUpdate?.updateAvailable == true)
+
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("keep working")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+        viewModel.updateHost()
+
+        assertEquals(0, gateway.hostUpdateStarts)
+        assertTrue(viewModel.state.value.errorMessage.orEmpty().contains("Stop active work"))
     }
 
     @Test

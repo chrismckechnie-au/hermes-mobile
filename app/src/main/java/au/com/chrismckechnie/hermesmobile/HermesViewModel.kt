@@ -190,6 +190,16 @@ data class UnknownOutcome(
     val timedOut: Boolean = false,
 )
 
+private data class HostConnectionData(
+    val sessions: HermesSessionPage,
+    val jobs: List<HermesJob>,
+    val skills: List<HermesSkill>,
+    val toolsets: List<HermesToolset>,
+    val models: List<String>,
+    val version: String?,
+    val update: HermesHostUpdate?,
+)
+
 enum class SlashKind { Command, Skill }
 
 data class SlashSuggestion(
@@ -217,6 +227,9 @@ data class HermesUiState(
     val editingHostId: String? = null,
     val connectionPhase: HostConnectionPhase = HostConnectionPhase.NoHost,
     val capabilities: HermesCapabilities? = null,
+    val hostUpdate: HermesHostUpdate? = null,
+    val hostUpdateChecking: Boolean = false,
+    val hostUpdateStarting: Boolean = false,
     val sessions: List<HermesSession> = emptyList(),
     val sessionsHasMore: Boolean = false,
     val activeSessionId: String? = null,
@@ -492,6 +505,10 @@ class HermesViewModel(
                 showHostPicker = false,
                 editingHostId = null,
                 connectionPhase = HostConnectionPhase.Connecting,
+                capabilities = null,
+                hostUpdate = null,
+                hostUpdateChecking = false,
+                hostUpdateStarting = false,
                 activeHostSessions = emptyMap(),
                 errorMessage = null,
             )
@@ -512,6 +529,9 @@ class HermesViewModel(
                 showHostPicker = false,
                 connectionPhase = HostConnectionPhase.Connecting,
                 capabilities = null,
+                hostUpdate = null,
+                hostUpdateChecking = false,
+                hostUpdateStarting = false,
                 sessions = emptyList(),
                 sessionsHasMore = false,
                 activeSessionId = null,
@@ -563,6 +583,9 @@ class HermesViewModel(
                     showHostPicker = hosts.isEmpty(),
                     connectionPhase = if (selected == null) HostConnectionPhase.NoHost else HostConnectionPhase.Connecting,
                     capabilities = null,
+                    hostUpdate = null,
+                    hostUpdateChecking = false,
+                    hostUpdateStarting = false,
                     sessions = emptyList(),
                     sessionsHasMore = false,
                     activeSessionId = null,
@@ -582,6 +605,57 @@ class HermesViewModel(
 
     fun retryConnection() {
         mutableState.value.activeHostId?.let(::connect)
+    }
+
+    fun checkHostUpdate(force: Boolean = true) {
+        val snapshot = mutableState.value
+        val host = snapshot.activeHost ?: return
+        if (snapshot.capabilities?.supportsHostUpdate != true || snapshot.hostUpdateChecking) return
+        mutableState.update { it.copy(hostUpdateChecking = true, errorMessage = null) }
+        viewModelScope.launch {
+            runCatching { gateway.getHostUpdate(host, force) }
+                .onSuccess { update ->
+                    if (mutableState.value.activeHostId == host.id) {
+                        mutableState.update { it.copy(hostUpdate = update, hostUpdateChecking = false) }
+                    }
+                }
+                .onFailure { error ->
+                    if (mutableState.value.activeHostId == host.id) {
+                        mutableState.update { it.copy(hostUpdateChecking = false, errorMessage = friendlyMessage(error)) }
+                    }
+                }
+        }
+    }
+
+    fun updateHost() {
+        val snapshot = mutableState.value
+        val host = snapshot.activeHost ?: return
+        if (snapshot.capabilities?.supportsHostUpdate != true || snapshot.hostUpdateStarting) return
+        if (snapshot.hasActiveRunOnHost(host.id)) {
+            mutableState.update { it.copy(errorMessage = "Stop active work before updating the Hermes host.") }
+            return
+        }
+        mutableState.update { it.copy(hostUpdateStarting = true, errorMessage = null) }
+        viewModelScope.launch {
+            runCatching { gateway.updateHost(host) }
+                .onSuccess { result ->
+                    if (mutableState.value.activeHostId == host.id) {
+                        val message = result?.message ?: "Host update started. Hermes may briefly disconnect while it restarts."
+                        mutableState.update {
+                            if (result?.accepted == false) {
+                                it.copy(hostUpdateStarting = false, errorMessage = message)
+                            } else {
+                                it.copy(hostUpdateStarting = false, hostUpdate = it.hostUpdate?.copy(message = message))
+                            }
+                        }
+                    }
+                }
+                .onFailure { error ->
+                    if (mutableState.value.activeHostId == host.id) {
+                        mutableState.update { it.copy(hostUpdateStarting = false, errorMessage = friendlyMessage(error)) }
+                    }
+                }
+        }
     }
 
     fun refresh() {
@@ -1270,35 +1344,49 @@ class HermesViewModel(
         mutableState.update { it.copy(connectionPhase = HostConnectionPhase.Connecting, errorMessage = null) }
         viewModelScope.launch {
             try {
-                val capabilities = gateway.probe(host)
-                val (sessionPage, jobs, extras) = coroutineScope {
+                val discoveredCapabilities = gateway.probe(host)
+                val loaded = coroutineScope {
                     val sessionsDeferred = async { gateway.listSessions(host) }
                     val jobsDeferred = async { runCatching { gateway.listJobs(host) }.getOrDefault(emptyList()) }
                     val skillsDeferred = async {
-                        if (capabilities.supportsSkills) runCatching { gateway.listSkills(host) }.getOrDefault(emptyList())
+                        if (discoveredCapabilities.supportsSkills) runCatching { gateway.listSkills(host) }.getOrDefault(emptyList())
                         else emptyList()
                     }
                     val toolsetsDeferred = async { runCatching { gateway.listToolsets(host) }.getOrDefault(emptyList()) }
                     val modelsDeferred = async { runCatching { gateway.listModels(host) }.getOrDefault(emptyList()) }
-                    Triple(sessionsDeferred.await(), jobsDeferred.await(), skillsDeferred.await() to (toolsetsDeferred.await() to modelsDeferred.await()))
+                    val versionDeferred = async { runCatching { gateway.getHostVersion(host) }.getOrNull() }
+                    val updateDeferred = async {
+                        if (discoveredCapabilities.supportsHostUpdate) runCatching { gateway.getHostUpdate(host) }.getOrNull() else null
+                    }
+                    HostConnectionData(
+                        sessions = sessionsDeferred.await(),
+                        jobs = jobsDeferred.await(),
+                        skills = skillsDeferred.await(),
+                        toolsets = toolsetsDeferred.await(),
+                        models = modelsDeferred.await(),
+                        version = versionDeferred.await(),
+                        update = updateDeferred.await(),
+                    )
                 }
-                val (skills, toolsetsAndModels) = extras
-                val (toolsets, models) = toolsetsAndModels
+                val capabilities = discoveredCapabilities.copy(version = loaded.version ?: discoveredCapabilities.version)
                 val activeSessions = runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList())
                 if (mutableState.value.activeHostId != hostId) return@launch
                 mutableState.update {
                     it.copy(
                         connectionPhase = HostConnectionPhase.Connected,
                         capabilities = capabilities,
-                        sessions = sessionPage.sessions,
-                        sessionsHasMore = sessionPage.hasMore,
+                        hostUpdate = loaded.update,
+                        hostUpdateChecking = false,
+                        hostUpdateStarting = false,
+                        sessions = loaded.sessions.sessions,
+                        sessionsHasMore = loaded.sessions.hasMore,
                         activeHostSessions = activeSessions.associateBy(HermesActiveSession::sessionId),
-                        jobs = jobs,
-                        skills = skills,
-                        toolsets = toolsets,
-                        models = models,
-                        modelSelections = it.modelSelections.filter { (key, model) -> key.hostId != hostId || model in models },
-                        activeSessionId = it.activeSessionId?.takeIf { id -> sessionPage.sessions.any { session -> session.id == id } },
+                        jobs = loaded.jobs,
+                        skills = loaded.skills,
+                        toolsets = loaded.toolsets,
+                        models = loaded.models,
+                        modelSelections = it.modelSelections.filter { (key, model) -> key.hostId != hostId || model in loaded.models },
+                        activeSessionId = it.activeSessionId?.takeIf { id -> loaded.sessions.sessions.any { session -> session.id == id } },
                         errorMessage = null,
                     )
                 }
@@ -1308,6 +1396,9 @@ class HermesViewModel(
                         it.copy(
                             connectionPhase = HostConnectionPhase.Failed,
                             capabilities = null,
+                            hostUpdate = null,
+                            hostUpdateChecking = false,
+                            hostUpdateStarting = false,
                             errorMessage = friendlyMessage(error),
                         )
                     }

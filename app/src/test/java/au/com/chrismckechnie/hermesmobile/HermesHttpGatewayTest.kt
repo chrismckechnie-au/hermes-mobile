@@ -59,6 +59,35 @@ class HermesHttpGatewayTest {
     }
 
     @Test
+    fun `reads host version and capability-gated update status`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"status":"ok","version":"2026.7.15"}"""))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""
+            {"current_version":"2026.7.15","update_available":true,"can_apply":true,"message":"Update available","update_command":"hermes update"}
+        """.trimIndent()))
+
+        assertEquals("2026.7.15", gateway.getHostVersion(profile))
+        val update = gateway.getHostUpdate(profile, force = true)
+
+        assertEquals("/health", server.takeRequest().path)
+        assertEquals("/v1/host-update?force=true", server.takeRequest().path)
+        assertTrue(update.updateAvailable)
+        assertTrue(update.canApply)
+    }
+
+    @Test
+    fun `starts a host update with bearer auth`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(202).setBody("""{"accepted":true,"message":"Update started"}"""))
+
+        val result = gateway.updateHost(profile)
+        val request = server.takeRequest()
+
+        assertEquals("/v1/host-update", request.path)
+        assertEquals("POST", request.method)
+        assertEquals("Bearer test-key", request.getHeader("Authorization"))
+        assertTrue(result.accepted)
+    }
+
+    @Test
     fun `lists sessions including children`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
             {"object":"list","data":[{"id":"session-1","title":"Mobile work","source":"api_server","model":"hermes-agent","last_active":1720000000}]}

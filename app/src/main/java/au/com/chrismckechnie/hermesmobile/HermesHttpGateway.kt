@@ -45,6 +45,33 @@ class HermesHttpGateway(
             model = data.optNullableString("model") ?: "hermes-agent",
             platform = data.optNullableString("platform") ?: "hermes-agent",
             features = features,
+            version = data.optNullableString("version"),
+        )
+    }
+
+    override suspend fun getHostVersion(host: HostProfile): String? = withContext(Dispatchers.IO) {
+        executeJson(host, request(host, listOf("health"))).optNullableString("version")
+    }
+
+    override suspend fun getHostUpdate(host: HostProfile, force: Boolean): HermesHostUpdate = withContext(Dispatchers.IO) {
+        val url = endpoint(host, "v1", "host-update").newBuilder()
+            .apply { if (force) addQueryParameter("force", "true") }
+            .build()
+        val data = executeJson(host, request(host, url))
+        HermesHostUpdate(
+            currentVersion = data.optNullableString("current_version") ?: "Unknown",
+            updateAvailable = data.optBoolean("update_available", false),
+            canApply = data.optBoolean("can_apply", false),
+            message = data.optNullableString("message"),
+            updateCommand = data.optNullableString("update_command"),
+        )
+    }
+
+    override suspend fun updateHost(host: HostProfile): HermesHostUpdateStart = withContext(Dispatchers.IO) {
+        val data = executeJson(host, request(host, endpoint(host, "v1", "host-update"), method = "POST", body = JSONObject()))
+        HermesHostUpdateStart(
+            accepted = data.optBoolean("accepted", data.optBoolean("ok", false)),
+            message = data.optNullableString("message"),
         )
     }
 
