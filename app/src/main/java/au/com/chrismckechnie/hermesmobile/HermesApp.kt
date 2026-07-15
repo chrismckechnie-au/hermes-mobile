@@ -426,6 +426,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                                     item.text,
                                     item.streaming,
                                     item.safeStatus,
+                                    item.usage,
                                     showAvatar = item.id in assistantAvatarIds,
                                 )
                                 is ChatUiItem.Reasoning -> ReasoningCard(item)
@@ -731,7 +732,13 @@ private fun UserBubble(text: String) {
 }
 
 @Composable
-private fun AssistantMessage(text: String, streaming: Boolean, safeStatus: String?, showAvatar: Boolean) {
+private fun AssistantMessage(
+    text: String,
+    streaming: Boolean,
+    safeStatus: String?,
+    usage: HermesRunUsage?,
+    showAvatar: Boolean,
+) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         if (showAvatar) HermesAvatar(Modifier.size(29.dp)) else Spacer(Modifier.width(29.dp))
         Spacer(Modifier.width(10.dp))
@@ -742,6 +749,9 @@ private fun AssistantMessage(text: String, streaming: Boolean, safeStatus: Strin
                 MarkdownText(text, modifier = Modifier.padding(top = 2.dp))
                 if (streaming) {
                     Text("STREAMING", style = T.MicroBold, modifier = Modifier.padding(top = 6.dp))
+                }
+                formatRunUsage(usage)?.let { summary ->
+                    Text(summary, style = T.MicroBold, modifier = Modifier.padding(top = 6.dp))
                 }
             }
         }
@@ -789,7 +799,9 @@ private fun shareTranscript(context: Context, transcript: String) {
 
 @Composable
 private fun ReasoningCard(item: ChatUiItem.Reasoning) {
-    var expanded by remember(item.id) { mutableStateOf(false) }
+    // Live activity is useful while a run is in progress, so expose it immediately.
+    // The card stays collapsible once the user has reviewed it.
+    var expanded by remember(item.id) { mutableStateOf(true) }
     val latest = item.updates.lastOrNull().orEmpty()
     val action = if (expanded) "Collapse Hermes activity" else "Expand Hermes activity"
     Card(
@@ -832,7 +844,7 @@ private fun ReasoningCard(item: ChatUiItem.Reasoning) {
                 Modifier.fillMaxWidth().padding(start = 38.dp, end = 9.dp, bottom = 7.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                item.updates.takeLast(6).forEach { update ->
+                item.updates.takeLast(12).forEach { update ->
                     Text(
                         update,
                         style = T.BodyMuted.copy(color = T.TextSoft, fontSize = 11.sp, lineHeight = 15.sp),

@@ -258,7 +258,10 @@ class HermesHttpGateway(
         )
         "approval.request" -> HermesRunEvent.ApprovalRequested(payload.optNullableString("command"))
         "approval.responded" -> HermesRunEvent.ApprovalResponded(payload.optNullableString("choice"))
-        "run.completed" -> HermesRunEvent.Completed(payload.optString("output"))
+        "run.completed" -> HermesRunEvent.Completed(
+            output = payload.optString("output"),
+            usage = payload.optRunUsage(),
+        )
         "run.failed" -> HermesRunEvent.Failed(payload.optString("error", "Hermes run failed."))
         "run.cancelled" -> HermesRunEvent.Cancelled
         else -> null // Future events remain forward-compatible.
@@ -450,6 +453,21 @@ class HermesHttpGateway(
             .followSslRedirects(false)
     }
 }
+
+private fun JSONObject.optRunUsage(): HermesRunUsage? {
+    val usage = optJSONObject("usage") ?: return null
+    val parsed = HermesRunUsage(
+        inputTokens = usage.optNonNegativeLong("input_tokens"),
+        outputTokens = usage.optNonNegativeLong("output_tokens"),
+        totalTokens = usage.optNonNegativeLong("total_tokens"),
+    )
+    return parsed.takeUnless(HermesRunUsage::isEmpty)
+}
+
+private fun JSONObject.optNonNegativeLong(name: String): Long? =
+    takeIf { has(name) && !isNull(name) }
+        ?.optLong(name, -1L)
+        ?.takeIf { it >= 0L }
 
 private inline fun <T> JSONArray?.toObjectList(transform: (JSONObject) -> T): List<T> {
     if (this == null) return emptyList()

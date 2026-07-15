@@ -188,6 +188,7 @@ sealed interface ChatUiItem {
         val text: String,
         val streaming: Boolean = false,
         val safeStatus: String? = null,
+        val usage: HermesRunUsage? = null,
     ) : ChatUiItem
 
     /** Collapsible, host-provided progress summaries for the active Run. */
@@ -211,6 +212,15 @@ sealed interface ChatUiItem {
         val submitting: Boolean,
     ) : ChatUiItem
 }
+
+private fun List<ChatUiItem>.withRunUsage(usageByMessageId: Map<String, HermesRunUsage>): List<ChatUiItem> =
+    map { item ->
+        if (item is ChatUiItem.Assistant && item.usage == null) {
+            usageByMessageId[item.id]?.let { usage -> item.copy(usage = usage) } ?: item
+        } else {
+            item
+        }
+    }
 
 /**
  * Immutable coordinates of the Run in flight. Holds the authenticated Host
@@ -321,6 +331,7 @@ data class HermesUiState(
     val activeSessionId: String? = null,
     val pendingSessionTarget: SessionKey? = null,
     val messages: List<ChatUiItem> = emptyList(),
+    val runUsageByMessage: Map<SessionKey, Map<String, HermesRunUsage>> = emptyMap(),
     val jobs: List<HermesJob> = emptyList(),
     val skills: List<HermesSkill> = emptyList(),
     val toolsets: List<HermesToolset> = emptyList(),
@@ -398,9 +409,10 @@ data class HermesUiState(
     /** Loaded messages plus the live Run tail (and Approval card) when its Session is displayed. */
     val displayedMessages: List<ChatUiItem>
         get() {
-            val run = activeRun ?: return messages
-            if (run.sessionId != activeSessionId) return messages
-            val tail = messages + run.tail
+            val storedMessages = messages.withRunUsage(activeSessionKey?.let(runUsageByMessage::get).orEmpty())
+            val run = activeRun ?: return storedMessages
+            if (run.sessionId != activeSessionId) return storedMessages
+            val tail = storedMessages + run.tail
             return if (run.awaitingApproval && !run.approvalDetailsLost) {
                 tail + ChatUiItem.Approval(
                     id = "approval:${run.runId}",
@@ -560,6 +572,7 @@ class HermesViewModel(
             activeRuns = activeRuns.move { run -> run.copy(sessionId = newKey.sessionId) },
             queuedInterrupts = queuedInterrupts.move(),
             unknownOutcomes = unknownOutcomes.move { pending -> pending.copy(sessionId = newKey.sessionId) },
+            runUsageByMessage = runUsageByMessage.move(),
         )
     }
 
@@ -1338,7 +1351,11 @@ class HermesViewModel(
                     terminal = true
                     state.withRun(key, current.copy(tail = current.tail.map { item ->
                         if (item is ChatUiItem.Assistant && item.id == current.assistantId) {
-                            item.copy(text = event.output.ifBlank { item.text }, streaming = false)
+                            item.copy(
+                                text = event.output.ifBlank { item.text },
+                                streaming = false,
+                                usage = event.usage,
+                            )
                         } else item
                     }))
                 }
@@ -1450,23 +1467,42 @@ class HermesViewModel(
         var shouldAutoSubmitQueued = false
         var reconciled = false
         val resolvedKey = SessionKey(run.host.id, page.sessionId)
+        val reconciledMessages = page.messages.mapNotNull(::mapStoredMessage)
+        val completedAssistant = current.tail
+            .filterIsInstance<ChatUiItem.Assistant>()
+            .firstOrNull { it.id == current.assistantId }
+        val completedUsageMessageId = completedUsageMessageId(
+            messages = reconciledMessages,
+            completedUsage = completedAssistant?.usage,
+            completedText = completedAssistant?.text,
+        )
         mutableState.update { state ->
             val rekeyed = state.rekeySession(key, resolvedKey)
             if (rekeyed.activeRuns[resolvedKey]?.runId != run.runId) return@update rekeyed
-            queuedInterrupt = rekeyed.queuedInterrupts[resolvedKey]
+            val usageAttached = if (completedAssistant?.usage != null && completedUsageMessageId != null) {
+                rekeyed.copy(
+                    runUsageByMessage = rekeyed.runUsageByMessage + (
+                        resolvedKey to (rekeyed.runUsageByMessage[resolvedKey].orEmpty() +
+                            (completedUsageMessageId to completedAssistant.usage))
+                    ),
+                )
+            } else {
+                rekeyed
+            }
+            queuedInterrupt = usageAttached.queuedInterrupts[resolvedKey]
             reconciled = true
             shouldAutoSubmitQueued = queuedInterrupt != null &&
                 queuedInterrupt?.requiresAcknowledgement == false &&
-                rekeyed.activeSessionKey == resolvedKey
+                usageAttached.activeSessionKey == resolvedKey
             val keepQueueForReview = queuedInterrupt != null && !shouldAutoSubmitQueued
             val nextQueues = if (keepQueueForReview) {
-                rekeyed.queuedInterrupts + (
+                usageAttached.queuedInterrupts + (
                     resolvedKey to checkNotNull(queuedInterrupt).copy(requiresAcknowledgement = true)
                 )
             } else {
-                rekeyed.queuedInterrupts - resolvedKey
+                usageAttached.queuedInterrupts - resolvedKey
             }
-            var cleared = rekeyed.withRun(resolvedKey, null)
+            var cleared = usageAttached.withRun(resolvedKey, null)
                 .withSending(resolvedKey, false)
                 .copy(queuedInterrupts = nextQueues)
             if (keepQueueForReview && queuedInterrupt?.requiresAcknowledgement == false) {
@@ -1475,7 +1511,7 @@ class HermesViewModel(
             if (cleared.activeHostId == run.host.id && cleared.activeSessionId == page.sessionId) {
                 cleared.copy(
                     activeSessionId = page.sessionId,
-                    messages = page.messages.mapNotNull(::mapStoredMessage),
+                    messages = reconciledMessages,
                     errorMessage = null,
                 )
             } else cleared
@@ -1985,6 +2021,20 @@ class HermesViewModel(
             "tool" -> ChatUiItem.Tool(id, message.toolName ?: "tool", message.content.take(180), running = false)
             else -> null
         }
+    }
+
+    /** The messages endpoint has no usage field, so never guess an association by position. */
+    private fun completedUsageMessageId(
+        messages: List<ChatUiItem>,
+        completedUsage: HermesRunUsage?,
+        completedText: String?,
+    ): String? {
+        completedUsage ?: return null
+        val finalText = completedText?.trim()?.takeIf(String::isNotBlank) ?: return null
+        val index = messages.indexOfLast { item ->
+            item is ChatUiItem.Assistant && item.text.trim() == finalText
+        }
+        return (messages.getOrNull(index) as? ChatUiItem.Assistant)?.id
     }
 
     private fun persist(snapshot: HostSnapshot) {

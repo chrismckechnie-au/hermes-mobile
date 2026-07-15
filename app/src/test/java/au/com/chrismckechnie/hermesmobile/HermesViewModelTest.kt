@@ -326,13 +326,57 @@ class HermesViewModelTest {
         // Terminal event reconciles from the host and clears the run.
         gateway.messages.getValue("s1").add(HermesMessage("m3", "user", "what next?"))
         gateway.messages.getValue("s1").add(HermesMessage("m4", "assistant", "Done"))
-        gateway.events.send(HermesRunEvent.Completed("Done"))
+        gateway.events.send(
+            HermesRunEvent.Completed(
+                output = "Done",
+                usage = HermesRunUsage(inputTokens = 120, outputTokens = 80, totalTokens = 200),
+            ),
+        )
         gateway.events.close()
         advanceUntilIdle()
 
         val state = viewModel.state.value
         assertNull(state.activeRun)
         assertEquals(listOf("m1", "m2", "m3", "m4"), state.messages.map { it.id })
+        assertEquals(
+            HermesRunUsage(inputTokens = 120, outputTokens = 80, totalTokens = 200),
+            (state.displayedMessages.last() as ChatUiItem.Assistant).usage,
+        )
+    }
+
+    @Test
+    fun `completed usage remains with its session while another session is open`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            sessions += HermesSession("s2", "Second", null, "api_server", null, null, 0)
+            messages["s2"] = mutableListOf()
+        }
+        val (viewModel, _) = buildViewModel(gateway)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("show usage")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        viewModel.selectSession("s2")
+        advanceUntilIdle()
+        gateway.messages.getValue("s1") += HermesMessage("m3", "user", "show usage")
+        gateway.messages.getValue("s1") += HermesMessage("m4", "assistant", "Done")
+        gateway.events.send(
+            HermesRunEvent.Completed(
+                output = "Done",
+                usage = HermesRunUsage(totalTokens = 321),
+            ),
+        )
+        gateway.events.close()
+        advanceUntilIdle()
+
+        assertEquals("s2", viewModel.state.value.activeSessionId)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        assertEquals(
+            HermesRunUsage(totalTokens = 321),
+            (viewModel.state.value.displayedMessages.last() as ChatUiItem.Assistant).usage,
+        )
     }
 
     @Test

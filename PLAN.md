@@ -18,7 +18,7 @@ Give Hermes Mobile a slash-command composer and full Run control. Typing `/` ope
 | `reasoning.available` | `text` |
 | `approval.request` | `command` (redacted), `choices: [once, session, always, deny]`, run status → `waiting_for_approval` |
 | `approval.responded` | `choice`, `resolved` (another client may resolve the Approval — reconcile the card from this event) |
-| `run.completed` | `output`, `usage` (terminal) |
+| `run.completed` | `output`, `usage.input_tokens`, `usage.output_tokens`, `usage.total_tokens` (terminal) |
 | `run.failed` | `error` (terminal) |
 | `run.cancelled` | — (terminal) |
 

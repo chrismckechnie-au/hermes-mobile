@@ -144,6 +144,34 @@ data class HermesRunStatus(
     }
 }
 
+/** Token counts reported by Hermes when a Run reaches a terminal state. */
+data class HermesRunUsage(
+    val inputTokens: Long? = null,
+    val outputTokens: Long? = null,
+    val totalTokens: Long? = null,
+) {
+    val isEmpty: Boolean get() = inputTokens == null && outputTokens == null && totalTokens == null
+}
+
+/** Compact, locale-neutral usage copy intended for the small chat metadata line. */
+internal fun formatRunUsage(usage: HermesRunUsage?): String? {
+    usage ?: return null
+    if (usage.isEmpty) return null
+    val fields = buildList {
+        usage.inputTokens?.let { add("${formatTokenCount(it)} in") }
+        usage.outputTokens?.let { add("${formatTokenCount(it)} out") }
+        usage.totalTokens?.let { add("${formatTokenCount(it)} tokens") }
+    }
+    return fields.joinToString(" · ").takeIf(String::isNotBlank)
+}
+
+private fun formatTokenCount(value: Long): String = when {
+    value < 1_000L -> value.toString()
+    value < 10_000L -> "%.1f".format(java.util.Locale.ROOT, value / 1_000.0)
+        .removeSuffix(".0") + "k"
+    else -> "${value / 1_000L}k"
+}
+
 /** Non-secret coordinates for targeting a run action without relying on current navigation. */
 data class RunRef(
     val hostId: String,
@@ -168,7 +196,7 @@ sealed interface HermesRunEvent {
     data class ToolCompleted(val tool: String, val failed: Boolean) : HermesRunEvent
     data class ApprovalRequested(val command: String?) : HermesRunEvent
     data class ApprovalResponded(val choice: String?) : HermesRunEvent
-    data class Completed(val output: String) : HermesRunEvent
+    data class Completed(val output: String, val usage: HermesRunUsage? = null) : HermesRunEvent
     data class Failed(val error: String) : HermesRunEvent
     data object Cancelled : HermesRunEvent
 }

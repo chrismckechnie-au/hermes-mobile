@@ -255,7 +255,7 @@ class HermesHttpGatewayTest {
 
             data: {"event":"approval.responded","run_id":"run-1","timestamp":1.6,"choice":"once","resolved":1}
 
-            data: {"event":"run.completed","run_id":"run-1","timestamp":1.7,"output":"Hello","usage":{"total_tokens":3}}
+            data: {"event":"run.completed","run_id":"run-1","timestamp":1.7,"output":"Hello","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}
 
             : stream closed
 
@@ -276,7 +276,9 @@ class HermesHttpGatewayTest {
         assertTrue(events.any { it is HermesRunEvent.ToolCompleted && it.failed })
         assertTrue(events.any { it is HermesRunEvent.ApprovalRequested && it.command == "rm -rf x" })
         assertTrue(events.any { it is HermesRunEvent.ApprovalResponded && it.choice == "once" })
-        assertTrue(events.any { it is HermesRunEvent.Completed && it.output == "Hello" })
+        val completed = events.filterIsInstance<HermesRunEvent.Completed>().single()
+        assertEquals("Hello", completed.output)
+        assertEquals(HermesRunUsage(inputTokens = 1, outputTokens = 2, totalTokens = 3), completed.usage)
         assertEquals(8, events.size)
     }
 

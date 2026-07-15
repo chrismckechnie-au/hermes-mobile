@@ -27,6 +27,11 @@ Hermes for health, models, runs, approvals, skills, toolsets, and session CRUD,
 messages, and fork. It performs read-only requests to `/health` and
 `/v1/models`; it does not submit a run or alter a session.
 
+When a Run completes, the event may include `usage.input_tokens`,
+`usage.output_tokens`, and `usage.total_tokens`. Hermes Mobile displays these
+counts only when the reconciled final assistant message exactly matches the
+terminal event output; it never guesses a usage-to-message association.
+
 The following stock flags are deliberately `false` and are not required for
 core compatibility:
 

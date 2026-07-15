@@ -55,4 +55,13 @@ class SessionDiscoveryTest {
 
         assertTrue(transcript.contains("Session: Untitled session"))
     }
+
+    @Test
+    fun `run usage formats a compact token summary`() {
+        assertEquals(
+            "1.2k in · 987 out · 2.2k tokens",
+            formatRunUsage(HermesRunUsage(inputTokens = 1_234, outputTokens = 987, totalTokens = 2_221)),
+        )
+        assertEquals("42 tokens", formatRunUsage(HermesRunUsage(totalTokens = 42)))
+    }
 }
