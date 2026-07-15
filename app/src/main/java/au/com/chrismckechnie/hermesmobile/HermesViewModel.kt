@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.IOException
+import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -108,6 +109,22 @@ data class SessionKey(
     val hostId: String,
     val sessionId: String,
 )
+
+internal fun sortSessionsByActivity(
+    sessions: List<HermesSession>,
+    activeSessionIds: Set<String>,
+): List<HermesSession> = sessions.sortedWith(
+    compareByDescending<HermesSession> { it.id in activeSessionIds }
+        .thenByDescending { sessionActivityMillis(it.lastActive) }
+        .thenBy { it.title.orEmpty().lowercase() },
+)
+
+internal fun sessionActivityMillis(value: String?): Long {
+    val raw = value?.trim().orEmpty()
+    if (raw.isBlank()) return Long.MIN_VALUE
+    raw.toLongOrNull()?.let { epoch -> return if (epoch < 100_000_000_000L) epoch * 1_000 else epoch }
+    return runCatching { Instant.parse(raw).toEpochMilli() }.getOrDefault(Long.MIN_VALUE)
+}
 
 sealed interface ChatUiItem {
     val id: String
@@ -215,6 +232,7 @@ data class HermesUiState(
     val creatingRunHosts: Set<String> = emptySet(),
     val isRefreshing: Boolean = false,
     val activeRuns: Map<SessionKey, ActiveRun> = emptyMap(),
+    val activeHostSessions: Map<String, HermesActiveSession> = emptyMap(),
     val queuedInterrupts: Map<SessionKey, String> = emptyMap(),
     val unknownOutcomes: Map<SessionKey, UnknownOutcome> = emptyMap(),
     val sessionActionsFor: String? = null,
@@ -241,6 +259,26 @@ data class HermesUiState(
     val unknownOutcome: UnknownOutcome? get() = activeSessionKey?.let(unknownOutcomes::get)
     val otherActiveRuns: List<ActiveRun>
         get() = activeRuns.filterKeys { it != activeSessionKey }.values.toList()
+    val activeSessionIds: Set<String>
+        get() = activeHostSessions.keys + activeRuns.keys
+            .filter { it.hostId == activeHostId }
+            .map(SessionKey::sessionId)
+    val orderedSessions: List<HermesSession>
+        get() = sortSessionsByActivity(sessions, activeSessionIds)
+
+    fun activityFor(session: HermesSession): HermesActiveSession? {
+        val localRun = activeHostId?.let { hostId -> activeRuns[SessionKey(hostId, session.id)] }
+        if (localRun != null) {
+            return HermesActiveSession(
+                sessionId = session.id,
+                runId = localRun.runId,
+                title = session.title?.takeIf { it.isNotBlank() } ?: "Hermes task",
+                state = if (localRun.stopping) "stopping" else "working",
+                surface = "mobile",
+            )
+        }
+        return activeHostSessions[session.id]
+    }
 
     /** Loaded messages plus the live Run tail (and Approval card) when its Session is displayed. */
     val displayedMessages: List<ChatUiItem>
@@ -453,6 +491,7 @@ class HermesViewModel(
                 showHostPicker = false,
                 editingHostId = null,
                 connectionPhase = HostConnectionPhase.Connecting,
+                activeHostSessions = emptyMap(),
                 errorMessage = null,
             )
         }
@@ -475,6 +514,7 @@ class HermesViewModel(
                 sessions = emptyList(),
                 sessionsHasMore = false,
                 activeSessionId = null,
+                activeHostSessions = emptyMap(),
                 messages = emptyList(),
                 jobs = emptyList(),
                 skills = emptyList(),
@@ -524,6 +564,7 @@ class HermesViewModel(
                     sessions = emptyList(),
                     sessionsHasMore = false,
                     activeSessionId = null,
+                    activeHostSessions = emptyMap(),
                     messages = emptyList(),
                     jobs = emptyList(),
                     skills = emptyList(),
@@ -546,12 +587,14 @@ class HermesViewModel(
         viewModelScope.launch {
             val sessions = runCatching { gateway.listSessions(host) }.getOrNull()
             val jobs = runCatching { gateway.listJobs(host) }.getOrNull()
+            val activeSessions = runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList())
             if (mutableState.value.activeHostId == host.id) {
                 mutableState.update {
                     it.copy(
                         sessions = sessions?.sessions ?: it.sessions,
                         sessionsHasMore = sessions?.hasMore ?: it.sessionsHasMore,
                         jobs = jobs ?: it.jobs,
+                        activeHostSessions = activeSessions.associateBy(HermesActiveSession::sessionId),
                         isRefreshing = false,
                     )
                 }
@@ -1224,6 +1267,7 @@ class HermesViewModel(
                     Triple(sessionsDeferred.await(), jobsDeferred.await(), skillsDeferred.await() to modelsDeferred.await())
                 }
                 val (skills, models) = extras
+                val activeSessions = runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList())
                 if (mutableState.value.activeHostId != hostId) return@launch
                 mutableState.update {
                     it.copy(
@@ -1231,6 +1275,7 @@ class HermesViewModel(
                         capabilities = capabilities,
                         sessions = sessionPage.sessions,
                         sessionsHasMore = sessionPage.hasMore,
+                        activeHostSessions = activeSessions.associateBy(HermesActiveSession::sessionId),
                         jobs = jobs,
                         skills = skills,
                         models = models,
@@ -1340,12 +1385,14 @@ class HermesViewModel(
         viewModelScope.launch {
             val sessions = runCatching { gateway.listSessions(host) }.getOrNull()
             val jobs = runCatching { gateway.listJobs(host) }.getOrNull()
+            val activeSessions = runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList())
             if (mutableState.value.activeHostId == host.id) {
                 mutableState.update {
                     it.copy(
                         sessions = sessions?.sessions ?: it.sessions,
                         sessionsHasMore = sessions?.hasMore ?: it.sessionsHasMore,
                         jobs = jobs ?: it.jobs,
+                        activeHostSessions = activeSessions.associateBy(HermesActiveSession::sessionId),
                     )
                 }
             }

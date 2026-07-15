@@ -36,6 +36,7 @@ private class FakeGateway : HermesGateway {
     val resolvedIds = mutableMapOf<String, String>()
     var skills = listOf(HermesSkill("grill-me", "A relentless interview"))
     var models = listOf("hermes-agent", "hermes-fast", "gpt-5.6-terra")
+    var activeSessions = emptyList<HermesActiveSession>()
     private val eventStreams = mutableMapOf<String, Channel<HermesRunEvent>>()
     val events: Channel<HermesRunEvent> get() = eventsFor("run-1")
     var runStatus = HermesRunStatus("run-1", "completed")
@@ -77,6 +78,7 @@ private class FakeGateway : HermesGateway {
     override suspend fun runJob(host: HostProfile, jobId: String) = Unit
     override suspend fun listSkills(host: HostProfile) = skills
     override suspend fun listModels(host: HostProfile) = models
+    override suspend fun listActiveSessions(host: HostProfile) = activeSessions
 
     override suspend fun submitRun(host: HostProfile, sessionId: String, input: String, history: List<HermesMessage>, model: String?, reasoningEffort: String?): String {
         submitError?.let { throw it }
@@ -206,6 +208,22 @@ class HermesViewModelTest {
         assertEquals(listOf("s1"), state.sessions.map { it.id })
         assertEquals(listOf("grill-me"), state.skills.map { it.name })
         assertEquals(listOf("hermes-agent", "hermes-fast", "gpt-5.6-terra"), state.models)
+    }
+
+    @Test
+    fun `refreshes host activity for session status and ordering`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            sessions.clear()
+            sessions += HermesSession("older", "Older", null, "api_server", null, "1700000000", 1)
+            sessions += HermesSession("active", "Active", null, "api_server", null, "1600000000", 1)
+            sessions += HermesSession("newer", "Newer", null, "api_server", null, "1800000000", 1)
+            activeSessions = listOf(HermesActiveSession("active", "run-1", "Active", "waiting_for_approval", "desktop"))
+        }
+        val (viewModel, _) = buildViewModel(gateway = gateway)
+
+        val state = viewModel.state.value
+        assertEquals(listOf("active", "newer", "older"), state.orderedSessions.map { it.id })
+        assertEquals("waiting_for_approval", state.activityFor(state.sessions.single { it.id == "active" })?.state)
     }
 
     @Test

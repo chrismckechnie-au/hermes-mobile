@@ -1096,10 +1096,11 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(bottom = 12.dp),
                 ) {
-                    items(state.sessions, key = { it.id }) { session ->
+                    items(state.orderedSessions, key = { it.id }) { session ->
                         SessionCard(
                             session = session,
                             selected = state.activeSessionId == session.id,
+                            activity = state.activityFor(session),
                             onClick = { viewModel.selectSession(session.id) },
                             onLongClick = { actionTarget = session },
                         )
@@ -1167,24 +1168,59 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SessionCard(session: HermesSession, selected: Boolean, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun SessionCard(
+    session: HermesSession,
+    selected: Boolean,
+    activity: HermesActiveSession?,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+) {
+    val activityColor = activity?.let { sessionActivityColor(it.state) }
     Card(
         modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick, onLongClickLabel = "Session actions"),
-        colors = CardDefaults.cardColors(containerColor = if (selected) T.Cream.copy(alpha = 0.075f) else T.SurfaceLow),
-        border = BorderStroke(1.dp, if (selected) T.FocusRing else T.Line),
+        colors = CardDefaults.cardColors(
+            containerColor = when {
+                selected -> T.Cream.copy(alpha = 0.075f)
+                activityColor != null -> activityColor.copy(alpha = 0.09f)
+                else -> T.SurfaceLow
+            },
+        ),
+        border = BorderStroke(1.dp, when {
+            selected -> T.FocusRing
+            activityColor != null -> activityColor.copy(alpha = 0.55f)
+            else -> T.Line
+        }),
         shape = RoundedCornerShape(T.RadiusCard),
     ) {
         Column(Modifier.padding(13.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(8.dp).clip(CircleShape).background(if (selected) T.Cream else T.Muted.copy(alpha = 0.4f)))
+                Box(Modifier.size(8.dp).clip(CircleShape).background(activityColor ?: if (selected) T.Cream else T.Muted.copy(alpha = 0.4f)))
                 Spacer(Modifier.width(9.dp))
                 Text(session.title?.takeIf { it.isNotBlank() } ?: "Untitled session", style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                activity?.let {
+                    Text(sessionActivityLabel(it.state), style = T.MicroBold.copy(color = activityColor ?: T.Cream))
+                    Spacer(Modifier.width(7.dp))
+                }
                 Text("${session.messageCount ?: 0} MSG", style = T.Micro)
             }
             Text(session.preview?.takeIf { it.isNotBlank() } ?: "No preview available", style = T.BodyMuted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp, start = 17.dp))
             Text(listOfNotNull(session.source, session.model).joinToString(" · ").ifBlank { "Hermes session" }, style = T.Micro.copy(color = T.Muted.copy(alpha = 0.72f), letterSpacing = 0.sp), modifier = Modifier.padding(top = 9.dp, start = 17.dp))
         }
     }
+}
+
+private fun sessionActivityLabel(state: String): String = when (state.lowercase()) {
+    "waiting_for_approval", "approval_required" -> "NEEDS APPROVAL"
+    "queued" -> "QUEUED"
+    "stopping" -> "STOPPING"
+    else -> "RUNNING"
+}
+
+@Composable
+private fun sessionActivityColor(state: String): Color = when (state.lowercase()) {
+    "waiting_for_approval", "approval_required", "stopping" -> T.Warn
+    "failed", "error" -> T.Error
+    else -> T.Ok
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
