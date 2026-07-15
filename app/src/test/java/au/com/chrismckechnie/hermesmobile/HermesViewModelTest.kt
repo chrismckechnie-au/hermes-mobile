@@ -716,6 +716,38 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `active session refresh clears work that the host no longer reports`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            activeSessions = listOf(HermesActiveSession("s1", "run-remote", "First", "running", "desktop"))
+        }
+        val (viewModel, _) = buildViewModel(gateway = gateway)
+        assertTrue(viewModel.state.value.activeSessionIds.contains("s1"))
+
+        gateway.activeSessions = emptyList()
+        viewModel.refreshHostActivity()
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.activeSessionIds.contains("s1"))
+    }
+
+    @Test
+    fun `run reconciliation finishes work when a terminal event was missed`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("finish even if the stream stalls")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+        assertNotNull(viewModel.state.value.activeRun)
+
+        gateway.runStatus = HermesRunStatus("run-1", "completed")
+        viewModel.reconcileActiveRuns()
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.activeRun)
+    }
+
+    @Test
     fun `repeated first prompts receive unique titles and still start`() = runVmTest {
         val gateway = FakeGateway().apply {
             sessions.add(HermesSession("previous", "Repeat this task", null, "api_server", null, null, 2))

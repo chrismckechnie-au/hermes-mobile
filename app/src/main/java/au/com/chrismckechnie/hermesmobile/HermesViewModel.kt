@@ -508,8 +508,10 @@ data class HermesUiState(
         get() = sortSessionsByActivity(sessions, activeSessionIds)
 
     fun activityFor(session: HermesSession): HermesActiveSession? {
-        val localRun = activeHostId?.let { hostId -> activeRuns[SessionKey(hostId, session.id)] }
+        val key = activeHostId?.let { hostId -> SessionKey(hostId, session.id) }
+        val localRun = key?.let(activeRuns::get)
         if (localRun != null) {
+            val hostReported = key?.let(activeHostSessions::get)
             return HermesActiveSession(
                 sessionId = session.id,
                 runId = localRun.runId,
@@ -518,9 +520,11 @@ data class HermesUiState(
                     localRun.reconcilingTranscript -> "syncing"
                     localRun.terminalUnsynced -> "sync_required"
                     localRun.stopping -> "stopping"
-                    else -> "working"
+                    else -> hostReported?.state ?: "working"
                 },
                 surface = "mobile",
+                latestStatus = hostReported?.latestStatus,
+                updatedAt = hostReported?.updatedAt,
             )
         }
         val hostId = activeHostId ?: return null
@@ -594,6 +598,8 @@ class HermesViewModel(
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(HermesUiState())
     val state: StateFlow<HermesUiState> = mutableState.asStateFlow()
+    private val runStatusChecks = mutableSetOf<String>()
+    private val hostActivityChecks = mutableSetOf<String>()
 
     private fun ActiveRun.key(): SessionKey = SessionKey(host.id, sessionId)
 
@@ -1180,6 +1186,48 @@ class HermesViewModel(
     fun selectReasoningEffort(effort: String?) {
         mutableState.update { state ->
             state.withReasoningSelection(state.activeSessionKey, effort?.takeIf { it in REASONING_EFFORTS })
+        }
+    }
+
+    fun refreshHostActivity() {
+        val host = mutableState.value.activeHost ?: return
+        if (!hostActivityChecks.add(host.id)) return
+        viewModelScope.launch {
+            try {
+                val sessions = gateway.listActiveSessions(host)
+                if (mutableState.value.activeHostId == host.id) {
+                    mutableState.update { it.withHostActivity(host.id, sessions) }
+                }
+            } catch (_: Throwable) {
+                // Keep the last known state during a transient connection loss.
+            } finally {
+                hostActivityChecks.remove(host.id)
+            }
+        }
+    }
+
+    fun reconcileActiveRuns() {
+        mutableState.value.activeRuns.values.forEach { run ->
+            if (!runStatusChecks.add(run.runId)) return@forEach
+            viewModelScope.launch {
+                try {
+                    val result = runCatching { gateway.getRunStatus(run.host, run.runId) }
+                    val status = result.getOrNull()
+                    val missing = (result.exceptionOrNull() as? HermesApiException)?.statusCode in setOf(404, 410)
+                    if (status?.isTerminal == true || missing) {
+                        finalizeRun(run)
+                    } else if (status?.isWaitingForApproval == true) {
+                        val key = run.key()
+                        mutableState.update { state ->
+                            val current = state.activeRuns[key]
+                            if (current?.runId != run.runId) state
+                            else state.withRun(key, current.copy(awaitingApproval = true, approvalDetailsLost = true))
+                        }
+                    }
+                } finally {
+                    runStatusChecks.remove(run.runId)
+                }
+            }
         }
     }
 

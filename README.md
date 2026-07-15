@@ -22,7 +22,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - On-device session search plus All, Running, Approval, Mobile, and Desktop filter pills across loaded sessions, with host-default model aliases resolved to the configured model and explicit Android sharing of user/assistant transcripts without tool previews or progress details
 - Host model discovery with compact model, reasoning-effort, and permission controls directly above the Chat composer
 - Independent streaming runs per host/session, with stop/cancel, follow-up messages that interrupt and replace the current run, multi-run process-death recovery, and unknown-submit protection
-- Sessions are sorted by latest activity, with active work pinned first and clear running, queued, approval, and stopping indicators
+- Sessions are sorted by latest activity, with active work pinned first, visible-list liveness refresh, missed-terminal reconciliation, and clear running, queued, approval, stopping, and no-recent-activity indicators
 - Browse host skills and toolsets from the Host tab; start a skill in Chat or inspect the concrete host tools it exposes, including plugin-contributed tools when available
 - Optional Android system dictation from the composer, appending the recognizer result to the current draft
 - Markdown rendering of assistant replies (code blocks with copy, headings, bullets, bold/italic/inline code, links)

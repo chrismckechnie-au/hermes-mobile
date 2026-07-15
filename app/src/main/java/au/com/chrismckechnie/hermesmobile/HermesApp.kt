@@ -374,6 +374,12 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
             listState.scrollToItem(timelineItems.lastIndex, scrollOffset = 100_000)
         }
     }
+    LaunchedEffect(state.activeHostId, state.activeRuns.keys) {
+        while (true) {
+            viewModel.reconcileActiveRuns()
+            delay(10_000L)
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -1588,6 +1594,12 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
             defaultModel = defaultModel,
         )
     }
+    LaunchedEffect(state.activeHostId) {
+        while (true) {
+            viewModel.refreshHostActivity()
+            delay(5_000L)
+        }
+    }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 15.dp)) {
         ScreenHeading("Sessions", "${state.sessions.size} on ${state.activeHost?.name ?: "no host"}", Lucide.Plus, "New session", viewModel::createSession)
@@ -1910,6 +1922,7 @@ private fun SessionCard(
 
 private fun sessionActivityLabel(state: String): String = when (state.lowercase()) {
     "waiting_for_approval", "approval_required" -> "NEEDS APPROVAL"
+    "unresponsive", "stalled" -> "NO RECENT ACTIVITY"
     "queued" -> "QUEUED"
     "stopping" -> "STOPPING"
     else -> "RUNNING"
@@ -1917,7 +1930,7 @@ private fun sessionActivityLabel(state: String): String = when (state.lowercase(
 
 @Composable
 private fun sessionActivityColor(state: String): Color = when (state.lowercase()) {
-    "waiting_for_approval", "approval_required", "stopping" -> T.Warn
+    "waiting_for_approval", "approval_required", "stopping", "unresponsive", "stalled" -> T.Warn
     "failed", "error" -> T.Error
     else -> T.Ok
 }

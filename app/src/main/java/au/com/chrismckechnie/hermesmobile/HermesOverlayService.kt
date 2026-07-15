@@ -327,6 +327,7 @@ class HermesOverlayService : Service() {
                     item.attention != null -> attentionLabel(item.attention.state)
                     else -> when (item.session.state.lowercase()) {
                     "waiting_for_approval", "approval_required" -> "Needs approval"
+                    "unresponsive", "stalled" -> "No recent activity"
                     "queued" -> "Queued"
                     "stopping" -> "Stopping"
                     else -> "Working"
