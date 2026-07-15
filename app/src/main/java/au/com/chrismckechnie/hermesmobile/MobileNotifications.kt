@@ -12,18 +12,33 @@ import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
 import android.graphics.drawable.Icon
 import android.os.Build
+import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.graphics.drawable.IconCompat
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
+import androidx.work.CoroutineWorker
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkRequest
+import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import com.google.firebase.FirebaseApp
+import com.google.firebase.installations.FirebaseInstallations
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.launch
+import java.io.IOException
+import java.net.SocketTimeoutException
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 data class MobilePushEvent(
@@ -60,47 +75,380 @@ data class MobilePushEvent(
     }
 }
 
-object MobileRegistration {
-    suspend fun sync(context: Context, registeredFid: String? = null) = withContext(Dispatchers.IO) {
-        if (FirebaseApp.getApps(context).isEmpty()) return@withContext
-        if (registeredFid == null) {
-            awaitRegistration()
-            return@withContext
+data class MobileRegistrationStatus(
+    val hostId: String,
+    val desired: Boolean,
+    val registered: Boolean,
+    val pending: Boolean,
+    val errorMessage: String? = null,
+    val lastSuccessAtMillis: Long? = null,
+    val lastSuccessMessage: String? = null,
+    val lastFailureAtMillis: Long? = null,
+    val lastFailureMessage: String? = null,
+)
+
+internal enum class MobileRegistrationAction { Register, Unregister }
+
+internal data class MobileRegistrationFailure(
+    val hostId: String,
+    val action: MobileRegistrationAction,
+    val cause: Exception,
+    val message: String,
+    val retryable: Boolean,
+)
+
+internal data class MobileRegistrationReport(
+    val succeededHostIds: Set<String>,
+    val failures: List<MobileRegistrationFailure>,
+) {
+    val isSuccess: Boolean get() = failures.isEmpty()
+}
+
+internal enum class MobileRegistrationWorkDecision { Success, Retry, Failure }
+
+internal const val MOBILE_REGISTRATION_MAX_ATTEMPTS = 6
+
+internal suspend fun syncMobileRegistrationHosts(
+    hosts: List<HostProfile>,
+    enabledHostIds: Set<String>,
+    synchronize: suspend (HostProfile, MobileRegistrationAction) -> Unit,
+): MobileRegistrationReport {
+    val succeededHostIds = mutableSetOf<String>()
+    val failures = mutableListOf<MobileRegistrationFailure>()
+    hosts.forEach { host ->
+        val action = if (host.id in enabledHostIds) {
+            MobileRegistrationAction.Register
+        } else {
+            MobileRegistrationAction.Unregister
         }
-        val installationFid = registeredFid
+        try {
+            synchronize(host, action)
+            succeededHostIds += host.id
+        } catch (cause: Exception) {
+            if (cause is CancellationException) throw cause
+            failures += mobileRegistrationFailure(host.id, action, cause)
+        }
+    }
+    return MobileRegistrationReport(succeededHostIds, failures)
+}
+
+internal fun markMobileRegistrationsPending(
+    current: List<MobileRegistrationStatus>,
+    hostIds: Set<String>,
+    desiredHostIds: Set<String>,
+): List<MobileRegistrationStatus> {
+    val byHostId = current.associateBy(MobileRegistrationStatus::hostId)
+    return hostIds.sorted().map { hostId ->
+        val previous = byHostId[hostId] ?: MobileRegistrationStatus(
+            hostId = hostId,
+            desired = hostId in desiredHostIds,
+            registered = false,
+            pending = false,
+        )
+        previous.copy(
+            desired = hostId in desiredHostIds,
+            pending = true,
+        )
+    }
+}
+
+internal fun applyMobileRegistrationReportToStatuses(
+    current: List<MobileRegistrationStatus>,
+    hostIds: Set<String>,
+    desiredHostIds: Set<String>,
+    report: MobileRegistrationReport,
+    nowMillis: Long,
+    willRetry: Boolean,
+): List<MobileRegistrationStatus> {
+    val byHostId = current.associateBy(MobileRegistrationStatus::hostId)
+    val failures = report.failures.associateBy(MobileRegistrationFailure::hostId)
+    return hostIds.sorted().map { hostId ->
+        val desired = hostId in desiredHostIds
+        val previous = byHostId[hostId] ?: MobileRegistrationStatus(
+            hostId = hostId,
+            desired = desired,
+            registered = false,
+            pending = true,
+        )
+        when {
+            hostId in report.succeededHostIds -> previous.copy(
+                desired = desired,
+                registered = desired,
+                pending = false,
+                errorMessage = null,
+                lastSuccessAtMillis = nowMillis,
+                lastSuccessMessage = if (desired) {
+                    "Notifications registered with this host."
+                } else {
+                    "Notifications disabled on this host."
+                },
+            )
+
+            hostId in failures -> {
+                val failure = failures.getValue(hostId)
+                previous.copy(
+                    desired = desired,
+                    pending = willRetry && failure.retryable,
+                    errorMessage = failure.message,
+                    lastFailureAtMillis = nowMillis,
+                    lastFailureMessage = failure.message,
+                )
+            }
+
+            else -> previous.copy(desired = desired)
+        }
+    }
+}
+
+internal fun decideMobileRegistrationWork(
+    report: MobileRegistrationReport,
+    runAttemptCount: Int,
+): MobileRegistrationWorkDecision = when {
+    report.failures.isEmpty() -> MobileRegistrationWorkDecision.Success
+    report.failures.any(MobileRegistrationFailure::retryable) &&
+        runAttemptCount < MOBILE_REGISTRATION_MAX_ATTEMPTS - 1 -> MobileRegistrationWorkDecision.Retry
+    else -> MobileRegistrationWorkDecision.Failure
+}
+
+private class PermanentMobileRegistrationException(message: String) : Exception(message)
+
+private fun mobileRegistrationFailure(
+    hostId: String,
+    action: MobileRegistrationAction,
+    cause: Exception,
+): MobileRegistrationFailure {
+    val retryable = when (cause) {
+        is PermanentMobileRegistrationException,
+        is IllegalArgumentException,
+        is SecurityException -> false
+        is HermesApiException -> cause.statusCode in setOf(408, 425, 429) || cause.statusCode >= 500
+        else -> true
+    }
+    val message = when (cause) {
+        is PermanentMobileRegistrationException -> cause.message.orEmpty()
+        is HermesApiException -> when (cause.statusCode) {
+            401, 403 -> "Hermes rejected the mobile notification credentials."
+            404 -> "This Hermes host does not support mobile notification registration."
+            in 400..499 -> "Hermes rejected the mobile notification registration request."
+            else -> "Hermes could not update mobile notifications."
+        }
+        is SocketTimeoutException -> "The Hermes host timed out while updating mobile notifications."
+        is IOException -> "Could not reach this Hermes host."
+        else -> "Mobile notification registration failed."
+    }.take(240)
+    return MobileRegistrationFailure(hostId, action, cause, message, retryable)
+}
+
+object MobileRegistration {
+    fun statuses(context: Context): List<MobileRegistrationStatus> =
+        PreferencesSettingsStore(context.applicationContext).loadMobileRegistrationStatuses()
+
+    fun enqueue(
+        context: Context,
+        desiredHostIds: Set<String>? = null,
+    ) = enqueueInternal(
+        context = context,
+        registeredFid = null,
+        desiredHostIds = desiredHostIds,
+        policy = ExistingWorkPolicy.REPLACE,
+    )
+
+    fun enqueueRetry(context: Context) = enqueueInternal(
+        context = context,
+        registeredFid = null,
+        desiredHostIds = null,
+        policy = ExistingWorkPolicy.REPLACE,
+    )
+
+    internal fun enqueueRegisteredFid(context: Context, registeredFid: String) = enqueueInternal(
+        context = context,
+        registeredFid = registeredFid,
+        desiredHostIds = null,
+        // A rotated FID must supersede work carrying the previous identity.
+        policy = ExistingWorkPolicy.REPLACE,
+    )
+
+    private fun enqueueInternal(
+        context: Context,
+        registeredFid: String?,
+        desiredHostIds: Set<String>?,
+        policy: ExistingWorkPolicy,
+    ) {
+        val appContext = context.applicationContext
+        val settings = PreferencesSettingsStore(appContext)
+        val hostIds = SecureHostStore(appContext).load().snapshot.hosts.map(HostProfile::id).toSet()
+        val desired = (desiredHostIds ?: settings.loadNotificationHostIds()).intersect(hostIds)
+        settings.markMobileRegistrationPending(hostIds, desired)
+
+        val request = OneTimeWorkRequestBuilder<MobileRegistrationWorker>()
+            .setInputData(workDataOf(FID_INPUT_KEY to registeredFid.orEmpty()))
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .build(),
+            )
+            .setBackoffCriteria(
+                BackoffPolicy.EXPONENTIAL,
+                WorkRequest.MIN_BACKOFF_MILLIS,
+                TimeUnit.MILLISECONDS,
+            )
+            .addTag(WORK_TAG)
+            .build()
+        WorkManager.getInstance(appContext).enqueueUniqueWork(WORK_NAME, policy, request)
+    }
+
+    internal suspend fun performSync(context: Context, registeredFid: String?): MobileRegistrationReport = withContext(Dispatchers.IO) {
         val installationId = PreferencesSettingsStore(context).getOrCreateInstallationId()
         val hosts = SecureHostStore(context).load().snapshot.hosts
         val settings = PreferencesSettingsStore(context)
         val enabled = settings.loadNotificationHostIds()
         val gateway = HermesHttpGateway()
-        hosts.forEach { host ->
-            runCatching {
-                if (host.id in enabled) {
+        var installationFid = registeredFid?.trim()?.takeIf(String::isNotEmpty)
+        var fidFailure: Exception? = null
+        if (hosts.any { it.id in enabled } && installationFid == null) {
+            try {
+                if (FirebaseApp.getApps(context).isEmpty()) {
+                    throw PermanentMobileRegistrationException(
+                        "Firebase is not configured in this Hermes Mobile build.",
+                    )
+                }
+                awaitRegistration()
+                installationFid = awaitInstallationFid()
+            } catch (cause: Exception) {
+                if (cause is CancellationException) throw cause
+                fidFailure = cause
+            }
+        }
+        val appVersion = runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+        }.getOrDefault("")
+        val report = syncMobileRegistrationHosts(hosts, enabled) { host, action ->
+            when (action) {
+                MobileRegistrationAction.Register -> {
+                    fidFailure?.let { throw it }
+                    val fid = installationFid ?: throw PermanentMobileRegistrationException(
+                        "Firebase did not provide an installation id.",
+                    )
                     gateway.registerMobileDevice(
                         host = host,
                         installationId = installationId,
-                        token = installationFid,
-                        appVersion = context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty(),
+                        token = fid,
+                        appVersion = appVersion,
                         overlayEnabled = settings.loadOverlayEnabled(),
                     )
-                } else {
-                    gateway.unregisterMobileDevice(host, installationId)
                 }
+
+                MobileRegistrationAction.Unregister -> gateway.unregisterMobileDevice(host, installationId)
+            }
+        }
+        report.failures.forEach { failure ->
+            Log.w(
+                TAG,
+                "Could not ${failure.action.name.lowercase()} mobile notifications for host ${failure.hostId}.",
+                failure.cause,
+            )
+        }
+        report
+    }
+
+    private suspend fun awaitRegistration(): Unit = suspendCancellableCoroutine { continuation ->
+        FirebaseMessaging.getInstance().register().addOnCompleteListener { registration ->
+            if (!continuation.isActive) return@addOnCompleteListener
+            if (registration.isSuccessful) {
+                continuation.resume(Unit)
+            } else {
+                continuation.resumeWith(
+                    Result.failure(
+                        registration.exception ?: IllegalStateException("Firebase did not explain why registration failed."),
+                    ),
+                )
             }
         }
     }
 
-    private suspend fun awaitRegistration(): Boolean = suspendCancellableCoroutine { continuation ->
-        FirebaseMessaging.getInstance().register().addOnCompleteListener { registration ->
-            if (continuation.isActive) continuation.resume(registration.isSuccessful)
+    private suspend fun awaitInstallationFid(): String = suspendCancellableCoroutine { continuation ->
+        FirebaseInstallations.getInstance().id.addOnCompleteListener { installation ->
+            if (!continuation.isActive) return@addOnCompleteListener
+            val fid = installation.result?.trim().orEmpty()
+            if (installation.isSuccessful && fid.isNotEmpty()) {
+                continuation.resume(fid)
+            } else {
+                continuation.resumeWith(
+                    Result.failure(
+                        installation.exception ?: IllegalStateException("Firebase did not return an installation id."),
+                    ),
+                )
+            }
         }
     }
 
+    internal const val FID_INPUT_KEY = "registered_fid"
+    private const val WORK_NAME = "hermes-mobile-registration"
+    private const val WORK_TAG = "mobile-registration"
+    private const val TAG = "MobileRegistration"
+}
+
+class MobileRegistrationWorker(
+    appContext: Context,
+    workerParameters: WorkerParameters,
+) : CoroutineWorker(appContext, workerParameters) {
+    override suspend fun doWork(): Result {
+        val settings = PreferencesSettingsStore(applicationContext)
+        val hosts = SecureHostStore(applicationContext).load().snapshot.hosts
+        val hostIds = hosts.map(HostProfile::id).toSet()
+        val desiredHostIds = settings.loadNotificationHostIds().intersect(hostIds)
+        val report = try {
+            MobileRegistration.performSync(
+                context = applicationContext,
+                registeredFid = inputData.getString(MobileRegistration.FID_INPUT_KEY),
+            )
+        } catch (cause: CancellationException) {
+            throw cause
+        } catch (cause: Exception) {
+            MobileRegistrationReport(
+                succeededHostIds = emptySet(),
+                failures = hosts.map { host ->
+                    mobileRegistrationFailure(
+                        hostId = host.id,
+                        action = if (host.id in desiredHostIds) {
+                            MobileRegistrationAction.Register
+                        } else {
+                            MobileRegistrationAction.Unregister
+                        },
+                        cause = cause,
+                    )
+                },
+            )
+        }
+        val decision = decideMobileRegistrationWork(report, runAttemptCount)
+        settings.applyMobileRegistrationReport(
+            hostIds = hostIds,
+            desiredHostIds = desiredHostIds,
+            report = report,
+            nowMillis = System.currentTimeMillis(),
+            willRetry = decision == MobileRegistrationWorkDecision.Retry,
+        )
+        return when (decision) {
+            MobileRegistrationWorkDecision.Success -> Result.success()
+            MobileRegistrationWorkDecision.Retry -> Result.retry()
+            MobileRegistrationWorkDecision.Failure -> Result.failure()
+        }
+    }
 }
 
 class HermesMessagingService : FirebaseMessagingService() {
     override fun onRegistered(installationId: String) {
-        MobileBackgroundScope.launch { MobileRegistration.sync(applicationContext, installationId) }
+        super.onRegistered(installationId)
+        MobileRegistration.enqueueRegisteredFid(applicationContext, installationId)
+    }
+
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onNewToken(token: String) {
+        super.onNewToken(token)
+        // The mobile endpoint targets Firebase Installation IDs. A legacy
+        // token refresh therefore requests a fresh FID callback instead of
+        // accidentally uploading the token in the `fid` field.
+        MobileRegistration.enqueueRetry(applicationContext)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -247,11 +595,6 @@ class HermesNotificationCoordinator(private val context: Context) {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
     }
-}
-
-private object MobileBackgroundScope {
-    private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
-    fun launch(block: suspend () -> Unit) = scope.launch { block() }
 }
 
 internal data class MobileNotificationCopy(

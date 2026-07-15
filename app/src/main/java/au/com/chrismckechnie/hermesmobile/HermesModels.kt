@@ -144,6 +144,13 @@ data class HermesRunStatus(
     }
 }
 
+/** Non-secret coordinates for targeting a run action without relying on current navigation. */
+data class RunRef(
+    val hostId: String,
+    val sessionId: String,
+    val runId: String,
+)
+
 data class HermesActiveSession(
     val sessionId: String,
     val runId: String?,

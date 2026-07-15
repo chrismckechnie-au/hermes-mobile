@@ -23,6 +23,59 @@ interface HostStore {
     fun save(snapshot: HostSnapshot)
 }
 
+object MobileRegistrationStatusCodec {
+    fun encode(statuses: List<MobileRegistrationStatus>): String = JSONArray().apply {
+        statuses.distinctBy(MobileRegistrationStatus::hostId).forEach { status ->
+            put(JSONObject().apply {
+                put("hostId", status.hostId)
+                put("desired", status.desired)
+                put("registered", status.registered)
+                put("pending", status.pending)
+                put("errorMessage", status.errorMessage ?: JSONObject.NULL)
+                put("lastSuccessAtMillis", status.lastSuccessAtMillis ?: JSONObject.NULL)
+                put("lastSuccessMessage", status.lastSuccessMessage ?: JSONObject.NULL)
+                put("lastFailureAtMillis", status.lastFailureAtMillis ?: JSONObject.NULL)
+                put("lastFailureMessage", status.lastFailureMessage ?: JSONObject.NULL)
+            })
+        }
+    }.toString()
+
+    fun decode(raw: String): List<MobileRegistrationStatus> = runCatching {
+        val array = JSONArray(raw)
+        buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val hostId = item.optString("hostId")
+                if (hostId.isBlank()) continue
+                add(
+                    MobileRegistrationStatus(
+                        hostId = hostId,
+                        desired = item.optBoolean("desired", false),
+                        registered = item.optBoolean("registered", false),
+                        pending = item.optBoolean("pending", false),
+                        errorMessage = item.opt("errorMessage")
+                            ?.takeUnless { it == JSONObject.NULL }
+                            ?.toString()
+                            ?.takeIf(String::isNotBlank),
+                        lastSuccessAtMillis = item.optLongOrNull("lastSuccessAtMillis"),
+                        lastSuccessMessage = item.optNullableString("lastSuccessMessage"),
+                        lastFailureAtMillis = item.optLongOrNull("lastFailureAtMillis"),
+                        lastFailureMessage = item.optNullableString("lastFailureMessage"),
+                    ),
+                )
+            }
+        }.distinctBy(MobileRegistrationStatus::hostId)
+    }.getOrDefault(emptyList())
+}
+
+private fun JSONObject.optLongOrNull(name: String): Long? =
+    if (has(name) && !isNull(name)) optLong(name) else null
+
+private fun JSONObject.optNullableString(name: String): String? =
+    opt(name)?.takeUnless { it == JSONObject.NULL }?.toString()?.takeIf(String::isNotBlank)
+
+private val mobileRegistrationStatusLock = Any()
+
 /** Pure JSON codec for [HostSnapshot], kept crypto-free so it is unit-testable. */
 object HostSnapshotCodec {
     fun encode(snapshot: HostSnapshot): String = JSONObject().apply {
@@ -149,11 +202,122 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
         preferences.edit().remove("run_status.$runId").apply()
     }
 
+    override fun loadUnknownOutcomeRecords(): List<UnknownOutcomeRecord> = preferences
+        .getString(UNKNOWN_OUTCOMES_KEY, null)
+        ?.let { raw ->
+            runCatching {
+                val array = JSONArray(raw)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val hostId = item.optString("hostId")
+                        val sessionId = item.optString("sessionId")
+                        val text = item.optString("text")
+                        if (hostId.isNotBlank() && sessionId.isNotBlank() && text.isNotBlank()) {
+                            add(
+                                UnknownOutcomeRecord(
+                                    hostId = hostId,
+                                    sessionId = sessionId,
+                                    baselineCount = item.optInt("baselineCount").coerceAtLeast(0),
+                                    text = text,
+                                    evidence = item.optBoolean("evidence"),
+                                    timedOut = item.optBoolean("timedOut"),
+                                ),
+                            )
+                        }
+                    }
+                }.distinctBy { it.hostId to it.sessionId }
+            }.getOrDefault(emptyList())
+        }
+        .orEmpty()
+
+    override fun saveUnknownOutcomeRecords(records: List<UnknownOutcomeRecord>) {
+        preferences.edit().putString(
+            UNKNOWN_OUTCOMES_KEY,
+            JSONArray().apply {
+                records.distinctBy { it.hostId to it.sessionId }.forEach { record ->
+                    put(JSONObject().apply {
+                        put("hostId", record.hostId)
+                        put("sessionId", record.sessionId)
+                        put("baselineCount", record.baselineCount.coerceAtLeast(0))
+                        put("text", record.text.take(8_000))
+                        put("evidence", record.evidence)
+                        put("timedOut", record.timedOut)
+                    })
+                }
+            }.toString(),
+        ).commit()
+    }
+
+    override fun loadQueuedInterruptRecords(): List<QueuedInterruptRecord> = preferences
+        .getString(QUEUED_INTERRUPTS_KEY, null)
+        ?.let { raw ->
+            runCatching {
+                val array = JSONArray(raw)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val hostId = item.optString("hostId")
+                        val sessionId = item.optString("sessionId")
+                        val runId = item.optString("runId")
+                        val text = item.optString("text")
+                        if (hostId.isNotBlank() && sessionId.isNotBlank() && runId.isNotBlank() && text.isNotBlank()) {
+                            add(QueuedInterruptRecord(hostId, sessionId, runId, text))
+                        }
+                    }
+                }.distinctBy(QueuedInterruptRecord::runId)
+            }.getOrDefault(emptyList())
+        }
+        .orEmpty()
+
+    override fun saveQueuedInterruptRecords(records: List<QueuedInterruptRecord>) {
+        preferences.edit().putString(
+            QUEUED_INTERRUPTS_KEY,
+            JSONArray().apply {
+                records.distinctBy(QueuedInterruptRecord::runId).forEach { record ->
+                    put(JSONObject().apply {
+                        put("hostId", record.hostId)
+                        put("sessionId", record.sessionId)
+                        put("runId", record.runId)
+                        put("text", record.text.take(8_000))
+                    })
+                }
+            }.toString(),
+        ).commit()
+    }
+
     override fun loadNotificationHostIds(): Set<String> =
         preferences.getStringSet("notification_host_ids", emptySet()).orEmpty().toSet()
 
     override fun saveNotificationHostIds(hostIds: Set<String>) {
         preferences.edit().putStringSet("notification_host_ids", hostIds.toSet()).apply()
+    }
+
+    fun loadMobileRegistrationStatuses(): List<MobileRegistrationStatus> =
+        synchronized(mobileRegistrationStatusLock) { loadMobileRegistrationStatusesUnsafe() }
+
+    fun markMobileRegistrationPending(
+        hostIds: Set<String>,
+        desiredHostIds: Set<String>,
+    ): List<MobileRegistrationStatus> = updateMobileRegistrationStatuses { current ->
+        markMobileRegistrationsPending(current, hostIds, desiredHostIds)
+    }
+
+    internal fun applyMobileRegistrationReport(
+        hostIds: Set<String>,
+        desiredHostIds: Set<String>,
+        report: MobileRegistrationReport,
+        nowMillis: Long,
+        willRetry: Boolean,
+    ): List<MobileRegistrationStatus> = updateMobileRegistrationStatuses { current ->
+        applyMobileRegistrationReportToStatuses(
+            current = current,
+            hostIds = hostIds,
+            desiredHostIds = desiredHostIds,
+            report = report,
+            nowMillis = nowMillis,
+            willRetry = willRetry,
+        )
     }
 
     override fun loadOverlayEnabled(): Boolean = preferences.getBoolean("overlay_enabled", false)
@@ -210,9 +374,29 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
         preferences.edit().putString("installation_id", it).commit()
     }
 
+    private fun updateMobileRegistrationStatuses(
+        transform: (List<MobileRegistrationStatus>) -> List<MobileRegistrationStatus>,
+    ): List<MobileRegistrationStatus> = synchronized(mobileRegistrationStatusLock) {
+        transform(loadMobileRegistrationStatusesUnsafe()).also { statuses ->
+            // Commit before WorkManager is enqueued so process death cannot
+            // lose the desired/pending state that explains the queued work.
+            preferences.edit()
+                .putString(MOBILE_REGISTRATION_STATUSES_KEY, MobileRegistrationStatusCodec.encode(statuses))
+                .commit()
+        }
+    }
+
+    private fun loadMobileRegistrationStatusesUnsafe(): List<MobileRegistrationStatus> =
+        preferences.getString(MOBILE_REGISTRATION_STATUSES_KEY, null)
+            ?.let(MobileRegistrationStatusCodec::decode)
+            .orEmpty()
+
     private companion object {
         const val RUN_CHECKPOINTS_KEY = "run_checkpoints_v2"
         const val ATTENTION_ITEMS_KEY = "attention_items_v1"
+        const val UNKNOWN_OUTCOMES_KEY = "unknown_outcomes_v1"
+        const val QUEUED_INTERRUPTS_KEY = "queued_interrupts_v1"
+        const val MOBILE_REGISTRATION_STATUSES_KEY = "mobile_registration_statuses_v1"
     }
 }
 

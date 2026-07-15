@@ -123,8 +123,10 @@ class Handler(BaseHTTPRequestHandler):
                     "session_resources": True,
                     "session_fork": True,
                     "run_submission": True,
+                    "run_status": True,
                     "run_events_sse": True,
                     "run_stop": True,
+                    "tool_progress_events": True,
                     "approval_events": True,
                     "run_approval_response": True,
                     "run_reasoning_effort": True,
@@ -132,6 +134,25 @@ class Handler(BaseHTTPRequestHandler):
                     "toolsets_api": True,
                     "host_update_api": True,
                     "jobs": True,
+                },
+                "endpoints": {
+                    "health": {"method": "GET", "path": "/health"},
+                    "models": {"method": "GET", "path": "/v1/models"},
+                    "runs": {"method": "POST", "path": "/v1/runs"},
+                    "run_status": {"method": "GET", "path": "/v1/runs/{run_id}"},
+                    "run_events": {"method": "GET", "path": "/v1/runs/{run_id}/events"},
+                    "run_approval": {"method": "POST", "path": "/v1/runs/{run_id}/approval"},
+                    "run_stop": {"method": "POST", "path": "/v1/runs/{run_id}/stop"},
+                    "skills": {"method": "GET", "path": "/v1/skills"},
+                    "toolsets": {"method": "GET", "path": "/v1/toolsets"},
+                    "sessions": {"method": "GET", "path": "/api/sessions"},
+                    "session_create": {"method": "POST", "path": "/api/sessions"},
+                    "session": {"method": "GET", "path": "/api/sessions/{session_id}"},
+                    "session_update": {"method": "PATCH", "path": "/api/sessions/{session_id}"},
+                    "session_delete": {"method": "DELETE", "path": "/api/sessions/{session_id}"},
+                    "session_messages": {"method": "GET", "path": "/api/sessions/{session_id}/messages"},
+                    "session_fork": {"method": "POST", "path": "/api/sessions/{session_id}/fork"},
+                    "host_update": {"method": "GET", "path": "/v1/host-update"},
                 },
             })
         elif path == "/health":
@@ -167,6 +188,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/api/sessions/") and path.endswith("/messages"):
             session_id = path.split("/")[3]
             self._json(200, {"object": "list", "session_id": session_id, "data": MESSAGES.get(session_id, [])})
+        elif path.startswith("/api/sessions/"):
+            session = _find_session(path.split("/")[3])
+            if session is None:
+                self._json(404, {"error": {"message": "Not found"}})
+            else:
+                self._json(200, {"object": "hermes.session", "session": session})
         elif path.startswith("/v1/runs/") and path.endswith("/events"):
             self._stream_run_events(path.split("/")[3])
         elif path.startswith("/v1/runs/"):

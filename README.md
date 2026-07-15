@@ -1,8 +1,14 @@
 # Hermes Mobile
 
+[![Android CI](https://github.com/chrismckechnie-au/hermes-mobile/actions/workflows/android-ci.yml/badge.svg)](https://github.com/chrismckechnie-au/hermes-mobile/actions/workflows/android-ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Native Android client for remotely operating a user-owned [Hermes Agent](https://github.com/NousResearch/hermes-agent) host.
 
 Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, model credentials, tools, memory, sessions, and scheduled jobs remain on the selected Hermes host.
+
+> [!IMPORTANT]
+> Hermes Mobile is an independent community project. It is not affiliated with or endorsed by Nous Research. Review the [privacy notice](PRIVACY.md), [security policy](SECURITY.md), and powerful Android/Hermes permissions before connecting a production host.
 
 ## Implemented
 
@@ -57,6 +63,15 @@ Every request uses `Authorization: Bearer <API_SERVER_KEY>`.
 Host-update controls are deliberately hidden unless the connected host advertises
 `host_update_api`. This prevents a phone from attempting an update through an
 older or managed Hermes installation that cannot safely apply one in place.
+
+Stock Hermes does not currently advertise every mobile extension listed above.
+See the [host compatibility contract](docs/mobile-api-contract.md) for the exact
+stock/optional boundary and proposed upstream requirements. Diagnose a host
+without making any changes to it:
+
+```bash
+python scripts/check_hermes_mobile_contract.py --url https://HOST --api-key "$HERMES_API_KEY"
+```
 
 ## Configure a Hermes host
 
@@ -130,12 +145,18 @@ remain inactive. Local working status still functions. Notification, Bubble,
 and overlay permissions remain user-controlled. The overlay only runs as a
 visible foreground service while opted-in hosts report active sessions.
 
+## Permissions and transport security
+
+Hermes Mobile requests internet access and, when the corresponding features are enabled, Android notification, foreground-service, and display-over-other-apps permissions. The overlay permission is optional and can be revoked from Android settings. Dictation discovers the installed speech-recognition service without requesting broad installed-app visibility.
+
+HTTPS is required by default. Android's network policy permits cleartext so that a user can explicitly opt a saved host into private-network HTTP; the app rejects HTTP profiles without that opt-in and refuses scheme-changing redirects. Cleartext to GitHub and Google service domains is always denied. Because HTTP bearer credentials are still visible to the selected network, use the opt-in only behind a trusted LAN or VPN.
+
 ## Build
 
 Requirements: JDK 17 and Android SDK 35.
 
 ```bash
-./gradlew :app:testDebugUnitTest :app:assembleDebug
+./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
 Debug APK:
@@ -148,6 +169,40 @@ Install it on an attached emulator/device:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+### Signed release builds
+
+Release packaging never falls back to the Android debug key. Provide all four values through environment variables:
+
+| Environment variable | Value |
+| --- | --- |
+| `HERMES_RELEASE_STORE_FILE` | Absolute path to the upload keystore |
+| `HERMES_RELEASE_STORE_PASSWORD` | Keystore password |
+| `HERMES_RELEASE_KEY_ALIAS` | Signing key alias |
+| `HERMES_RELEASE_KEY_PASSWORD` | Signing key password |
+
+The equivalent `hermesReleaseStoreFile`, `hermesReleaseStorePassword`, `hermesReleaseKeyAlias`, and `hermesReleaseKeyPassword` properties may be stored in the user's untracked `~/.gradle/gradle.properties`. Never put signing credentials in this repository.
+
+```bash
+./gradlew :app:testDebugUnitTest :app:lintRelease :app:assembleRelease :app:bundleRelease
+```
+
+The signed APK and Play-ready AAB are written to:
+
+- `app/build/outputs/apk/release/app-release.apk`
+- `app/build/outputs/bundle/release/app-release.aab`
+
+The Android release workflow requires these GitHub Actions secrets:
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+- `GOOGLE_SERVICES_JSON_BASE64`
+
+Store them in the workflow's `release` environment and protect that environment with required reviewers before publishing production builds.
+
+A `v*` tag runs tests and release lint, builds signed APK/AAB artifacts, generates SHA-256 checksums and GitHub build-provenance attestations, and uploads them to the corresponding GitHub Release. A manual workflow run produces the same signed workflow artifacts without creating a release.
+
 ## Contract verification host
 
 `scripts/mock_hermes_host.py` is a local, contract-faithful fixture for emulator QA. It listens on port `8766` by default and accepts the test-only bearer key `test-key`. Send a chat message containing the word "approve" to exercise the tool-approval card.
@@ -157,3 +212,7 @@ python3 scripts/mock_hermes_host.py
 ```
 
 From an Android emulator, add `http://10.0.2.2:8766` and enable private-network HTTP. The fixture is only for local development; never expose it as a real Hermes host.
+
+## Contributing and licence
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull-request guidance. Hermes Mobile source code is available under the [MIT License](LICENSE); bundled third-party materials retain the licences documented in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).

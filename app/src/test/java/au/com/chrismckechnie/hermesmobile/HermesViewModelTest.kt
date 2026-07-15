@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -38,6 +39,7 @@ private class FakeGateway : HermesGateway {
     var toolsets = listOf(HermesToolset("terminal", "Terminal", "Run commands", enabled = true, configured = true, tools = listOf("shell_command")))
     var models = listOf("hermes-agent", "hermes-fast", "gpt-5.6-terra")
     var activeSessions = emptyList<HermesActiveSession>()
+    val activeSessionsByHost = mutableMapOf<String, List<HermesActiveSession>>()
     var hostVersion: String? = "2026.7.15"
     var hostUpdate: HermesHostUpdate? = HermesHostUpdate(
         currentVersion = "2026.7.15",
@@ -50,6 +52,12 @@ private class FakeGateway : HermesGateway {
     val events: Channel<HermesRunEvent> get() = eventsFor("run-1")
     var runStatus = HermesRunStatus("run-1", "completed")
     var submitError: Throwable? = null
+    var createError: Throwable? = null
+    var approvalError: Throwable? = null
+    var approvalGate: Channel<Unit>? = null
+    var approvalAttempts = 0
+    val loadMessageErrors = mutableMapOf<String, Throwable>()
+    val listSessionGates = mutableMapOf<String, Channel<Unit>>()
     val submits = mutableListOf<SubmitCall>()
     val approvals = mutableListOf<String>()
     val stops = mutableListOf<String>()
@@ -72,10 +80,11 @@ private class FakeGateway : HermesGateway {
         return HermesHostUpdateStart(accepted = true, message = "Update started")
     }
     override suspend fun listSessions(host: HostProfile, limit: Int, offset: Int) = HermesSessionPage(
-        sessions = sessions.drop(offset).take(limit),
+        sessions = sessions.also { listSessionGates[host.id]?.receive() }.drop(offset).take(limit),
         hasMore = offset + limit < sessions.size,
     )
     override suspend fun createSession(host: HostProfile, title: String?): HermesSession {
+        createError?.let { throw it }
         val session = HermesSession("new-${created.size}", title, null, "api_server", null, null, 0)
         created += session
         sessions.add(0, session)
@@ -84,6 +93,7 @@ private class FakeGateway : HermesGateway {
     }
 
     override suspend fun loadMessages(host: HostProfile, sessionId: String): HermesMessagesPage {
+        loadMessageErrors[sessionId]?.let { throw it }
         val resolved = resolvedIds[sessionId] ?: sessionId
         return HermesMessagesPage(resolved, messages[resolved]?.toList() ?: emptyList())
     }
@@ -94,7 +104,7 @@ private class FakeGateway : HermesGateway {
     override suspend fun listSkills(host: HostProfile) = skills
     override suspend fun listToolsets(host: HostProfile) = toolsets
     override suspend fun listModels(host: HostProfile) = models
-    override suspend fun listActiveSessions(host: HostProfile) = activeSessions
+    override suspend fun listActiveSessions(host: HostProfile) = activeSessionsByHost[host.id] ?: activeSessions
 
     override suspend fun submitRun(host: HostProfile, sessionId: String, input: String, history: List<HermesMessage>, model: String?, reasoningEffort: String?): String {
         submitError?.let { throw it }
@@ -110,7 +120,12 @@ private class FakeGateway : HermesGateway {
         statusRequests += runId
         return runStatus
     }
-    override suspend fun respondApproval(host: HostProfile, runId: String, choice: String) { approvals += choice }
+    override suspend fun respondApproval(host: HostProfile, runId: String, choice: String) {
+        approvalAttempts += 1
+        approvalGate?.receive()
+        approvalError?.let { throw it }
+        approvals += choice
+    }
     override suspend fun stopRun(host: HostProfile, runId: String) { stops += runId }
 
     override suspend fun renameSession(host: HostProfile, sessionId: String, title: String): HermesSession {
@@ -150,6 +165,8 @@ private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsSt
         set(value) { checkpoints = listOfNotNull(value) }
     val runStatuses = mutableMapOf<String, String>()
     var attentionItems = emptyList<AttentionItem>()
+    var unknownOutcomeRecords = emptyList<UnknownOutcomeRecord>()
+    var queuedInterruptRecords = emptyList<QueuedInterruptRecord>()
 
     override fun loadThemeMode(): ThemeMode = initialMode
     override fun saveThemeMode(mode: ThemeMode) {
@@ -163,6 +180,14 @@ private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsSt
     override fun loadRunStatus(runId: String): String? = runStatuses[runId]
     override fun saveRunStatus(runId: String, status: String) { runStatuses[runId] = status }
     override fun clearRunStatus(runId: String) { runStatuses.remove(runId) }
+    override fun loadUnknownOutcomeRecords(): List<UnknownOutcomeRecord> = unknownOutcomeRecords
+    override fun saveUnknownOutcomeRecords(records: List<UnknownOutcomeRecord>) {
+        unknownOutcomeRecords = records
+    }
+    override fun loadQueuedInterruptRecords(): List<QueuedInterruptRecord> = queuedInterruptRecords
+    override fun saveQueuedInterruptRecords(records: List<QueuedInterruptRecord>) {
+        queuedInterruptRecords = records
+    }
     override fun loadAttentionItems(): List<AttentionItem> = attentionItems
     override fun saveAttentionItems(items: List<AttentionItem>) { attentionItems = items }
 }
@@ -327,6 +352,73 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `model and reasoning selected before a session transfer to the created session`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+
+        assertNull(viewModel.state.value.activeSessionId)
+        viewModel.selectModel("gpt-5.6-terra")
+        viewModel.selectReasoningEffort("high")
+        assertEquals("gpt-5.6-terra", viewModel.state.value.selectedModel)
+        assertEquals("high", viewModel.state.value.selectedReasoningEffort)
+
+        viewModel.setComposerText("start with these settings")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals("new-0", viewModel.state.value.activeSessionId)
+        assertEquals("gpt-5.6-terra", gateway.submits.single().model)
+        assertEquals("high", gateway.submits.single().reasoningEffort)
+        assertEquals("gpt-5.6-terra", viewModel.state.value.selectedModel)
+        assertEquals("high", viewModel.state.value.selectedReasoningEffort)
+        assertTrue(viewModel.state.value.newSessionModelSelections.isEmpty())
+        assertTrue(viewModel.state.value.newSessionReasoningSelections.isEmpty())
+
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `pre-submit failures restore the draft`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        gateway.loadMessageErrors["s1"] = IOException("history unavailable")
+
+        viewModel.setComposerText("do not lose this")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals("do not lose this", viewModel.state.value.composerText)
+        assertTrue(gateway.submits.isEmpty())
+
+        gateway.loadMessageErrors.clear()
+        gateway.submitError = HermesApiException(400, "invalid request")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals("do not lose this", viewModel.state.value.composerText)
+        assertTrue(viewModel.state.value.errorMessage.orEmpty().contains("invalid request"))
+    }
+
+    @Test
+    fun `failed initial session creation keeps draft settings recoverable`() = runVmTest {
+        val gateway = FakeGateway().apply { createError = IOException("create unavailable") }
+        val (viewModel, _) = buildViewModel(gateway)
+        viewModel.selectModel("gpt-5.6-terra")
+        viewModel.selectReasoningEffort("xhigh")
+        viewModel.setComposerText("create this when the host returns")
+
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.activeSessionId)
+        assertEquals("create this when the host returns", viewModel.state.value.composerText)
+        assertEquals("gpt-5.6-terra", viewModel.state.value.selectedModel)
+        assertEquals("xhigh", viewModel.state.value.selectedReasoningEffort)
+        assertTrue(gateway.submits.isEmpty())
+    }
+
+    @Test
     fun `opening a session clears its durable attention marker`() = runVmTest {
         val settings = FakeSettingsStore(ThemeMode.System).apply {
             attentionItems = listOf(AttentionItem("h1", "s1", "Task complete", "completed"))
@@ -336,6 +428,32 @@ class HermesViewModelTest {
         viewModel.selectSession("s1")
 
         assertTrue(settings.attentionItems.isEmpty())
+    }
+
+    @Test
+    fun `cross-host notification preserves a session outside the first page`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            sessions.clear()
+            messages.clear()
+            repeat(60) { index ->
+                val number = index + 1
+                val id = "s$number"
+                sessions += HermesSession(id, "Session $number", null, "api_server", null, number.toString(), 1)
+                messages[id] = mutableListOf(HermesMessage("m$number", "assistant", "Message $number"))
+            }
+        }
+        val (viewModel, _) = buildViewModel(gateway = gateway)
+        assertFalse(viewModel.state.value.sessions.any { it.id == "s60" })
+
+        viewModel.openSessionFromNotification("h2", "s60")
+        advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertEquals("h2", state.activeHostId)
+        assertEquals("s60", state.activeSessionId)
+        assertEquals("Session 60", state.activeSession?.title)
+        assertEquals(listOf("m60"), state.messages.map(ChatUiItem::id))
+        assertNull(state.pendingSessionTarget)
     }
 
     @Test
@@ -506,6 +624,96 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `failed approval response keeps the card until success or conflict`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("requires approval")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+        gateway.events.send(HermesRunEvent.ApprovalRequested("sensitive command"))
+        advanceUntilIdle()
+        val ref = viewModel.state.value.activeRun!!.ref
+
+        gateway.approvalError = IOException("offline")
+        viewModel.respondApproval(ref, "once")
+        advanceUntilIdle()
+        val failedCard = viewModel.state.value.displayedMessages.filterIsInstance<ChatUiItem.Approval>().single()
+        assertEquals(ref, failedCard.runRef)
+        assertFalse(failedCard.submitting)
+
+        gateway.approvalError = HermesApiException(409, "already resolved")
+        viewModel.respondApproval(ref, "once")
+        advanceUntilIdle()
+        assertFalse(viewModel.state.value.displayedMessages.any { it is ChatUiItem.Approval })
+
+        gateway.events.send(HermesRunEvent.Completed("done"))
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `live assistant status starts immediately and only uses safe tool metadata`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("work in the background")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        var assistant = viewModel.state.value.activeRun!!.tail.filterIsInstance<ChatUiItem.Assistant>().single()
+        assertTrue(assistant.streaming)
+        assertTrue(assistant.text.isBlank())
+        assertEquals("Starting task…", assistant.safeStatus)
+
+        gateway.events.send(HermesRunEvent.ToolStarted("terminal", "secret command payload"))
+        advanceUntilIdle()
+        assistant = viewModel.state.value.activeRun!!.tail.filterIsInstance<ChatUiItem.Assistant>().single()
+        assertEquals("Using terminal…", assistant.safeStatus)
+        assertFalse(assistant.safeStatus.orEmpty().contains("secret command payload"))
+        assertEquals(
+            "Host-provided progress",
+            safeRunStatusText(HermesRunEvent.ReasoningAvailable("Host-provided progress")),
+        )
+
+        gateway.events.send(HermesRunEvent.Completed("done"))
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `approval submission is targeted and single flight`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("requires approval")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+        gateway.events.send(HermesRunEvent.ApprovalRequested("sensitive command"))
+        advanceUntilIdle()
+        val ref = viewModel.state.value.activeRun!!.ref
+        val gate = Channel<Unit>(Channel.RENDEZVOUS)
+        gateway.approvalGate = gate
+
+        viewModel.respondApproval(ref, "once")
+        runCurrent()
+        assertTrue(viewModel.state.value.displayedMessages.filterIsInstance<ChatUiItem.Approval>().single().submitting)
+
+        viewModel.respondApproval(ref, "deny")
+        runCurrent()
+        assertEquals(1, gateway.approvalAttempts)
+
+        gate.send(Unit)
+        advanceUntilIdle()
+        assertEquals(listOf("once"), gateway.approvals)
+        assertFalse(viewModel.state.value.displayedMessages.any { it is ChatUiItem.Approval })
+
+        gateway.events.send(HermesRunEvent.Completed("done"))
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
     fun `stop posts to the host and cancellation finalizes the run`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
         viewModel.selectSession("s1")
@@ -523,6 +731,44 @@ class HermesViewModelTest {
         gateway.events.close()
         advanceUntilIdle()
         assertNull(viewModel.state.value.activeRun)
+    }
+
+    @Test
+    fun `targeted stop and return use immutable run coordinates`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            sessions += HermesSession("s2", "Second", null, "api_server", null, null, 0)
+            messages["s2"] = mutableListOf()
+        }
+        val (viewModel, _) = buildViewModel(gateway)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("first")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+        viewModel.selectSession("s2")
+        advanceUntilIdle()
+        viewModel.setComposerText("second")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        val first = RunRef("h1", "s1", "run-1")
+        viewModel.stopRun(first)
+        advanceUntilIdle()
+
+        assertEquals(listOf("run-1"), gateway.stops)
+        assertTrue(viewModel.state.value.activeRuns.getValue(SessionKey("h1", "s1")).stopping)
+        assertFalse(viewModel.state.value.activeRuns.getValue(SessionKey("h1", "s2")).stopping)
+
+        viewModel.returnToRunSession(first)
+        advanceUntilIdle()
+        assertEquals("h1", viewModel.state.value.activeHostId)
+        assertEquals("s1", viewModel.state.value.activeSessionId)
+
+        gateway.eventsFor("run-1").send(HermesRunEvent.Cancelled)
+        gateway.eventsFor("run-2").send(HermesRunEvent.Completed("done"))
+        gateway.eventsFor("run-1").close()
+        gateway.eventsFor("run-2").close()
+        advanceUntilIdle()
     }
 
     @Test
@@ -544,6 +790,38 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `terminal run coordinates remain durable until transcript reconciliation succeeds`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System)
+        val (viewModel, gateway) = buildViewModel(settingsStore = settings)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("finish durably")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+        gateway.loadMessageErrors["s1"] = IOException("transcript unavailable")
+
+        gateway.events.send(HermesRunEvent.Completed("done"))
+        gateway.events.close()
+        advanceUntilIdle()
+
+        val run = viewModel.state.value.activeRuns.getValue(SessionKey("h1", "s1"))
+        assertTrue(run.terminalUnsynced)
+        assertEquals(RunCheckpoint("h1", "s1", "run-1"), settings.checkpoint)
+
+        viewModel.setComposerText("follow up after sync")
+        viewModel.sendMessage()
+        assertEquals("follow up after sync", viewModel.state.value.composerText)
+        assertTrue(gateway.stops.isEmpty())
+
+        gateway.loadMessageErrors.clear()
+        viewModel.retryRunReconciliation(run.ref)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.activeRuns.isEmpty())
+        assertNull(settings.checkpoint)
+    }
+
+    @Test
     fun `durable checkpoint reconciles after Android process recreation`() = runVmTest {
         val settings = FakeSettingsStore(ThemeMode.System).apply {
             checkpoint = RunCheckpoint("h1", "s1", "run-recovered")
@@ -557,6 +835,35 @@ class HermesViewModelTest {
         assertEquals(listOf("run-recovered"), gateway.statusRequests)
         assertNull(viewModel.state.value.activeRun)
         assertNull(settings.checkpoint)
+    }
+
+    @Test
+    fun `recovered active run immediately shows persisted safe working bubble`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System).apply {
+            checkpoint = RunCheckpoint("h1", "s1", "run-recovered")
+            runStatuses["run-recovered"] = "Using browser…"
+        }
+        val gateway = FakeGateway().apply {
+            runStatus = HermesRunStatus("run-recovered", "running")
+        }
+
+        val viewModel = HermesViewModel(
+            gateway,
+            FakeHostStore(HostSnapshot(listOf(hostA, hostB), "h1")),
+            SavedStateHandle(),
+            settings,
+        )
+
+        val run = requireNotNull(viewModel.state.value.activeRuns[SessionKey("h1", "s1")])
+        val assistant = requireNotNull(run.tail.singleOrNull() as? ChatUiItem.Assistant)
+        assertTrue(assistant.streaming)
+        assertEquals("", assistant.text)
+        assertEquals("Using browser…", assistant.safeStatus)
+
+        // Let the recovered polling job terminate so runTest does not keep
+        // advancing its backoff forever after this UI-state assertion.
+        gateway.runStatus = HermesRunStatus("run-recovered", "completed")
+        advanceUntilIdle()
     }
 
     @Test
@@ -721,6 +1028,63 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `remote active sessions block destructive session and host actions`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            activeSessionsByHost["h1"] = listOf(HermesActiveSession("s1", "remote-run", "First", "working", "desktop"))
+            activeSessionsByHost["h2"] = emptyList()
+        }
+        val store = FakeHostStore(HostSnapshot(listOf(hostA, hostB), "h1"))
+        val (viewModel, _) = buildViewModel(gateway = gateway, store = store)
+
+        assertTrue(viewModel.state.value.isSessionBusy("h1", "s1"))
+        assertTrue(viewModel.state.value.hasActiveRunOnHost("h1"))
+        viewModel.requestDeleteSession("s1")
+        assertNull(viewModel.state.value.confirmDeleteSessionId)
+
+        viewModel.selectHost("h2")
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.hasActiveRunOnHost("h1"))
+        viewModel.deleteHost("h1")
+        assertTrue(store.snapshot.hosts.any { it.id == "h1" })
+        assertTrue(viewModel.state.value.errorMessage.orEmpty().contains("active"))
+
+        viewModel.saveHost(
+            existingId = "h1",
+            name = "Edited host",
+            baseUrl = hostA.baseUrl,
+            apiKey = "",
+            allowInsecureHttp = true,
+        )
+        assertEquals("Host A", viewModel.state.value.hosts.first { it.id == "h1" }.name)
+
+        viewModel.selectHost("h1")
+        advanceUntilIdle()
+        viewModel.updateHost()
+        assertEquals(0, gateway.hostUpdateStarts)
+    }
+
+    @Test
+    fun `switching hosts resets an in-flight refresh without stale completion`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        val refreshGate = Channel<Unit>(Channel.RENDEZVOUS)
+        gateway.listSessionGates["h1"] = refreshGate
+
+        viewModel.refresh()
+        runCurrent()
+        assertTrue(viewModel.state.value.isRefreshing)
+
+        viewModel.selectHost("h2")
+        runCurrent()
+        assertEquals("h2", viewModel.state.value.activeHostId)
+        assertFalse(viewModel.state.value.isRefreshing)
+
+        refreshGate.send(Unit)
+        advanceUntilIdle()
+        assertEquals("h2", viewModel.state.value.activeHostId)
+        assertFalse(viewModel.state.value.isRefreshing)
+    }
+
+    @Test
     fun `deleting the current session returns to the deck`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
         viewModel.selectSession("s1")
@@ -766,7 +1130,8 @@ class HermesViewModelTest {
 
     @Test
     fun `lost submission enters unknown outcome and only explicit ack releases it`() = runVmTest {
-        val (viewModel, gateway) = buildViewModel()
+        val settings = FakeSettingsStore(ThemeMode.System)
+        val (viewModel, gateway) = buildViewModel(settingsStore = settings)
         viewModel.selectSession("s1")
         advanceUntilIdle()
         gateway.submitError = IOException("socket closed")
@@ -779,6 +1144,8 @@ class HermesViewModelTest {
         assertNotNull(pending)
         // Watcher timed out (virtual time) without new messages; lock persists.
         assertTrue(viewModel.state.value.unknownOutcome!!.timedOut)
+        assertEquals("did this land?", settings.unknownOutcomeRecords.single().text)
+        assertTrue(settings.unknownOutcomeRecords.single().timedOut)
 
         // Sending is refused while locked.
         gateway.submitError = null
@@ -790,6 +1157,57 @@ class HermesViewModelTest {
         viewModel.acknowledgeUnknownOutcome()
         advanceUntilIdle()
         assertNull(viewModel.state.value.unknownOutcome)
+        assertEquals("did this land?", viewModel.state.value.composerText)
+        assertTrue(settings.unknownOutcomeRecords.isEmpty())
+    }
+
+    @Test
+    fun `unknown submit record recovers after process death without resubmission`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System).apply {
+            unknownOutcomeRecords = listOf(
+                UnknownOutcomeRecord("h1", "s1", baselineCount = 2, text = "recover this prompt", timedOut = true),
+            )
+        }
+        val (viewModel, gateway) = buildViewModel(settingsStore = settings)
+
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+
+        assertEquals("recover this prompt", viewModel.state.value.unknownOutcome?.text)
+        assertTrue(gateway.submits.isEmpty())
+        viewModel.acknowledgeUnknownOutcome()
+        advanceUntilIdle()
+        assertEquals("recover this prompt", viewModel.state.value.composerText)
+        assertTrue(settings.unknownOutcomeRecords.isEmpty())
+        assertTrue(gateway.submits.isEmpty())
+    }
+
+    @Test
+    fun `queued interrupt recovers as an acknowledged draft without auto resubmission`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System).apply {
+            checkpoint = RunCheckpoint("h1", "s1", "run-recovered")
+            queuedInterruptRecords = listOf(
+                QueuedInterruptRecord("h1", "s1", "run-recovered", "change direction safely"),
+            )
+        }
+        val gateway = FakeGateway().apply {
+            runStatus = HermesRunStatus("run-recovered", "completed")
+        }
+        val (viewModel, _) = buildViewModel(gateway = gateway, settingsStore = settings)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+
+        assertTrue(gateway.submits.isEmpty())
+        assertTrue(viewModel.state.value.queuedInterrupt?.requiresAcknowledgement == true)
+        assertEquals("change direction safely", viewModel.state.value.queuedInterrupt?.text)
+        assertEquals("change direction safely", settings.queuedInterruptRecords.single().text)
+
+        viewModel.acknowledgeQueuedInterrupt(useDraft = true)
+
+        assertNull(viewModel.state.value.queuedInterrupt)
+        assertEquals("change direction safely", viewModel.state.value.composerText)
+        assertTrue(settings.queuedInterruptRecords.isEmpty())
+        assertTrue(gateway.submits.isEmpty())
     }
 
     @Test

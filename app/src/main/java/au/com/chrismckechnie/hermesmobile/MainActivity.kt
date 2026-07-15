@@ -16,9 +16,7 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val viewModel: HermesViewModel by viewModels { HermesViewModel.Factory }
@@ -41,6 +39,9 @@ class MainActivity : ComponentActivity() {
             val state by viewModel.state.collectAsStateWithLifecycle()
             LaunchedEffect(state.notificationHostIds, state.overlayEnabled, state.activeRuns.keys) {
                 configureMobileBackground(state)
+            }
+            LaunchedEffect(state.hosts.map(HostProfile::id), state.notificationHostIds, state.overlayEnabled) {
+                MobileRegistration.enqueue(applicationContext, state.notificationHostIds)
             }
             HermesMobileApp(state = state, viewModel = viewModel)
         }
@@ -88,6 +89,5 @@ class MainActivity : ComponentActivity() {
             state.overlayEnabled -> HermesOverlayService.startIfAllowed(applicationContext)
             else -> HermesOverlayService.stop(applicationContext)
         }
-        lifecycleScope.launch { MobileRegistration.sync(applicationContext) }
     }
 }

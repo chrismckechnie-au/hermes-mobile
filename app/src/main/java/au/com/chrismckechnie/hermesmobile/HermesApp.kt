@@ -73,9 +73,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -138,6 +140,8 @@ import com.composables.icons.lucide.Trash2
 import com.composables.icons.lucide.Wifi
 import com.composables.icons.lucide.X
 import com.google.firebase.FirebaseApp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private val T: HermesPalette
     @Composable get() = LocalHermes.current
@@ -224,6 +228,14 @@ fun HermesMobileApp(state: HermesUiState, viewModel: HermesViewModel) {
                             onSave = viewModel::saveHost,
                             onDelete = viewModel::deleteHost,
                             onEdit = viewModel::editHost,
+                        )
+                    }
+
+                    state.confirmDeleteSessionId?.let { sessionId ->
+                        DeleteSessionDialog(
+                            session = state.sessions.firstOrNull { it.id == sessionId },
+                            onConfirm = viewModel::confirmDeleteSession,
+                            onDismiss = viewModel::dismissDeleteSession,
                         )
                     }
                 }
@@ -323,18 +335,25 @@ private fun ConnectionNotice(
 @Composable
 private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     val activeSession = state.activeSession
     val canRenameSession = activeSession != null && state.capabilities?.supportsSessionEdit == true
     var renameOpen by remember(activeSession?.id) { mutableStateOf(false) }
     var renameText by remember(activeSession?.id) { mutableStateOf(activeSession?.title.orEmpty()) }
     val displayedMessages = state.displayedMessages
+    val timelineItems = remember(displayedMessages) { groupChatTimeline(displayedMessages) }
     val assistantAvatarIds = remember(displayedMessages) { firstAssistantIdsByTurn(displayedMessages) }
     val lastAssistantLength = (displayedMessages.lastOrNull { it is ChatUiItem.Assistant } as? ChatUiItem.Assistant)?.text?.length ?: 0
-    // Follow the stream: react to new items AND to the growing text of the last
-    // assistant bubble, but never fight the user's own scrolling.
+    val isNearLatest by remember {
+        derivedStateOf {
+            val layout = listState.layoutInfo
+            val lastVisible = layout.visibleItemsInfo.lastOrNull()?.index
+            layout.totalItemsCount == 0 || lastVisible == null || lastVisible >= layout.totalItemsCount - 2
+        }
+    }
     LaunchedEffect(displayedMessages.size, lastAssistantLength) {
-        if (displayedMessages.isNotEmpty() && !listState.isScrollInProgress) {
-            listState.scrollToItem(displayedMessages.lastIndex, scrollOffset = 100_000)
+        if (timelineItems.isNotEmpty() && isNearLatest && !listState.isScrollInProgress) {
+            listState.scrollToItem(timelineItems.lastIndex, scrollOffset = 100_000)
         }
     }
 
@@ -372,26 +391,46 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
         if (displayedMessages.isEmpty()) {
             EmptyConversation(state, Modifier.weight(1f))
         } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 15.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(9.dp),
-            ) {
-                items(groupChatTimeline(displayedMessages), key = { it.id }) { timelineItem ->
-                    when (timelineItem) {
-                        is ChatTimelineItem.Message -> when (val item = timelineItem.item) {
-                            is ChatUiItem.User -> UserBubble(item.text)
-                            is ChatUiItem.Assistant -> AssistantMessage(
-                                item.text,
-                                item.streaming,
-                                showAvatar = item.id in assistantAvatarIds,
-                            )
-                            is ChatUiItem.Reasoning -> ReasoningCard(item)
-                            is ChatUiItem.Tool -> ToolActivityGroup(listOf(item))
-                            is ChatUiItem.Approval -> ApprovalCard(item, viewModel)
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 15.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(9.dp),
+                ) {
+                    items(timelineItems, key = { it.id }) { timelineItem ->
+                        when (timelineItem) {
+                            is ChatTimelineItem.Message -> when (val item = timelineItem.item) {
+                                is ChatUiItem.User -> UserBubble(item.text)
+                                is ChatUiItem.Assistant -> AssistantMessage(
+                                    item.text,
+                                    item.streaming,
+                                    item.safeStatus,
+                                    showAvatar = item.id in assistantAvatarIds,
+                                )
+                                is ChatUiItem.Reasoning -> ReasoningCard(item)
+                                is ChatUiItem.Tool -> ToolActivityGroup(listOf(item))
+                                is ChatUiItem.Approval -> ApprovalCard(item, viewModel)
+                            }
+                            is ChatTimelineItem.ToolGroup -> ToolActivityGroup(timelineItem.tools)
                         }
-                        is ChatTimelineItem.ToolGroup -> ToolActivityGroup(timelineItem.tools)
+                    }
+                }
+                if (!isNearLatest) {
+                    TextButton(
+                        onClick = {
+                            if (timelineItems.isNotEmpty()) {
+                                scope.launch {
+                                    listState.animateScrollToItem(timelineItems.lastIndex, scrollOffset = 100_000)
+                                }
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(12.dp)
+                            .clip(CircleShape).background(T.SurfaceOne),
+                    ) {
+                        Icon(Lucide.ChevronDown, null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("Latest", style = T.MicroBold)
                     }
                 }
             }
@@ -443,7 +482,15 @@ private fun RunBanner(state: HermesUiState, viewModel: HermesViewModel) {
             Spacer(Modifier.width(8.dp))
             Text(
                 buildString {
-                    append(if (run.awaitingApproval) "Waiting for approval" else if (run.stopping) "Stopping run" else "Run active")
+                    append(
+                        when {
+                            run.reconcilingTranscript -> "Syncing completed run"
+                            run.terminalUnsynced -> "Completed — transcript needs sync"
+                            run.awaitingApproval -> "Waiting for approval"
+                            run.stopping -> "Stopping run"
+                            else -> "Run active"
+                        },
+                    )
                     append(" — ")
                     append(sessionName)
                 },
@@ -452,9 +499,18 @@ private fun RunBanner(state: HermesUiState, viewModel: HermesViewModel) {
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            TextButton(onClick = viewModel::returnToRunSession) { Text("Return", style = T.MicroBold) }
-            TextButton(onClick = viewModel::stopActiveRun, enabled = !run.stopping) {
-                Text("Stop", style = T.MicroBold.copy(color = T.Error))
+            TextButton(onClick = { viewModel.returnToRunSession(run.ref) }) { Text("Return", style = T.MicroBold) }
+            if (run.terminalUnsynced || run.reconcilingTranscript) {
+                TextButton(
+                    onClick = { viewModel.retryRunReconciliation(run.ref) },
+                    enabled = !run.reconcilingTranscript,
+                ) {
+                    Text("Retry", style = T.MicroBold.copy(color = T.Warn))
+                }
+            } else {
+                TextButton(onClick = { viewModel.stopRun(run.ref) }, enabled = !run.stopping) {
+                    Text("Stop", style = T.MicroBold.copy(color = T.Error))
+                }
             }
         }
     }
@@ -655,17 +711,13 @@ private fun UserBubble(text: String) {
 }
 
 @Composable
-private fun AssistantMessage(text: String, streaming: Boolean, showAvatar: Boolean) {
+private fun AssistantMessage(text: String, streaming: Boolean, safeStatus: String?, showAvatar: Boolean) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         if (showAvatar) HermesAvatar(Modifier.size(29.dp)) else Spacer(Modifier.width(29.dp))
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             if (text.isBlank() && streaming) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
-                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.4.dp, color = T.Cream)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Hermes is working…", style = T.BodyMuted)
-                }
+                LiveWorkingBubble(safeStatus ?: "Hermes is working…")
             } else {
                 MarkdownText(text, modifier = Modifier.padding(top = 2.dp))
                 if (streaming) {
@@ -964,7 +1016,14 @@ private fun ApprovalCard(item: ChatUiItem.Approval, viewModel: HermesViewModel) 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Lucide.ShieldCheck, null, tint = T.Warn, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(9.dp))
-                Text("Approval required", style = T.CardTitle.copy(color = T.Warn))
+                Text(
+                    if (item.submitting) "Sending approval…" else "Approval required",
+                    style = T.CardTitle.copy(color = T.Warn),
+                    modifier = Modifier.weight(1f),
+                )
+                if (item.submitting) {
+                    CircularProgressIndicator(modifier = Modifier.size(15.dp), color = T.Warn, strokeWidth = 1.5.dp)
+                }
             }
             item.command?.let {
                 Text(it, style = T.MonoBody.copy(color = T.TextSoft, fontSize = 12.sp), modifier = Modifier.padding(top = 7.dp))
@@ -976,7 +1035,10 @@ private fun ApprovalCard(item: ChatUiItem.Approval, viewModel: HermesViewModel) 
                     Triple("Allow for run", "session", T.CreamSoft),
                 ).forEach { (label, choice, color) ->
                     Surface(
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).clickable { viewModel.respondApproval(choice) },
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).clickable(
+                            enabled = !item.submitting,
+                            onClick = { viewModel.respondApproval(item.runRef, choice) },
+                        ),
                         color = if (choice == "once") T.Cream else Color.Transparent,
                         contentColor = if (choice == "once") T.OnAccent else color,
                         shape = RoundedCornerShape(13.dp),
@@ -998,7 +1060,8 @@ private fun ApprovalCard(item: ChatUiItem.Approval, viewModel: HermesViewModel) 
 @Composable
 private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
     val enabled = state.connectionPhase == HostConnectionPhase.Connected &&
-        !state.isSending && state.unknownOutcome == null
+        !state.isSending && state.unknownOutcome == null &&
+        state.queuedInterrupt?.requiresAcknowledgement != true
     val focusManager = LocalFocusManager.current
     val context = LocalContext.current
     val dictationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -1014,6 +1077,32 @@ private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
     val suggestions = state.slashSuggestions()
 
     Column(Modifier.fillMaxWidth()) {
+        state.queuedInterrupt?.takeIf(QueuedInterrupt::requiresAcknowledgement)?.let { queued ->
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 11.dp)
+                    .clip(RoundedCornerShape(T.RadiusCard))
+                    .background(T.Warn.copy(alpha = 0.07f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Text("Recovered follow-up", style = T.MicroBold.copy(color = T.Warn))
+                Text(
+                    queued.text,
+                    style = T.BodyMuted.copy(color = T.TextSoft),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { viewModel.acknowledgeQueuedInterrupt(useDraft = false) }) {
+                        Text("Discard", style = T.MicroBold.copy(color = T.Error))
+                    }
+                    TextButton(onClick = { viewModel.acknowledgeQueuedInterrupt(useDraft = true) }) {
+                        Text("Use draft", style = T.MicroBold)
+                    }
+                }
+            }
+        }
+
         state.unknownOutcome?.let { pending ->
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 11.dp)
@@ -1201,25 +1290,48 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
     }
 
     actionTarget?.let { session ->
-        AlertDialog(
+        val hostId = state.activeHost?.id
+        val busy = hostId != null && state.isSessionBusy(hostId, session.id)
+        ModalBottomSheet(
             onDismissRequest = { actionTarget = null },
             containerColor = T.SurfaceLow,
-            title = { Text(session.title?.takeIf { it.isNotBlank() } ?: "Untitled session", fontSize = 16.sp) },
-            text = { Text("Rename this session or delete it from the host.", style = T.BodyMuted.copy(fontSize = 13.sp)) },
-            confirmButton = {
-                TextButton(onClick = {
+            dragHandle = null,
+        ) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp).padding(bottom = 18.dp)) {
+                Text(session.title?.takeIf { it.isNotBlank() } ?: "Untitled session", style = T.SheetTitle)
+                Text(
+                    if (busy) "Session actions are unavailable while Hermes is working." else "Choose a session action.",
+                    style = T.BodyMuted.copy(color = if (busy) T.Warn else T.Muted),
+                    modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                )
+                SessionActionRow(
+                    icon = Lucide.Pencil,
+                    label = "Rename",
+                    enabled = !busy && state.capabilities?.supportsSessionEdit == true,
+                ) {
                     renameText = session.title.orEmpty()
                     renameTarget = session
                     actionTarget = null
-                }) { Text("Rename", style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp)) }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    viewModel.deleteSession(session.id)
+                }
+                SessionActionRow(
+                    icon = Lucide.History,
+                    label = "Fork session",
+                    enabled = !busy && state.capabilities?.supportsSessionFork == true,
+                ) {
+                    viewModel.forkSession(session.id)
                     actionTarget = null
-                }) { Text("Delete", style = T.BodyMuted.copy(color = T.Error, fontSize = 13.sp)) }
-            },
-        )
+                }
+                SessionActionRow(
+                    icon = Lucide.Trash2,
+                    label = "Delete",
+                    enabled = !busy && state.capabilities?.supportsSessionEdit == true,
+                    destructive = true,
+                ) {
+                    viewModel.requestDeleteSession(session.id)
+                    actionTarget = null
+                }
+            }
+        }
     }
 
     renameTarget?.let { session ->
@@ -1246,6 +1358,103 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
             },
         )
     }
+}
+
+@Composable
+private fun LiveWorkingBubble(status: String) {
+    var expanded by remember { mutableStateOf(false) }
+    val action = if (expanded) "Collapse live Hermes status" else "Expand live Hermes status"
+    Card(
+        modifier = Modifier
+            .fillMaxWidth(0.9f)
+            .semantics { contentDescription = action }
+            .clickable { expanded = !expanded },
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = T.SurfaceLow),
+        border = BorderStroke(1.dp, T.Cream.copy(alpha = 0.16f)),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.4.dp, color = T.Cream)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                status,
+                style = T.BodyMuted.copy(color = T.TextSoft, fontSize = 12.sp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                Lucide.ChevronDown,
+                action,
+                tint = T.Muted,
+                modifier = Modifier.size(15.dp).rotate(if (expanded) 180f else 0f),
+            )
+        }
+        AnimatedVisibility(visible = expanded) {
+            Text(
+                "Latest safe run status. Tool activity and host-provided progress are grouped directly above.",
+                style = T.BodyMuted.copy(color = T.Muted, fontSize = 11.sp, lineHeight = 15.sp),
+                modifier = Modifier.padding(start = 32.dp, end = 10.dp, bottom = 9.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SessionActionRow(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    destructive: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val color = when {
+        !enabled -> T.Muted.copy(alpha = 0.45f)
+        destructive -> T.Error
+        else -> T.Cream
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)
+            .clip(RoundedCornerShape(T.RadiusCard))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = color, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(11.dp))
+        Text(label, style = T.Label.copy(color = color))
+    }
+}
+
+@Composable
+private fun DeleteSessionDialog(
+    session: HermesSession?,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val name = session?.title?.takeIf { it.isNotBlank() } ?: "this session"
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = T.SurfaceLow,
+        title = { Text("Delete session?", style = T.CardTitle) },
+        text = {
+            Text(
+                "Delete $name and its stored conversation from the Hermes host? This cannot be undone.",
+                style = T.BodyMuted,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Delete", style = T.BodyMuted.copy(color = T.Error, fontSize = 13.sp))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel", style = T.BodyMuted.copy(fontSize = 13.sp)) }
+        },
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -1407,6 +1616,7 @@ private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
             if (state.capabilities?.version != null) "VERSION" else "UNKNOWN",
             if (state.capabilities?.version != null) T.Cream else T.Muted,
         )
+        HostCompatibilityCard(state.capabilities)
         HostStatusRow(Lucide.ShieldCheck, "Authentication", "Bearer key stored with Android Keystore encryption", "SECURE", T.Cream)
         HostStatusRow(Lucide.Globe, "Transport", if (host.baseUrl.startsWith("https")) "HTTPS encrypted connection" else "Explicit private-network HTTP", if (host.baseUrl.startsWith("https")) "TLS" else "PRIVATE", if (host.baseUrl.startsWith("https")) T.Cream else T.Warn)
         if (state.capabilities?.supportsHostUpdate == true) {
@@ -1475,6 +1685,33 @@ private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
             },
         )
     }
+}
+
+@Composable
+private fun HostCompatibilityCard(capabilities: HermesCapabilities?) {
+    val missingRunFeatures = remember(capabilities) {
+        val required = setOf("run_submission", "run_events_sse", "run_stop", "approval_events", "run_approval_response")
+        required - capabilities?.features.orEmpty()
+    }
+    val (detail, label, color) = when {
+        capabilities == null -> Triple("Waiting for the host capability contract.", "CHECKING", T.Muted)
+        missingRunFeatures.isNotEmpty() -> Triple(
+            "This host is missing ${missingRunFeatures.joinToString { it.replace('_', ' ') }}. Chat controls stay disabled to avoid unmanageable runs.",
+            "LIMITED",
+            T.Warn,
+        )
+        capabilities.supportsReasoningEffort || capabilities.supportsHostUpdate -> Triple(
+            "Official run control is ready. Advertised mobile extensions are enabled individually.",
+            "EXTENDED",
+            T.Ok,
+        )
+        else -> Triple(
+            "Official run control is ready. Optional reasoning and host-update controls remain hidden unless the host advertises them.",
+            "CORE READY",
+            T.Ok,
+        )
+    }
+    HostStatusRow(Lucide.CircleCheck, "Mobile compatibility", detail, label, color)
 }
 
 @Composable
@@ -1638,6 +1875,24 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val context = LocalContext.current
     val firebaseConfigured = remember(context) { FirebaseApp.getApps(context).isNotEmpty() }
     val overlayPermissionGranted = Settings.canDrawOverlays(context)
+    // The worker persists these safe registration states independently of the
+    // ViewModel. Poll only while this Settings composable is visible so a
+    // background retry is visible without making the app process long-lived.
+    var registrationStatuses by remember(
+        state.notificationHostIds,
+        state.hosts.map(HostProfile::id),
+    ) {
+        mutableStateOf(MobileRegistration.statuses(context))
+    }
+    LaunchedEffect(state.notificationHostIds, state.hosts.map(HostProfile::id)) {
+        while (true) {
+            registrationStatuses = MobileRegistration.statuses(context)
+            delay(if (registrationStatuses.any(MobileRegistrationStatus::pending)) 1_500L else 7_500L)
+        }
+    }
+    val registrationByHost = remember(registrationStatuses) {
+        registrationStatuses.associateBy(MobileRegistrationStatus::hostId)
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 15.dp)) {
         ScreenHeading("Settings", "Appearance and app options")
         Text("APPEARANCE", style = T.Micro, modifier = Modifier.padding(bottom = 8.dp))
@@ -1701,16 +1956,43 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
         Surface(color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 13.dp, vertical = 5.dp)) {
                 state.hosts.forEach { host ->
-                    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val enabled = host.id in state.notificationHostIds
+                    val registration = registrationByHost[host.id]
+                    val registrationText = when {
+                        !enabled && registration?.pending == true -> "Removing remote push…"
+                        !enabled -> "Remote push disabled"
+                        registration?.pending == true -> "Remote push: Pending"
+                        !registration?.errorMessage.isNullOrBlank() -> "Remote push: Failed"
+                        registration?.registered == true -> "Remote push: Registered"
+                        else -> "Remote push: Preparing registration…"
+                    }
+                    val registrationColor = when {
+                        registration?.pending == true -> T.Warn
+                        !registration?.errorMessage.isNullOrBlank() -> T.Error
+                        enabled && registration?.registered == true -> T.Ok
+                        else -> T.Muted
+                    }
+                    Row(Modifier.fillMaxWidth().heightIn(min = 64.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(host.name, style = T.Label)
-                            Text("Ongoing working status, approvals, failures, and completion", style = T.BodyMuted)
+                            Text(registrationText, style = T.BodyMuted.copy(color = registrationColor))
+                            registration?.errorMessage?.takeIf(String::isNotBlank)?.let { message ->
+                                Text(message, style = T.Micro.copy(color = T.Error), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
                         }
                         Switch(
-                            checked = host.id in state.notificationHostIds,
+                            checked = enabled,
                             onCheckedChange = { viewModel.setHostNotificationsEnabled(host.id, it) },
                             colors = SwitchDefaults.colors(checkedThumbColor = T.OnAccent, checkedTrackColor = T.Cream),
                         )
+                    }
+                    if (!registration?.errorMessage.isNullOrBlank()) {
+                        TextButton(
+                            onClick = { MobileRegistration.enqueueRetry(context) },
+                            modifier = Modifier.padding(bottom = 5.dp),
+                        ) {
+                            Text("Retry remote push", style = T.BodyMuted.copy(color = T.Cream))
+                        }
                     }
                 }
                 if (state.hosts.isEmpty()) Text("Add a host before enabling notifications.", style = T.BodyMuted, modifier = Modifier.padding(vertical = 12.dp))

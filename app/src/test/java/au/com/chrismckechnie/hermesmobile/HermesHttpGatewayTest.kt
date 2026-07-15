@@ -1,8 +1,12 @@
 package au.com.chrismckechnie.hermesmobile
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -10,6 +14,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.InterruptedIOException
+import java.util.concurrent.TimeUnit
 
 class HermesHttpGatewayTest {
     private lateinit var server: MockWebServer
@@ -56,6 +62,36 @@ class HermesHttpGatewayTest {
         """.trimIndent()))
 
         assertFalse(gateway.probe(profile).supportsRuns)
+    }
+
+    @Test
+    fun `default clients bound ordinary requests but leave event streams open`() {
+        val configured = HermesHttpGateway()
+
+        assertEquals(8_000, configured.ordinaryClient.connectTimeoutMillis)
+        assertEquals(30_000, configured.ordinaryClient.readTimeoutMillis)
+        assertEquals(20_000, configured.ordinaryClient.writeTimeoutMillis)
+        assertEquals(45_000, configured.ordinaryClient.callTimeoutMillis)
+        assertEquals(8_000, configured.eventStreamClient.connectTimeoutMillis)
+        assertEquals(0, configured.eventStreamClient.readTimeoutMillis)
+        assertEquals(20_000, configured.eventStreamClient.writeTimeoutMillis)
+        assertEquals(0, configured.eventStreamClient.callTimeoutMillis)
+    }
+
+    @Test(expected = InterruptedIOException::class)
+    fun `ordinary requests use the bounded client`(): Unit = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setHeadersDelay(1, TimeUnit.SECONDS)
+                .setResponseCode(200)
+                .setBody("""{"features":{}}"""),
+        )
+        gateway = HermesHttpGateway(
+            ordinaryClient = OkHttpClient.Builder().callTimeout(100, TimeUnit.MILLISECONDS).build(),
+            eventStreamClient = OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build(),
+        )
+
+        gateway.probe(profile)
     }
 
     @Test
@@ -258,6 +294,45 @@ class HermesHttpGatewayTest {
 
         assertTrue(events.any { it is HermesRunEvent.Failed && it.error == "boom" })
         assertTrue(events.any { it is HermesRunEvent.Cancelled })
+    }
+
+    @Test
+    fun `event streams do not inherit the ordinary call timeout`() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setHeadersDelay(250, TimeUnit.MILLISECONDS)
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("data: {\"event\":\"run.completed\",\"output\":\"done\"}\n\n"),
+        )
+        gateway = HermesHttpGateway(
+            ordinaryClient = OkHttpClient.Builder().callTimeout(50, TimeUnit.MILLISECONDS).build(),
+            eventStreamClient = OkHttpClient.Builder()
+                .readTimeout(0, TimeUnit.MILLISECONDS)
+                .callTimeout(0, TimeUnit.MILLISECONDS)
+                .build(),
+        )
+        val events = mutableListOf<HermesRunEvent>()
+
+        gateway.streamRunEvents(profile, "run-1", events::add)
+
+        assertTrue(events.single() is HermesRunEvent.Completed)
+    }
+
+    @Test
+    fun `cancelling a suspended event stream cancels its call`() = runBlocking {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+
+        val startedAt = System.nanoTime()
+        val result = runCatching {
+            withTimeout(250) {
+                gateway.streamRunEvents(profile, "run-never-responds") { }
+            }
+        }
+        val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+
+        assertTrue(result.exceptionOrNull() is TimeoutCancellationException)
+        assertTrue("Cancellation took ${elapsedMillis}ms", elapsedMillis < 2_000)
     }
 
     @Test

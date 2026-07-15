@@ -1,9 +1,10 @@
 package au.com.chrismckechnie.hermesmobile
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.job
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -13,17 +14,13 @@ import okhttp3.Response
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
 
 class HermesHttpGateway(
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .callTimeout(0, TimeUnit.MILLISECONDS)
-        // Never follow http<->https scheme changes: authenticated traffic
-        // must not silently downgrade to cleartext.
-        .followSslRedirects(false)
-        .build(),
+    internal val ordinaryClient: OkHttpClient = defaultOrdinaryClient(),
+    internal val eventStreamClient: OkHttpClient = defaultEventStreamClient(ordinaryClient),
 ) : HermesGateway {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
@@ -205,40 +202,47 @@ class HermesHttpGateway(
         host: HostProfile,
         runId: String,
         onEvent: (HermesRunEvent) -> Unit,
-    ) = withContext(Dispatchers.IO) {
-        val request = request(host, endpoint(host, "v1", "runs", runId, "events"))
-        val call = client.newCall(request)
-        val cancelHandle = coroutineContext.job.invokeOnCompletion { cause ->
-            if (cause != null) call.cancel()
-        }
-        try {
-            call.execute().use { response ->
-                ensureSuccessful(response)
-                val source = response.body?.source() ?: throw HermesApiException(response.code, "Hermes returned an empty stream.")
-                val dataLines = mutableListOf<String>()
-
-                fun dispatch() {
-                    if (dataLines.isEmpty()) return
-                    val payloadText = dataLines.joinToString("\n")
-                    dataLines.clear()
-                    val payload = runCatching { JSONObject(payloadText) }.getOrNull() ?: return
-                    parseRunEvent(payload)?.let(onEvent)
-                }
-
-                while (!source.exhausted()) {
-                    coroutineContext.ensureActive()
-                    val line = source.readUtf8Line() ?: break
-                    when {
-                        line.isBlank() -> dispatch()
-                        line.startsWith(":") -> Unit // keepalive / stream-closed comments
-                        line.startsWith("data:") -> dataLines += line.substringAfter(':').trimStart()
-                    }
-                }
-                dispatch()
+    ) = suspendCancellableCoroutine { continuation ->
+        val streamRequest = request(host, endpoint(host, "v1", "runs", runId, "events"))
+        val call = eventStreamClient.newCall(streamRequest)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, error: IOException) {
+                if (continuation.isActive) continuation.resumeWith(Result.failure(error))
             }
-        } finally {
-            cancelHandle.dispose()
-        }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    response.use {
+                        ensureSuccessful(response)
+                        val source = response.body?.source()
+                            ?: throw HermesApiException(response.code, "Hermes returned an empty stream.")
+                        val dataLines = mutableListOf<String>()
+
+                        fun dispatch() {
+                            if (dataLines.isEmpty() || !continuation.isActive) return
+                            val payloadText = dataLines.joinToString("\n")
+                            dataLines.clear()
+                            val payload = runCatching { JSONObject(payloadText) }.getOrNull() ?: return
+                            parseRunEvent(payload)?.let(onEvent)
+                        }
+
+                        while (continuation.isActive && !source.exhausted()) {
+                            val line = source.readUtf8Line() ?: break
+                            when {
+                                line.isBlank() -> dispatch()
+                                line.startsWith(":") -> Unit // keepalive / stream-closed comments
+                                line.startsWith("data:") -> dataLines += line.substringAfter(':').trimStart()
+                            }
+                        }
+                        dispatch()
+                    }
+                    if (continuation.isActive) continuation.resume(Unit)
+                } catch (error: Exception) {
+                    if (continuation.isActive) continuation.resumeWith(Result.failure(error))
+                }
+            }
+        })
     }
 
     private fun parseRunEvent(payload: JSONObject): HermesRunEvent? = when (payload.optString("event")) {
@@ -373,7 +377,7 @@ class HermesHttpGateway(
         segments.fold(host.validated().baseUrl.toHttpUrl().newBuilder()) { builder, segment -> builder.addPathSegment(segment) }.build()
 
     private fun executeJson(host: HostProfile, request: Request): JSONObject {
-        client.newCall(request).execute().use { response ->
+        ordinaryClient.newCall(request).execute().use { response ->
             ensureSuccessful(response)
             val raw = response.body?.string().orEmpty()
             if (raw.isBlank()) throw HermesApiException(response.code, "Hermes returned an empty response.")
@@ -384,7 +388,7 @@ class HermesHttpGateway(
     }
 
     private fun executeIgnoringBody(request: Request) {
-        client.newCall(request).execute().use(::ensureSuccessful)
+        ordinaryClient.newCall(request).execute().use(::ensureSuccessful)
     }
 
     private fun ensureSuccessful(response: Response) {
@@ -418,6 +422,33 @@ class HermesHttpGateway(
         toolName = json.optNullableString("tool_name"),
         timestamp = json.optNullableString("timestamp"),
     )
+
+    private companion object {
+        const val CONNECT_TIMEOUT_SECONDS = 8L
+        const val ORDINARY_READ_TIMEOUT_SECONDS = 30L
+        const val WRITE_TIMEOUT_SECONDS = 20L
+        const val ORDINARY_CALL_TIMEOUT_SECONDS = 45L
+
+        fun defaultOrdinaryClient(): OkHttpClient = secureClientBuilder()
+            .readTimeout(ORDINARY_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(ORDINARY_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .build()
+
+        fun defaultEventStreamClient(baseClient: OkHttpClient): OkHttpClient = baseClient.newBuilder()
+            // SSE is intentionally unbounded. Coroutine cancellation closes
+            // the active Call, while the host may keep a healthy run open for
+            // much longer than an ordinary request timeout.
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .callTimeout(0, TimeUnit.MILLISECONDS)
+            .build()
+
+        fun secureClientBuilder(): OkHttpClient.Builder = OkHttpClient.Builder()
+            .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .writeTimeout(WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            // Never follow http<->https scheme changes: authenticated traffic
+            // must not silently downgrade to cleartext.
+            .followSslRedirects(false)
+    }
 }
 
 private inline fun <T> JSONArray?.toObjectList(transform: (JSONObject) -> T): List<T> {

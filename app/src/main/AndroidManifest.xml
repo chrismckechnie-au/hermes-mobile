@@ -5,14 +5,22 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:name=".HermesMobileApplication"
         android:allowBackup="false"
-        android:icon="@drawable/hermes_official"
+        android:dataExtractionRules="@xml/backup_rules"
+        android:fullBackupContent="@xml/backup_rules_legacy"
+        android:icon="@mipmap/ic_launcher"
         android:label="Hermes Mobile"
-        android:roundIcon="@drawable/hermes_official"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.HermesMobile">
         <meta-data
             android:name="firebase_messaging_installation_id_enabled"
