@@ -10,13 +10,11 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
-import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
 import android.os.Build
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.core.app.Person as PersonCompat
 import androidx.core.graphics.drawable.IconCompat
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
@@ -111,7 +109,6 @@ class HermesMessagingService : FirebaseMessagingService() {
 
 class HermesNotificationCoordinator(private val context: Context) {
     private val manager = context.getSystemService(NotificationManager::class.java)
-    private val officialIcon by lazy { BitmapFactory.decodeResource(context.resources, R.drawable.hermes_official) }
 
     fun post(event: MobilePushEvent) {
         createChannels()
@@ -126,37 +123,23 @@ class HermesNotificationCoordinator(private val context: Context) {
             context, event.sessionId.hashCode(), openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val status = when (event.event) {
-            "approval.required" -> "Approval required"
-            "session.failed" -> "Run failed"
-            "session.cancelled" -> "Run cancelled"
-            "session.completed" -> "Run completed"
-            "job.completed" -> "Scheduled job completed"
-            "job.failed" -> "Scheduled job failed"
-            else -> "Hermes is working"
-        }
+        val copy = mobileNotificationCopy(event)
         val builder = NotificationCompat.Builder(context, RUN_CHANNEL)
             .setSmallIcon(R.drawable.ic_hermes_notification)
-            .setLargeIcon(officialIcon)
-            .setContentTitle(event.title)
-            .setContentText(status)
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setContentTitle(copy.title)
+            .setContentText(copy.text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(copy.text).setSummaryText("Hermes Remote"))
+            .setCategory(copy.category)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(event.isTerminal)
-            .setOngoing(!event.isTerminal)
-            .setOnlyAlertOnce(event.event == "session.started")
+            .setOngoing(copy.ongoing)
+            .setOnlyAlertOnce(copy.ongoing)
+            .setSilent(copy.silent)
+            .setColor(0xFF1B1B1B.toInt())
             .setContentIntent(contentPending)
+            .addAction(0, if (event.event == "approval.required") "Review" else "Open", contentPending)
         if (!isJob) {
-            val hermes = PersonCompat.Builder().setName("Hermes").setKey("hermes-agent").setBot(true).build()
-            val localUser = PersonCompat.Builder().setName("You").build()
-            builder
-                .setShortcutId(shortcutId(event))
-                .setStyle(
-                    NotificationCompat.MessagingStyle(localUser)
-                        .setConversationTitle(event.title)
-                        .setGroupConversation(true)
-                        .addMessage(status, System.currentTimeMillis(), hermes)
-                )
+            builder.setShortcutId(shortcutId(event))
         }
 
         if (!isJob && Build.VERSION.SDK_INT >= 29) {
@@ -178,7 +161,16 @@ class HermesNotificationCoordinator(private val context: Context) {
                 ).setDesiredHeight(420).build()
             )
         }
-        NotificationManagerCompat.from(context).notify(event.sessionId.hashCode(), builder.build())
+        val notificationManager = NotificationManagerCompat.from(context)
+        if (event.isTerminal && event.activeCount == 0) {
+            notificationManager.cancel(WORK_NOTIFICATION_ID)
+        }
+        val notificationId = if (!event.isTerminal && event.event != "approval.required" && !isJob) {
+            WORK_NOTIFICATION_ID
+        } else {
+            event.sessionId.hashCode()
+        }
+        notificationManager.notify(notificationId, builder.build())
     }
 
     private fun createChannels() {
@@ -212,6 +204,7 @@ class HermesNotificationCoordinator(private val context: Context) {
         const val RUN_CHANNEL = "hermes_runs"
         const val OVERLAY_CHANNEL = "hermes_overlay"
         const val WORK_CHANNEL = "hermes_active_work"
+        const val WORK_NOTIFICATION_ID = 9042
         const val EXTRA_HOST_ID = "host_id"
         const val EXTRA_SESSION_ID = "session_id"
         const val EXTRA_SESSION_TITLE = "session_title"
@@ -237,3 +230,29 @@ private object MobileBackgroundScope {
     private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
     fun launch(block: suspend () -> Unit) = scope.launch { block() }
 }
+
+internal data class MobileNotificationCopy(
+    val title: String,
+    val text: String,
+    val category: String,
+    val ongoing: Boolean,
+    val silent: Boolean,
+)
+
+internal fun mobileNotificationCopy(event: MobilePushEvent): MobileNotificationCopy = MobileNotificationCopy(
+    title = when (event.event) {
+        "approval.required" -> "Hermes needs your approval"
+        "session.failed", "job.failed" -> "Hermes hit an issue"
+        "session.cancelled" -> "Hermes stopped"
+        "session.completed", "job.completed" -> "Hermes finished"
+        else -> "Hermes is working"
+    },
+    text = event.title,
+    category = when {
+        event.event == "approval.required" -> NotificationCompat.CATEGORY_MESSAGE
+        event.isTerminal -> NotificationCompat.CATEGORY_STATUS
+        else -> NotificationCompat.CATEGORY_PROGRESS
+    },
+    ongoing = !event.isTerminal,
+    silent = event.event !in setOf("approval.required", "session.failed", "job.failed"),
+)
