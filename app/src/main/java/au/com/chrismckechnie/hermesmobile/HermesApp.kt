@@ -877,6 +877,7 @@ private fun ActiveWorkCentre(state: HermesUiState, viewModel: HermesViewModel) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ActiveWorkRow(
     item: ActiveWorkItem,
@@ -885,29 +886,82 @@ private fun ActiveWorkRow(
     onRetry: (() -> Unit)?,
 ) {
     val color = activeWorkStateColor(item.state)
+    val itemDescription = listOfNotNull(
+        "Active work item ${item.title}",
+        item.hostName,
+        activeWorkStateLabel(item.state),
+        item.latestUpdate,
+    ).joinToString(", ")
+    var menuOpen by remember(item.key, item.ref?.runId) { mutableStateOf(false) }
     Row(
         modifier = Modifier.fillMaxWidth().heightIn(min = 68.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.weight(1f).clip(RoundedCornerShape(T.RadiusSmall))
-                .clickable(onClickLabel = "Open ${item.title}", onClick = onOpen)
-                .padding(horizontal = 4.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.size(8.dp).clip(CircleShape).background(color))
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(item.title, style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    "${item.hostName} · ${activeWorkStateLabel(item.state)}",
-                    style = T.BodyMuted.copy(color = color),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 2.dp),
+        Box(Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(T.RadiusSmall))
+                    .combinedClickable(
+                        onClickLabel = "Open ${item.title}",
+                        onLongClickLabel = "Show actions for ${item.title}",
+                        onClick = onOpen,
+                        onLongClick = { menuOpen = true },
+                    )
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = itemDescription
+                    }
+                    .padding(horizontal = 4.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(item.title, style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${item.hostName} · ${activeWorkStateLabel(item.state)}",
+                        style = T.BodyMuted.copy(color = color),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                    item.latestUpdate?.let { update ->
+                        Text(update, style = T.BodyMuted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+                    }
+                }
+            }
+            DropdownMenu(
+                expanded = menuOpen,
+                onDismissRequest = { menuOpen = false },
+                containerColor = T.SurfaceOne,
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Open session", style = T.BodyMuted.copy(color = T.TextSoft)) },
+                    leadingIcon = { Icon(Lucide.MessageCircle, null, tint = T.AccentText, modifier = Modifier.size(17.dp)) },
+                    onClick = {
+                        menuOpen = false
+                        onOpen()
+                    },
                 )
-                item.latestUpdate?.let { update ->
-                    Text(update, style = T.BodyMuted, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+                if (item.state in setOf("sync_required", "syncing") && onRetry != null) {
+                    DropdownMenuItem(
+                        text = { Text(if (item.state == "syncing") "Transcript syncing" else "Retry transcript sync", style = T.BodyMuted) },
+                        leadingIcon = { Icon(Lucide.RefreshCw, null, tint = T.Warn, modifier = Modifier.size(17.dp)) },
+                        enabled = item.state != "syncing",
+                        onClick = {
+                            menuOpen = false
+                            onRetry()
+                        },
+                    )
+                }
+                if (onStop != null && item.state !in setOf("sync_required", "syncing")) {
+                    DropdownMenuItem(
+                        text = { Text(if (item.state == "stopping") "Stopping work" else "Stop work", style = T.BodyMuted.copy(color = T.Error)) },
+                        leadingIcon = { Icon(Lucide.Square, null, tint = T.Error, modifier = Modifier.size(17.dp)) },
+                        enabled = item.state != "stopping",
+                        onClick = {
+                            menuOpen = false
+                            onStop()
+                        },
+                    )
                 }
             }
         }
