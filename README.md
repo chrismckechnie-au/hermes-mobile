@@ -50,6 +50,7 @@ The client uses the following Hermes HTTP surface:
 - `GET /v1/skills`
 - `GET /v1/toolsets`
 - `GET /v1/active-sessions`
+- `GET /v1/sessions/{id}/activity` / `GET /v1/sessions/{id}/activity/events` (when advertised by `hermes.mobile` 1.1)
 - `DELETE /v1/active-sessions/{lease_id}` (only for host-confirmed stale activity)
 - `PUT` / `DELETE /v1/mobile/devices/{installation_id}`
 - `POST /v1/runs`

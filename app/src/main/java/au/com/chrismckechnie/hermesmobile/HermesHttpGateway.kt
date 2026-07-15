@@ -317,6 +317,39 @@ class HermesHttpGateway(
         return HermesWorkspaceUpdate(files, hostTruncated || clientTruncated)
     }
 
+    private fun parseSessionActivityEvent(json: JSONObject): HermesSessionActivityEvent? {
+        val eventId = json.optNullableLong("event_id") ?: return null
+        val sessionId = json.optNullableString("session_id") ?: return null
+        val turnId = json.optNullableString("turn_id") ?: return null
+        val type = json.optNullableString("type") ?: return null
+        val payload = json.optJSONObject("payload") ?: JSONObject()
+        val subagentJson = payload.optJSONObject("subagent") ?: payload.takeIf {
+            it.has("id") || it.has("subagent_id")
+        }
+        return HermesSessionActivityEvent(
+            eventId = eventId,
+            sessionId = sessionId,
+            turnId = turnId,
+            type = type,
+            timestampSeconds = json.optNullableEpochSeconds("timestamp"),
+            surface = json.optNullableString("surface"),
+            userText = payload.optNullableString("user_text"),
+            text = payload.optNullableString("text") ?: payload.optNullableString("delta")
+                ?: payload.optNullableString("message"),
+            toolId = payload.optNullableString("tool_id"),
+            toolName = payload.optNullableString("name"),
+            toolContext = payload.optNullableString("context"),
+            toolDurationSeconds = payload.optNullableDouble("duration_s"),
+            toolFailed = payload.optBoolean("failed", false),
+            tasks = payload.optJSONArray("tasks").toObjectList(::parseTask).filterNotNull(),
+            subagent = subagentJson?.let(::parseActivitySubagent),
+            workspaceUpdate = payload.optJSONArray("workspace_changes")?.let { files ->
+                parseWorkspaceUpdate(JSONObject().put("files", files))
+            },
+            status = payload.optNullableString("status") ?: payload.optNullableString("kind"),
+        )
+    }
+
     override suspend fun getRunStatus(host: HostProfile, runId: String): HermesRunStatus = withContext(Dispatchers.IO) {
         val data = executeJson(host, request(host, endpoint(host, "v1", "runs", runId)))
         HermesRunStatus(
@@ -338,8 +371,76 @@ class HermesHttpGateway(
                 statusHistory = json.optJSONArray("status_history").toStringList().takeLast(12),
                 updatedAt = json.optNullableEpochSeconds("updated_at"),
                 leaseId = json.optNullableString("lease_id"),
+                activityCursor = json.optNullableLong("activity_cursor"),
+                activityTurnId = json.optNullableString("activity_turn_id"),
             )
         }.filter { it.sessionId.isNotBlank() }
+    }
+
+    override suspend fun loadSessionActivity(
+        host: HostProfile,
+        sessionId: String,
+        beforeEventId: Long?,
+        limit: Int,
+    ): HermesSessionActivityPage = withContext(Dispatchers.IO) {
+        val url = endpoint(host, "v1", "sessions", sessionId, "activity").newBuilder()
+            .addQueryParameter("limit", limit.coerceIn(1, 512).toString())
+            .apply { beforeEventId?.takeIf { it > 0L }?.let { addQueryParameter("before", it.toString()) } }
+            .build()
+        val data = executeJson(host, request(host, url))
+        HermesSessionActivityPage(
+            sessionId = data.optNullableString("session_id") ?: sessionId,
+            events = data.optJSONArray("data").toObjectList(::parseSessionActivityEvent).filterNotNull(),
+            nextBefore = data.optNullableLong("next_before"),
+        )
+    }
+
+    override suspend fun streamSessionActivity(
+        host: HostProfile,
+        sessionId: String,
+        afterEventId: Long?,
+        onEvent: (HermesSessionActivityEvent) -> Unit,
+    ) = suspendCancellableCoroutine { continuation ->
+        val streamRequest = request(host, endpoint(host, "v1", "sessions", sessionId, "activity", "events"))
+            .newBuilder()
+            .apply { afterEventId?.takeIf { it > 0L }?.let { header("Last-Event-ID", it.toString()) } }
+            .build()
+        val call = eventStreamClient.newCall(streamRequest)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, error: IOException) {
+                if (continuation.isActive) continuation.resumeWith(Result.failure(error))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    response.use {
+                        ensureSuccessful(response)
+                        val source = response.body?.source()
+                            ?: throw HermesApiException(response.code, "Hermes returned an empty activity stream.")
+                        val dataLines = mutableListOf<String>()
+                        fun dispatch() {
+                            if (dataLines.isEmpty() || !continuation.isActive) return
+                            val payload = runCatching { JSONObject(dataLines.joinToString("\n")) }.getOrNull()
+                            dataLines.clear()
+                            payload?.let(::parseSessionActivityEvent)?.let(onEvent)
+                        }
+                        while (continuation.isActive && !source.exhausted()) {
+                            val line = source.readUtf8Line() ?: break
+                            when {
+                                line.isBlank() -> dispatch()
+                                line.startsWith(":") -> Unit
+                                line.startsWith("data:") -> dataLines += line.substringAfter(':').trimStart()
+                            }
+                        }
+                        dispatch()
+                    }
+                    if (continuation.isActive) continuation.resume(Unit)
+                } catch (error: Exception) {
+                    if (continuation.isActive) continuation.resumeWith(Result.failure(error))
+                }
+            }
+        })
     }
 
     override suspend fun registerMobileDevice(
@@ -507,7 +608,16 @@ class HermesHttpGateway(
             toolCount = json.optInt("tool_count", 0).coerceAtLeast(0),
             goal = json.optNullableString("goal")?.trim()?.take(240),
             activity = json.optNullableString("activity")?.trim()?.take(240),
+            parentId = json.optNullableString("parent_id")?.trim()?.take(120),
+            childSessionId = json.optNullableString("child_session_id")?.trim()?.take(120),
+            depth = json.optInt("depth", 0).coerceIn(0, 16),
+            model = json.optNullableString("model")?.trim()?.take(160),
         )
+    }
+
+    private fun parseActivitySubagent(json: JSONObject): HermesSubagent? {
+        val id = json.optNullableString("id") ?: json.optNullableString("subagent_id") ?: return null
+        return parseSubagent(JSONObject(json.toString()).put("id", id))
     }
 
     private companion object {
@@ -560,6 +670,16 @@ private fun JSONObject.optNonNegativeLong(name: String): Long? =
     takeIf { has(name) && !isNull(name) }
         ?.optLong(name, -1L)
         ?.takeIf { it >= 0L }
+
+private fun JSONObject.optNullableLong(name: String): Long? {
+    if (!has(name) || isNull(name)) return null
+    return opt(name)?.toString()?.toLongOrNull()?.takeIf { it >= 0L }
+}
+
+private fun JSONObject.optNullableDouble(name: String): Double? {
+    if (!has(name) || isNull(name)) return null
+    return opt(name)?.toString()?.toDoubleOrNull()?.takeIf(Double::isFinite)
+}
 
 private fun JSONObject.optNullableEpochSeconds(name: String): Long? =
     takeIf { has(name) && !isNull(name) }

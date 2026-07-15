@@ -392,10 +392,15 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     var subagentDrawerOpen by remember(activeSession?.id) { mutableStateOf(false) }
     var workspaceDrawerOpen by remember(activeSession?.id) { mutableStateOf(false) }
     val displayedMessages = state.displayedMessages
-    val tasks = state.activeRun?.tasks.orEmpty()
-    val workingSubagents = state.activeRun?.subagents?.values?.filter(HermesSubagent::isWorking).orEmpty()
+    val durableTurn = state.activeSessionKey?.let(state.sessionActivity::get)?.let {
+        it.activeTurn ?: it.latestTurn
+    }
+    val tasks = state.activeRun?.tasks ?: durableTurn?.tasks.orEmpty()
+    val allSubagents = state.activeRun?.subagents?.values?.toList() ?: durableTurn?.subagents?.values?.toList().orEmpty()
+    val workingSubagents = allSubagents.filter(HermesSubagent::isWorking)
     val workspaceUpdate = state.activeSessionKey?.let(state.workspaceUpdates::get)
         ?: state.activeRun?.workspaceUpdate
+        ?: durableTurn?.workspaceUpdate
     val transcript = remember(activeSession?.id, displayedMessages) {
         activeSession?.let { session ->
             formatSessionTranscript(session.title, displayedMessages)
@@ -465,15 +470,6 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
             ) { Icon(Lucide.Plus, "New session", tint = if (state.connectionPhase == HostConnectionPhase.Connected) T.Cream else T.Muted) }
         }
 
-        LiveWorkPills(
-            tasks = tasks,
-            subagents = workingSubagents,
-            workspaceUpdate = workspaceUpdate,
-            onShowTasks = { taskDrawerOpen = true },
-            onShowSubagents = { subagentDrawerOpen = true },
-            onShowWorkspace = { workspaceDrawerOpen = true },
-        )
-
         if (state.transcriptResource is ResourceState.Loading && activeSession != null) {
             ResourceStatusPanel("Loading conversation…", modifier = Modifier.weight(1f))
         } else if (state.transcriptResource is ResourceState.Error && displayedMessages.isEmpty()) {
@@ -509,6 +505,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                                 )
                                 is ChatUiItem.Reasoning -> ReasoningCard(item)
                                 is ChatUiItem.Tool -> ToolActivityGroup(listOf(item))
+                                is ChatUiItem.Activity -> ActivityHistoryCard(item)
                                 is ChatUiItem.Approval -> ApprovalCard(item, viewModel)
                             }
                             is ChatTimelineItem.ToolGroup -> ToolActivityGroup(timelineItem.tools)
@@ -534,7 +531,16 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 }
             }
         }
-        Composer(state, viewModel)
+        Composer(
+            state = state,
+            viewModel = viewModel,
+            tasks = tasks,
+            subagents = allSubagents,
+            workspaceUpdate = workspaceUpdate,
+            onShowTasks = { taskDrawerOpen = true },
+            onShowSubagents = { subagentDrawerOpen = true },
+            onShowWorkspace = { workspaceDrawerOpen = true },
+        )
     }
 
     if (renameOpen && activeSession != null) {
@@ -569,8 +575,8 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     if (taskDrawerOpen && tasks.isNotEmpty()) {
         TaskPlanSheet(tasks = tasks, onDismiss = { taskDrawerOpen = false })
     }
-    if (subagentDrawerOpen && workingSubagents.isNotEmpty()) {
-        SubagentSheet(subagents = workingSubagents, onDismiss = { subagentDrawerOpen = false })
+    if (subagentDrawerOpen && allSubagents.isNotEmpty()) {
+        SubagentSheet(subagents = allSubagents, onDismiss = { subagentDrawerOpen = false })
     }
     if (workspaceDrawerOpen && workspaceUpdate != null) {
         WorkspaceDiffSheet(update = workspaceUpdate, onDismiss = { workspaceDrawerOpen = false })
@@ -750,8 +756,8 @@ private fun SubagentSheet(subagents: List<HermesSubagent>, onDismiss: () -> Unit
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 28.dp),
         ) {
             item(key = "subagent-heading") {
-                Text("Working subagents", style = T.ScreenTitle)
-                Text("Live delegated work from this run", style = T.BodyMuted, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
+                Text("Delegated work", style = T.ScreenTitle)
+                Text("Live and completed subagents from this run", style = T.BodyMuted, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
             }
             items(subagents.sortedBy(HermesSubagent::taskIndex), key = HermesSubagent::id) { subagent ->
                 Card(
@@ -760,7 +766,7 @@ private fun SubagentSheet(subagents: List<HermesSubagent>, onDismiss: () -> Unit
                     border = BorderStroke(1.dp, T.Line),
                     shape = RoundedCornerShape(T.RadiusCard),
                 ) {
-                    Column(Modifier.padding(12.dp)) {
+                    Column(Modifier.padding(start = 12.dp + (subagent.depth.coerceAtMost(4) * 10).dp, end = 12.dp, top = 12.dp, bottom = 12.dp)) {
                         Text(
                             if (subagent.taskCount > 1) "Subagent ${subagent.taskIndex + 1} of ${subagent.taskCount}" else "Subagent",
                             style = T.MicroBold.copy(color = T.Tool),
@@ -777,6 +783,9 @@ private fun SubagentSheet(subagents: List<HermesSubagent>, onDismiss: () -> Unit
                             style = T.Micro.copy(color = T.Muted, letterSpacing = 0.5.sp),
                             modifier = Modifier.padding(top = 7.dp),
                         )
+                        subagent.model?.takeIf(String::isNotBlank)?.let { model ->
+                            Text(model, style = T.Micro.copy(color = T.Muted), modifier = Modifier.padding(top = 3.dp))
+                        }
                     }
                 }
             }
@@ -1587,6 +1596,93 @@ private fun ReasoningCard(item: ChatUiItem.Reasoning) {
 }
 
 @Composable
+private fun ActivityHistoryCard(item: ChatUiItem.Activity) {
+    val latest = item.turns.lastOrNull()
+    var expanded by remember(item.id) { mutableStateOf(latest?.terminal != true) }
+    val activeCount = item.turns.count { !it.terminal }
+    val label = when {
+        activeCount > 0 -> "$activeCount active work trace${if (activeCount == 1) "" else "s"}"
+        item.turns.size == 1 -> "Hermes work trace"
+        else -> "${item.turns.size} Hermes work traces"
+    }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth(0.9f)
+            .semantics { contentDescription = if (expanded) "Collapse Hermes work trace" else "Expand Hermes work trace" }
+            .clickable { expanded = !expanded },
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
+        border = BorderStroke(1.dp, if (activeCount > 0) T.Tool.copy(alpha = 0.24f) else T.Line),
+    ) {
+        Column {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Lucide.ScrollText, null, tint = T.Tool, modifier = Modifier.size(15.dp))
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(label, style = T.Label)
+                    Text(
+                        latest?.latestStatus ?: "Host-provided Desktop activity",
+                        style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (activeCount > 0) {
+                    CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
+                }
+                Icon(
+                    Lucide.ChevronDown,
+                    null,
+                    tint = T.Muted,
+                    modifier = Modifier.padding(start = 7.dp).size(15.dp).rotate(if (expanded) 180f else 0f),
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    item.turns.asReversed().forEach { turn -> ActivityTurnTrace(turn) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActivityTurnTrace(turn: SessionActivityTurn) {
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(T.RadiusSmall))
+            .background(T.Cream.copy(alpha = 0.045f))
+            .padding(horizontal = 9.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (turn.terminal) "COMPLETED TRACE" else "LIVE TRACE",
+                style = T.MicroBold.copy(color = if (turn.terminal) T.Muted else T.Tool, letterSpacing = 0.4.sp),
+            )
+            Spacer(Modifier.width(7.dp))
+            Text(turn.latestStatus ?: "Hermes activity", style = T.Micro.copy(color = T.TextSoft, letterSpacing = 0.sp))
+        }
+        turn.reasoning.takeLast(5).forEach { update ->
+            Text(update, style = T.BodyMuted.copy(fontSize = 11.sp, lineHeight = 15.sp))
+        }
+        turn.tools.takeLast(8).forEach { tool -> ToolActivityRow(tool) }
+        val summary = buildList {
+            if (turn.tasks.isNotEmpty()) add(taskProgressLabel(turn.tasks))
+            if (turn.subagents.isNotEmpty()) add("${turn.subagents.values.count(HermesSubagent::isWorking)} subagents active")
+            turn.workspaceUpdate?.files?.takeIf { it.isNotEmpty() }?.let { add("${it.size} files changed") }
+        }.joinToString(" · ")
+        if (summary.isNotBlank()) Text(summary, style = T.Micro.copy(color = T.Tool, letterSpacing = 0.sp))
+    }
+}
+
+@Composable
 private fun MarkdownText(text: String, modifier: Modifier = Modifier) {
     val clipboard = LocalClipboardManager.current
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1854,7 +1950,16 @@ private fun ApprovalCard(item: ChatUiItem.Approval, viewModel: HermesViewModel) 
 }
 
 @Composable
-private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
+private fun Composer(
+    state: HermesUiState,
+    viewModel: HermesViewModel,
+    tasks: List<HermesTask>,
+    subagents: List<HermesSubagent>,
+    workspaceUpdate: HermesWorkspaceUpdate?,
+    onShowTasks: () -> Unit,
+    onShowSubagents: () -> Unit,
+    onShowWorkspace: () -> Unit,
+) {
     val enabled = state.connectionPhase == HostConnectionPhase.Connected &&
         !state.isSending && state.unknownOutcome == null &&
         state.queuedInterrupt?.requiresAcknowledgement != true
@@ -1873,6 +1978,14 @@ private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
     val suggestions = state.slashSuggestions()
 
     Column(Modifier.fillMaxWidth()) {
+        LiveWorkPills(
+            tasks = tasks,
+            subagents = subagents.filter(HermesSubagent::isWorking),
+            workspaceUpdate = workspaceUpdate,
+            onShowTasks = onShowTasks,
+            onShowSubagents = onShowSubagents,
+            onShowWorkspace = onShowWorkspace,
+        )
         state.queuedInterrupt?.takeIf(QueuedInterrupt::requiresAcknowledgement)?.let { queued ->
             Column(
                 Modifier.fillMaxWidth().padding(horizontal = 11.dp)

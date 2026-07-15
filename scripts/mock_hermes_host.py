@@ -74,6 +74,26 @@ TOOLSETS = [
 
 RUNS = {}  # run_id -> {status, session_id, input, approval_event, approval_choice, stopped}
 RUNS_LOCK = threading.Lock()
+ACTIVITY = {
+    "session-mobile": [
+        {
+            "event_id": "1", "session_id": "session-mobile", "turn_id": "desktop-turn-1",
+            "type": "message.start", "timestamp": time.time() - 20, "surface": "tui_gateway",
+            "payload": {"user_text": "Review the mobile activity timeline."},
+        },
+        {
+            "event_id": "2", "session_id": "session-mobile", "turn_id": "desktop-turn-1",
+            "type": "reasoning.available", "timestamp": time.time() - 18, "surface": "tui_gateway",
+            "payload": {"text": "Checking the host connection and available capabilities."},
+        },
+        {
+            "event_id": "3", "session_id": "session-mobile", "turn_id": "desktop-turn-1",
+            "type": "tool.complete", "timestamp": time.time() - 15, "surface": "tui_gateway",
+            "payload": {"tool_id": "tool-1", "name": "write_file", "duration_s": 0.8, "failed": False,
+                        "workspace_changes": [{"path": "app/Main.kt", "additions": 3, "deletions": 1, "diff": "+activity"}]},
+        },
+    ],
+}
 
 
 def _find_session(session_id):
@@ -118,6 +138,15 @@ class Handler(BaseHTTPRequestHandler):
                 "platform": "hermes-agent",
                 "model": "hermes-agent",
                 "version": "2026.7.15",
+                "extensions": {
+                    "hermes.mobile": {
+                        "version": "1.1",
+                        "features": {
+                            "session_activity_history": True,
+                            "session_activity_stream": True,
+                        },
+                    },
+                },
                 "features": {
                     "session_list": True,
                     "session_create": True,
@@ -135,6 +164,8 @@ class Handler(BaseHTTPRequestHandler):
                     "run_permission_mode": True,
                     "run_task_updates": True,
                     "run_subagent_updates": True,
+                    "session_activity_history": True,
+                    "session_activity_stream": True,
                     "skills_api": True,
                     "toolsets_api": True,
                     "host_update_api": True,
@@ -157,6 +188,8 @@ class Handler(BaseHTTPRequestHandler):
                     "session_delete": {"method": "DELETE", "path": "/api/sessions/{session_id}"},
                     "session_messages": {"method": "GET", "path": "/api/sessions/{session_id}/messages"},
                     "session_fork": {"method": "POST", "path": "/api/sessions/{session_id}/fork"},
+                    "session_activity": {"method": "GET", "path": "/v1/sessions/{session_id}/activity"},
+                    "session_activity_events": {"method": "GET", "path": "/v1/sessions/{session_id}/activity/events"},
                     "host_update": {"method": "GET", "path": "/v1/host-update"},
                 },
             })
@@ -196,6 +229,11 @@ class Handler(BaseHTTPRequestHandler):
                 if run["status"] not in {"completed", "failed", "cancelled"}
             ]
             self._json(200, {"object": "list", "active_count": len(active), "data": active})
+        elif path.startswith("/v1/sessions/") and path.endswith("/activity/events"):
+            self._stream_session_activity(path.split("/")[3])
+        elif path.startswith("/v1/sessions/") and path.endswith("/activity"):
+            session_id = path.split("/")[3]
+            self._json(200, {"object": "hermes.session.activity.list", "session_id": session_id, "data": ACTIVITY.get(session_id, [])})
         elif path == "/api/sessions":
             self._json(200, {"object": "list", "data": SESSIONS, "limit": 50, "offset": 0, "has_more": False})
         elif path == "/api/jobs":
@@ -356,6 +394,22 @@ class Handler(BaseHTTPRequestHandler):
         payload = {"event": event, "run_id": run_id, "timestamp": time.time(), **fields}
         self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
         self.wfile.flush()
+
+    def _stream_session_activity(self, session_id):
+        self._sse_start()
+        try:
+            after = int(self.headers.get("Last-Event-ID", "0") or 0)
+        except ValueError:
+            after = 0
+        try:
+            for event in ACTIVITY.get(session_id, []):
+                if int(event["event_id"]) <= after:
+                    continue
+                self.wfile.write(f"id: {event['event_id']}\nevent: activity\ndata: {json.dumps(event)}\n\n".encode())
+            self.wfile.write(b": stream closed\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _stream_run_events(self, run_id):
         run = RUNS.get(run_id)

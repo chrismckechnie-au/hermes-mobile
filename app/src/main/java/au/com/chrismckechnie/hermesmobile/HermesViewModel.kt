@@ -10,6 +10,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -378,6 +379,14 @@ sealed interface ChatUiItem {
         val preview: String?,
         val running: Boolean,
         val failed: Boolean = false,
+        val durationSeconds: Double? = null,
+        val workspaceChanges: List<HermesWorkspaceChange> = emptyList(),
+    ) : ChatUiItem
+
+    /** Compact, expandable work trace hydrated from the host activity journal. */
+    data class Activity(
+        override val id: String,
+        val turns: List<SessionActivityTurn>,
     ) : ChatUiItem
 
     data class Approval(
@@ -589,6 +598,7 @@ data class HermesUiState(
     val activeRuns: Map<SessionKey, ActiveRun> = emptyMap(),
     val workspaceUpdates: Map<SessionKey, HermesWorkspaceUpdate> = emptyMap(),
     val activeHostSessions: Map<SessionKey, HermesActiveSession> = emptyMap(),
+    val sessionActivity: Map<SessionKey, SessionActivityState> = emptyMap(),
     val queuedInterrupts: Map<SessionKey, QueuedInterrupt> = emptyMap(),
     val pendingFollowUpChoice: PendingFollowUpChoice? = null,
     val unknownOutcomes: Map<SessionKey, UnknownOutcome> = emptyMap(),
@@ -702,15 +712,22 @@ data class HermesUiState(
             val run = activeRun
             if (run == null || run.sessionId != activeSessionId) {
                 val key = activeSessionKey ?: return storedMessages
+                val durableTurns = sessionActivity[key]?.turns.orEmpty()
+                val withDurableActivity = if (durableTurns.isEmpty()) storedMessages else {
+                    storedMessages + ChatUiItem.Activity(
+                        id = "activity:${key.hostId}:${key.sessionId}",
+                        turns = durableTurns,
+                    )
+                }
                 val activity = activeHostSessions[key]
                     ?.takeUnless(HermesActiveSession::isStalledActivity)
-                    ?: return storedMessages
+                    ?: return withDurableActivity
                 val updates = (activity.statusHistory + listOfNotNull(activity.latestStatus))
                     .map { it.trim() }
                     .filter(String::isNotBlank)
                     .distinct()
                     .takeLast(12)
-                return if (updates.isEmpty()) storedMessages else storedMessages + ChatUiItem.Reasoning(
+                return if (updates.isEmpty()) withDurableActivity else withDurableActivity + ChatUiItem.Reasoning(
                     id = "host-activity:${key.hostId}:${key.sessionId}",
                     updates = updates,
                 )
@@ -792,6 +809,8 @@ class HermesViewModel(
     val state: StateFlow<HermesUiState> = mutableState.asStateFlow()
     private val runStatusChecks = mutableSetOf<String>()
     private val hostActivityChecks = mutableSetOf<String>()
+    private var sessionActivityStream: Job? = null
+    private var sessionActivityStreamKey: SessionKey? = null
 
     private fun ActiveRun.key(): SessionKey = SessionKey(host.id, sessionId)
 
@@ -946,6 +965,7 @@ class HermesViewModel(
             sendingSessions = if (oldKey in sendingSessions) (sendingSessions - oldKey) + newKey else sendingSessions,
             activeRuns = activeRuns.move { run -> run.copy(sessionId = newKey.sessionId) },
             workspaceUpdates = workspaceUpdates.move(),
+            sessionActivity = sessionActivity.move(),
             queuedInterrupts = queuedInterrupts.move(),
             pendingFollowUpChoice = pendingFollowUpChoice?.let { pending ->
                 if (pending.sessionKey == oldKey) pending.copy(sessionId = newKey.sessionId) else pending
@@ -1441,6 +1461,9 @@ class HermesViewModel(
         val host = mutableState.value.activeHost ?: return
         if (mutableState.value.connectionPhase != HostConnectionPhase.Connected) return
         if (mutableState.value.activeSessionId == null) return
+        sessionActivityStream?.cancel()
+        sessionActivityStream = null
+        sessionActivityStreamKey = null
         mutableState.update { state ->
             state.copy(
                 activeSessionId = null,
@@ -1475,10 +1498,66 @@ class HermesViewModel(
                     }
                 }
         }
+        loadSessionActivity(host, sessionId)
     }
 
     fun retryTranscript() {
         mutableState.value.activeSessionId?.let(::selectSession)
+    }
+
+    private fun loadSessionActivity(host: HostProfile, sessionId: String) {
+        val snapshot = mutableState.value
+        if (snapshot.capabilities?.supportsSessionActivityHistory != true) return
+        val key = SessionKey(host.id, sessionId)
+        viewModelScope.launch {
+            val page = runCatching { gateway.loadSessionActivity(host, sessionId) }.getOrElse { error ->
+                // Older hosts and expired cursors retain the existing transcript;
+                // activity is an enhancement, never a reason to hide chat.
+                if (
+                    (error !is HermesApiException || error.statusCode != 404) &&
+                    mutableState.value.activeHostId == host.id &&
+                    mutableState.value.activeSessionId == sessionId
+                ) {
+                    beginSessionActivityStream(host, key)
+                }
+                return@launch
+            }
+            if (mutableState.value.activeHostId != host.id || mutableState.value.activeSessionId != sessionId) {
+                return@launch
+            }
+            mutableState.update { state ->
+                val reduced = page.events.sortedBy(HermesSessionActivityEvent::eventId)
+                    .fold(state.sessionActivity[key] ?: SessionActivityState(), ::reduceSessionActivity)
+                state.copy(sessionActivity = state.sessionActivity + (key to reduced))
+            }
+            beginSessionActivityStream(host, key)
+        }
+    }
+
+    private fun beginSessionActivityStream(host: HostProfile, key: SessionKey) {
+        if (mutableState.value.capabilities?.supportsSessionActivityStream != true) return
+        if (mutableState.value.activeHostId != key.hostId || mutableState.value.activeSessionId != key.sessionId) return
+        if (sessionActivityStreamKey == key && sessionActivityStream?.isActive == true) return
+        sessionActivityStream?.cancel()
+        sessionActivityStreamKey = key
+        sessionActivityStream = viewModelScope.launch {
+            val after = mutableState.value.sessionActivity[key]?.lastEventId
+            runCatching {
+                gateway.streamSessionActivity(host, key.sessionId, after) { event ->
+                    mutableState.update { state ->
+                        val current = state.sessionActivity[key] ?: SessionActivityState()
+                        state.copy(sessionActivity = state.sessionActivity + (key to reduceSessionActivity(current, event)))
+                    }
+                }
+            }.onFailure { error ->
+                // A retained-history cursor expired while disconnected. Reload
+                // from the latest retained window instead of looping on 409.
+                if (error is HermesApiException && error.statusCode == 409) {
+                    sessionActivityStreamKey = null
+                    loadSessionActivity(host, key.sessionId)
+                }
+            }
+        }
     }
 
     /** null selects the Host default; unknown aliases fall back host-side anyway. */

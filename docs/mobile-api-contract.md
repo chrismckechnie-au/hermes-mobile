@@ -68,6 +68,8 @@ be assumed solely because a host is reachable.
 | Live delegated-work status | `run_subagent_updates` | `subagent.updated` Run SSE event | Not implemented |
 | Live workspace changes | `run_workspace_updates` | `workspace.updated` Run SSE event | Not implemented |
 | Desktop active marker | `is_active` session field | `GET /api/sessions` rows | Not implemented |
+| Cross-surface activity history | `session_activity_history` | `GET /v1/sessions/{id}/activity` | Not implemented |
+| Cross-surface activity stream | `session_activity_stream` | `GET /v1/sessions/{id}/activity/events` | Not implemented |
 
 An absent optional flag means “unsupported”, not “empty”. If a host advertises
 an optional read-only endpoint, the checker probes it. Device registration,
@@ -97,7 +99,7 @@ files, 320 characters per path, and 20,000 diff characters per file; it marks
 the result partial when the host or client truncates it. Hosts should omit
 `diff` when policy does not permit exposing source changes.
 
-## Proposed `hermes.mobile` 1.0 extension
+## Proposed `hermes.mobile` 1.1 extension
 
 Everything in this section is a **draft upstream requirement and is not yet a
 stock Hermes API**. A future host should advertise it under a namespaced entry
@@ -107,7 +109,7 @@ so existing flat capability consumers continue to work:
 {
   "extensions": {
     "hermes.mobile": {
-      "version": "1.0",
+      "version": "1.1",
       "features": {
         "active_run_list": true,
         "event_replay": true,
@@ -115,7 +117,9 @@ so existing flat capability consumers continue to work:
         "pairing": true,
         "scoped_device_tokens": true,
         "push_wake_registration": true,
-        "complete_model_inventory": true
+        "complete_model_inventory": true,
+        "session_activity_history": true,
+        "session_activity_stream": true
       },
       "endpoints": {}
     }
@@ -161,6 +165,15 @@ The 1.0 behavior target is:
    Experimental capability responses may expose the concrete configured model
    as `default_model`; clients should treat it as optional and fall back to a
    generic “Host default” label rather than displaying an API routing alias.
+7. **Cross-surface activity (1.1).** The authenticated session activity history
+   and SSE endpoints expose a monotonic, replayable journal for work started by
+   the API server, TUI/Desktop, and supported gateway surfaces. Each event has
+   `event_id`, `session_id`, `turn_id`, `type`, `timestamp`, `surface`, and a
+   bounded safe payload. Hosts must retain at least the latest 50 turns or 30
+   days, return `409 activity_cursor_expired` for an expired SSE cursor, and
+   never emit hidden reasoning, raw tool arguments/results, credentials, or
+   unbounded diffs. File changes are capped at 100 files, 320 path characters,
+   and 20,000 diff characters per file.
 
 Endpoints and schemas beyond these minimum behaviors should be finalized in an
 official Hermes proposal before the mobile client treats `hermes.mobile` 1.x as

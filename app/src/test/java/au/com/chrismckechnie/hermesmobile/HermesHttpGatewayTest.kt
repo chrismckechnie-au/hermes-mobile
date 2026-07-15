@@ -299,6 +299,38 @@ class HermesHttpGatewayTest {
     }
 
     @Test
+    fun `session activity history and stream parse durable desktop work`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""
+            {"object":"hermes.session.activity.list","session_id":"session-1","next_before":"7","data":[
+              {"event_id":"8","session_id":"session-1","turn_id":"turn-1","type":"tool.complete","timestamp":2.0,"surface":"tui_gateway","payload":{"tool_id":"call-1","name":"write_file","duration_s":0.4,"workspace_changes":[{"path":"app/Main.kt","additions":3,"deletions":1,"diff":"+activity"}]}},
+              {"event_id":"9","session_id":"session-1","turn_id":"turn-1","type":"subagent.progress","timestamp":3.0,"surface":"tui_gateway","payload":{"subagent_id":"sub-1","status":"working","goal":"Inspect tests","text":"Running checks"}}
+            ]}
+        """.trimIndent()))
+        val page = gateway.loadSessionActivity(profile, "session-1", beforeEventId = 10L, limit = 25)
+        val historyRequest = server.takeRequest()
+
+        assertEquals("/v1/sessions/session-1/activity?limit=25&before=10", historyRequest.path)
+        assertEquals(7L, page.nextBefore)
+        assertEquals("call-1", page.events.first().toolId)
+        assertEquals("app/Main.kt", page.events.first().workspaceUpdate!!.files.single().path)
+        assertEquals("sub-1", page.events.last().subagent!!.id)
+
+        server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "text/event-stream").setBody("""
+            id: 10
+            event: activity
+            data: {"event_id":"10","session_id":"session-1","turn_id":"turn-1","type":"reasoning.available","timestamp":4.0,"surface":"tui_gateway","payload":{"text":"Checking output"}}
+
+        """.trimIndent()))
+        val events = mutableListOf<HermesSessionActivityEvent>()
+        gateway.streamSessionActivity(profile, "session-1", 9L, events::add)
+        val streamRequest = server.takeRequest()
+
+        assertEquals("/v1/sessions/session-1/activity/events", streamRequest.path)
+        assertEquals("9", streamRequest.getHeader("Last-Event-ID"))
+        assertEquals("Checking output", events.single().text)
+    }
+
+    @Test
     fun `streamRunEvents parses data-only SSE with keepalives and unknown events`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "text/event-stream").setBody("""
             : keepalive

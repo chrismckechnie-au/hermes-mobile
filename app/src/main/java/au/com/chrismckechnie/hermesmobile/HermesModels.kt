@@ -71,6 +71,11 @@ data class HermesCapabilities(
     val supportsRunSubmissionIdempotency: Boolean get() = "run_submission_idempotency" in features
     val supportsActiveSessionCleanup: Boolean get() = "active_session_cleanup" in features
     val supportsRunSlashCommands: Boolean get() = "run_slash_commands" in features
+    /** Cross-surface, replayable Desktop/TUI activity feed introduced in Hermes Mobile 1.1. */
+    val supportsSessionActivityHistory: Boolean get() = "session_activity_history" in features
+    val supportsSessionActivityStream: Boolean get() = "session_activity_stream" in features
+    val supportsSessionActivity: Boolean
+        get() = supportsSessionActivityHistory && supportsSessionActivityStream
     /** The host explicitly opts in before mobile exposes a remote updater. */
     val supportsHostUpdate: Boolean get() = "host_update_api" in features
 }
@@ -200,6 +205,8 @@ data class HermesActiveSession(
     val statusHistory: List<String> = emptyList(),
     val updatedAt: Long? = null,
     val leaseId: String? = null,
+    val activityCursor: Long? = null,
+    val activityTurnId: String? = null,
 )
 
 /** A bounded, host-approved todo item for the active Run. */
@@ -220,6 +227,10 @@ data class HermesSubagent(
     val toolCount: Int = 0,
     val goal: String? = null,
     val activity: String? = null,
+    val parentId: String? = null,
+    val childSessionId: String? = null,
+    val depth: Int = 0,
+    val model: String? = null,
 ) {
     val isWorking: Boolean get() = status in ACTIVE_SUBAGENT_STATUSES
 }
@@ -238,6 +249,33 @@ data class HermesWorkspaceChange(
 data class HermesWorkspaceUpdate(
     val files: List<HermesWorkspaceChange>,
     val truncated: Boolean = false,
+)
+
+/** A bounded, user-visible activity event shared by API runs and Desktop/TUI sessions. */
+data class HermesSessionActivityEvent(
+    val eventId: Long,
+    val sessionId: String,
+    val turnId: String,
+    val type: String,
+    val timestampSeconds: Long? = null,
+    val surface: String? = null,
+    val userText: String? = null,
+    val text: String? = null,
+    val toolId: String? = null,
+    val toolName: String? = null,
+    val toolContext: String? = null,
+    val toolDurationSeconds: Double? = null,
+    val toolFailed: Boolean = false,
+    val tasks: List<HermesTask> = emptyList(),
+    val subagent: HermesSubagent? = null,
+    val workspaceUpdate: HermesWorkspaceUpdate? = null,
+    val status: String? = null,
+)
+
+data class HermesSessionActivityPage(
+    val sessionId: String,
+    val events: List<HermesSessionActivityEvent>,
+    val nextBefore: Long? = null,
 )
 
 /** Events on `GET /v1/runs/{run_id}/events` — data-only SSE, name in the JSON `event` field. */
@@ -310,6 +348,18 @@ interface HermesGateway {
     suspend fun deleteSession(host: HostProfile, sessionId: String)
     suspend fun forkSession(host: HostProfile, sessionId: String): HermesSession
     suspend fun listActiveSessions(host: HostProfile): List<HermesActiveSession> = emptyList()
+    suspend fun loadSessionActivity(
+        host: HostProfile,
+        sessionId: String,
+        beforeEventId: Long? = null,
+        limit: Int = 100,
+    ): HermesSessionActivityPage = HermesSessionActivityPage(sessionId, emptyList())
+    suspend fun streamSessionActivity(
+        host: HostProfile,
+        sessionId: String,
+        afterEventId: Long?,
+        onEvent: (HermesSessionActivityEvent) -> Unit,
+    ) = Unit
     suspend fun clearStaleActiveSession(host: HostProfile, leaseId: String) = Unit
     suspend fun registerMobileDevice(
         host: HostProfile,
