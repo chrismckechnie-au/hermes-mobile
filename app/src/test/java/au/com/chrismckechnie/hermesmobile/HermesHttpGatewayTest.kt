@@ -194,12 +194,12 @@ class HermesHttpGatewayTest {
             events.filterIsInstance<HermesRunEvent.MessageDelta>().map { it.delta },
         )
         assertTrue(events.any { it is HermesRunEvent.ToolStarted && it.tool == "terminal" && it.preview == "ls" })
+        assertTrue(events.any { it is HermesRunEvent.ReasoningAvailable && it.text == "thinking" })
         assertTrue(events.any { it is HermesRunEvent.ToolCompleted && it.failed })
         assertTrue(events.any { it is HermesRunEvent.ApprovalRequested && it.command == "rm -rf x" })
         assertTrue(events.any { it is HermesRunEvent.ApprovalResponded && it.choice == "once" })
         assertTrue(events.any { it is HermesRunEvent.Completed && it.output == "Hello" })
-        // reasoning.available is intentionally not surfaced
-        assertEquals(7, events.size)
+        assertEquals(8, events.size)
     }
 
     @Test

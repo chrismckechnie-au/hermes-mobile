@@ -202,6 +202,7 @@ class HermesHttpGateway(
 
     private fun parseRunEvent(payload: JSONObject): HermesRunEvent? = when (payload.optString("event")) {
         "message.delta" -> HermesRunEvent.MessageDelta(payload.optString("delta"))
+        "reasoning.available" -> HermesRunEvent.ReasoningAvailable(payload.optString("text"))
         "tool.started" -> HermesRunEvent.ToolStarted(
             payload.optNullableString("tool") ?: "tool",
             payload.optNullableString("preview"),
@@ -215,7 +216,7 @@ class HermesHttpGateway(
         "run.completed" -> HermesRunEvent.Completed(payload.optString("output"))
         "run.failed" -> HermesRunEvent.Failed(payload.optString("error", "Hermes run failed."))
         "run.cancelled" -> HermesRunEvent.Cancelled
-        else -> null // reasoning.available and future events are ignored
+        else -> null // Future events remain forward-compatible.
     }
 
     override suspend fun getRunStatus(host: HostProfile, runId: String): HermesRunStatus = withContext(Dispatchers.IO) {

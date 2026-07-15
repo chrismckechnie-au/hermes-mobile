@@ -244,6 +244,32 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `reasoning progress is grouped into one live activity item`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("think through this")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        gateway.events.send(HermesRunEvent.ReasoningAvailable("Checking the current state"))
+        gateway.events.send(HermesRunEvent.ReasoningAvailable("Comparing the available options"))
+        gateway.events.send(HermesRunEvent.ReasoningAvailable("Comparing the available options"))
+        advanceUntilIdle()
+
+        val reasoning = viewModel.state.value.displayedMessages.filterIsInstance<ChatUiItem.Reasoning>()
+        assertEquals(1, reasoning.size)
+        assertEquals(
+            listOf("Checking the current state", "Comparing the available options"),
+            reasoning.single().updates,
+        )
+
+        gateway.events.send(HermesRunEvent.Completed("done"))
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
     fun `selectModel rejects unknown models`() = runVmTest {
         val (viewModel, _) = buildViewModel()
 

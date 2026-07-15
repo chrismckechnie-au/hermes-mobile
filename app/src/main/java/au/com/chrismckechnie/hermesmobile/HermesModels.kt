@@ -127,6 +127,8 @@ data class HermesActiveSession(
 /** Events on `GET /v1/runs/{run_id}/events` — data-only SSE, name in the JSON `event` field. */
 sealed interface HermesRunEvent {
     data class MessageDelta(val delta: String) : HermesRunEvent
+    /** Host-approved progress text; this is not the model's private chain of thought. */
+    data class ReasoningAvailable(val text: String) : HermesRunEvent
     data class ToolStarted(val tool: String, val preview: String?) : HermesRunEvent
     data class ToolCompleted(val tool: String, val failed: Boolean) : HermesRunEvent
     data class ApprovalRequested(val command: String?) : HermesRunEvent

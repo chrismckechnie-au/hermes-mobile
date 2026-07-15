@@ -308,6 +308,11 @@ class Handler(BaseHTTPRequestHandler):
                     self._sse_data(run_id, "message.delta", delta=f"chunk-{index} ", message_id="msg-demo")
                     time.sleep(0.5)
             else:
+                self._sse_data(
+                    run_id,
+                    "reasoning.available",
+                    text="Checking the host connection and available capabilities.",
+                )
                 self._sse_data(run_id, "message.delta", delta="Connected to ", message_id="msg-demo")
                 self._sse_data(run_id, "tool.started", tool="host_probe", preview="Checking Hermes capabilities")
                 self._sse_data(run_id, "tool.completed", tool="host_probe", duration=0.2, error=False)

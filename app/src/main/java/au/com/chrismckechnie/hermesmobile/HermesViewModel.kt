@@ -76,6 +76,12 @@ sealed interface ChatUiItem {
         val streaming: Boolean = false,
     ) : ChatUiItem
 
+    /** Collapsible, host-provided progress summaries for the active Run. */
+    data class Reasoning(
+        override val id: String,
+        val updates: List<String>,
+    ) : ChatUiItem
+
     data class Tool(
         override val id: String,
         val name: String,
@@ -701,6 +707,12 @@ class HermesViewModel(
                         if (item is ChatUiItem.Assistant && item.id == current.assistantId) item.copy(text = item.text + event.delta) else item
                     })
                 )
+                is HermesRunEvent.ReasoningAvailable -> {
+                    val text = event.text.trim().take(MAX_REASONING_UPDATE_LENGTH)
+                    if (text.isBlank()) state else state.copy(
+                        activeRun = current.copy(tail = upsertReasoning(current, text))
+                    )
+                }
                 is HermesRunEvent.ToolStarted -> state.copy(
                     activeRun = current.copy(tail = insertBeforeAssistant(current, ChatUiItem.Tool(
                         id = "${current.runId}:${event.tool}:${current.tail.size}",
@@ -750,6 +762,20 @@ class HermesViewModel(
         val index = run.tail.indexOfLast { it is ChatUiItem.Assistant && it.id == run.assistantId }
         return if (index < 0) run.tail + item
         else run.tail.subList(0, index) + item + run.tail.subList(index, run.tail.size)
+    }
+
+    private fun upsertReasoning(run: ActiveRun, text: String): List<ChatUiItem> {
+        val id = "reasoning:${run.runId}"
+        val existing = run.tail.filterIsInstance<ChatUiItem.Reasoning>().firstOrNull { it.id == id }
+        if (existing == null) {
+            return insertBeforeAssistant(run, ChatUiItem.Reasoning(id, listOf(text)))
+        }
+        if (existing.updates.lastOrNull() == text) return run.tail
+        return run.tail.map { item ->
+            if (item.id == id && item is ChatUiItem.Reasoning) {
+                item.copy(updates = (item.updates + text).takeLast(MAX_REASONING_UPDATES))
+            } else item
+        }
     }
 
     /** Capped-backoff status polling. Returns true when the Run reached a terminal state. */
@@ -1126,6 +1152,8 @@ class HermesViewModel(
     }
 
     companion object {
+        private const val MAX_REASONING_UPDATES = 12
+        private const val MAX_REASONING_UPDATE_LENGTH = 8_000
         private const val KEY_RUN_HOST = "run.hostId"
         private const val KEY_RUN_SESSION = "run.sessionId"
         private const val KEY_RUN_ID = "run.runId"

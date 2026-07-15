@@ -74,6 +74,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -353,6 +354,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     when (item) {
                         is ChatUiItem.User -> UserBubble(item.text)
                         is ChatUiItem.Assistant -> AssistantMessage(item.text, item.streaming)
+                        is ChatUiItem.Reasoning -> ReasoningCard(item)
                         is ChatUiItem.Tool -> LiveToolCard(item)
                         is ChatUiItem.Approval -> ApprovalCard(item, viewModel)
                     }
@@ -601,6 +603,64 @@ private fun AssistantMessage(text: String, streaming: Boolean) {
                 MarkdownText(text, modifier = Modifier.padding(top = 2.dp))
                 if (streaming) {
                     Text("STREAMING", style = T.MicroBold, modifier = Modifier.padding(top = 6.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReasoningCard(item: ChatUiItem.Reasoning) {
+    var expanded by remember(item.id) { mutableStateOf(true) }
+    val latest = item.updates.lastOrNull().orEmpty()
+    val action = if (expanded) "Collapse Hermes activity" else "Expand Hermes activity"
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { contentDescription = action }
+            .clickable { expanded = !expanded },
+        shape = RoundedCornerShape(T.RadiusCard),
+        colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
+        border = BorderStroke(1.dp, T.Cream.copy(alpha = 0.12f)),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier.size(25.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.07f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Lucide.ScrollText, null, tint = T.CreamSoft, modifier = Modifier.size(13.dp))
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (expanded) "Hermes activity" else latest.ifBlank { "Hermes is thinking…" },
+                style = if (expanded) T.Label else T.BodyMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(7.dp))
+            Text("LIVE", style = T.MicroBold.copy(color = T.CreamSoft))
+            Spacer(Modifier.width(5.dp))
+            Icon(
+                Lucide.ChevronDown,
+                action,
+                tint = T.Muted,
+                modifier = Modifier.size(15.dp).rotate(if (expanded) 180f else 0f),
+            )
+        }
+        AnimatedVisibility(visible = expanded) {
+            Column(
+                Modifier.fillMaxWidth().padding(start = 43.dp, end = 11.dp, bottom = 9.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                item.updates.forEach { update ->
+                    Text(
+                        update,
+                        style = T.BodyMuted.copy(color = T.TextSoft, fontSize = 11.sp, lineHeight = 16.sp),
+                    )
                 }
             }
         }
