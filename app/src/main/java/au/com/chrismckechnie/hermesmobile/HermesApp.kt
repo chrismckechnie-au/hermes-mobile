@@ -1629,6 +1629,7 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
     actionTarget?.let { session ->
         val hostId = state.activeHost?.id
         val busy = hostId != null && state.isSessionBusy(hostId, session.id)
+        val deleteBlocked = hostId != null && state.isSessionDeleteBlocked(hostId, session.id)
         ModalBottomSheet(
             onDismissRequest = { actionTarget = null },
             containerColor = T.SurfaceLow,
@@ -1637,7 +1638,11 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp).padding(bottom = 18.dp)) {
                 Text(session.title?.takeIf { it.isNotBlank() } ?: "Untitled session", style = T.SheetTitle)
                 Text(
-                    if (busy) "Session actions are unavailable while Hermes is working." else "Choose a session action.",
+                    when {
+                        busy && !deleteBlocked -> "This empty session can be deleted; other actions are unavailable."
+                        busy -> "Session actions are unavailable while Hermes is working."
+                        else -> "Choose a session action."
+                    },
                     style = T.BodyMuted.copy(color = if (busy) T.Warn else T.Muted),
                     modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
                 )
@@ -1661,7 +1666,7 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 SessionActionRow(
                     icon = Lucide.Trash2,
                     label = "Delete",
-                    enabled = !busy && state.capabilities?.supportsSessionEdit == true,
+                    enabled = !deleteBlocked && state.capabilities?.supportsSessionEdit == true,
                     destructive = true,
                 ) {
                     viewModel.requestDeleteSession(session.id)

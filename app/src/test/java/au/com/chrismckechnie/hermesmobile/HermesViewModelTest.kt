@@ -53,6 +53,7 @@ private class FakeGateway : HermesGateway {
     var runStatus = HermesRunStatus("run-1", "completed")
     var submitError: Throwable? = null
     var createError: Throwable? = null
+    val reservedTitles = mutableSetOf<String>()
     var approvalError: Throwable? = null
     var approvalGate: Channel<Unit>? = null
     var approvalAttempts = 0
@@ -92,6 +93,9 @@ private class FakeGateway : HermesGateway {
     )
     override suspend fun createSession(host: HostProfile, title: String?): HermesSession {
         createError?.let { throw it }
+        if (title != null && (title in reservedTitles || sessions.any { it.title == title })) {
+            throw HermesApiException(400, "Title '$title' is already in use")
+        }
         val session = HermesSession("new-${created.size}", title, null, "api_server", null, null, 0)
         created += session
         sessions.add(0, session)
@@ -144,6 +148,9 @@ private class FakeGateway : HermesGateway {
     override suspend fun stopRun(host: HostProfile, runId: String) { stops += runId }
 
     override suspend fun renameSession(host: HostProfile, sessionId: String, title: String): HermesSession {
+        if (title in reservedTitles || sessions.any { it.id != sessionId && it.title == title }) {
+            throw HermesApiException(400, "Title '$title' is already in use")
+        }
         renames += sessionId to title
         val renamed = sessions.first { it.id == sessionId }.copy(title = title)
         sessions.replaceAll { if (it.id == sessionId) renamed else it }
@@ -352,14 +359,15 @@ class HermesViewModelTest {
         viewModel.createSession()
         advanceUntilIdle()
 
+        assertTrue(gateway.created.isEmpty())
+        assertNull(viewModel.state.value.activeSessionId)
+
         viewModel.setComposerText("Make the session list show desktop work")
         viewModel.sendMessage()
         advanceUntilIdle()
 
-        assertEquals(
-            listOf("new-0" to "Make the session list show desktop work"),
-            gateway.renames,
-        )
+        assertEquals("Make the session list show desktop work", gateway.created.single().title)
+        assertTrue(gateway.renames.isEmpty())
         assertEquals("Make the session list show desktop work", viewModel.state.value.activeSession?.title)
 
         gateway.events.close()
@@ -685,6 +693,41 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `repeated first prompts receive unique titles and still start`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            sessions.add(HermesSession("previous", "Repeat this task", null, "api_server", null, null, 2))
+        }
+        val (viewModel, _) = buildViewModel(gateway)
+
+        viewModel.setComposerText("Repeat this task")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals("Repeat this task #2", gateway.created.single().title)
+        assertEquals("Repeat this task #2", viewModel.state.value.activeSession?.title)
+        assertEquals(1, gateway.submits.size)
+
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `unloaded title collisions fall back to an untitled session and still start`() = runVmTest {
+        val gateway = FakeGateway().apply { reservedTitles += "Hidden duplicate" }
+        val (viewModel, _) = buildViewModel(gateway)
+
+        viewModel.setComposerText("Hidden duplicate")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertNull(gateway.created.single().title)
+        assertEquals(1, gateway.submits.size)
+
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
     fun `selected permission mode rides the run submission`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
         viewModel.selectSession("s1")
@@ -736,13 +779,20 @@ class HermesViewModelTest {
     }
 
     @Test
-    fun `slash new creates a session and slash rename validates args`() = runVmTest {
+    fun `slash new opens a local draft and slash rename validates args`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
+
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
 
         viewModel.setComposerText("/new")
         viewModel.sendMessage()
         advanceUntilIdle()
-        assertEquals(1, gateway.created.size)
+        assertTrue(gateway.created.isEmpty())
+        assertNull(viewModel.state.value.activeSessionId)
+
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
 
         viewModel.setComposerText("/rename")
         viewModel.sendMessage()
@@ -752,7 +802,7 @@ class HermesViewModelTest {
         viewModel.setComposerText("/rename Sharp Title")
         viewModel.sendMessage()
         advanceUntilIdle()
-        assertEquals(viewModel.state.value.activeSessionId!! to "Sharp Title", gateway.renames.single())
+        assertEquals("s1" to "Sharp Title", gateway.renames.single())
     }
 
     @Test
@@ -866,6 +916,76 @@ class HermesViewModelTest {
         assertEquals(
             "Host-provided progress",
             safeRunStatusText(HermesRunEvent.ReasoningAvailable("Host-provided progress")),
+        )
+
+        gateway.events.send(HermesRunEvent.Completed("done"))
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `returning to a running session reconciles persisted prompt and tools`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            sessions += HermesSession("s2", "Second", null, "api_server", null, null, 0)
+            messages["s2"] = mutableListOf()
+        }
+        val (viewModel, _) = buildViewModel(gateway)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("work while backgrounded")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        gateway.events.send(HermesRunEvent.ToolStarted("terminal", "first command"))
+        gateway.events.send(HermesRunEvent.ToolCompleted("terminal", failed = false))
+        advanceUntilIdle()
+        gateway.messages.getValue("s1") += listOf(
+            HermesMessage("m3", "user", "work while backgrounded"),
+            HermesMessage("m4", "tool", "first command completed", "terminal"),
+        )
+
+        viewModel.selectSession("s2")
+        advanceUntilIdle()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+
+        var displayed = viewModel.state.value.displayedMessages
+        assertEquals(1, displayed.filterIsInstance<ChatUiItem.User>().count { it.text == "work while backgrounded" })
+        assertEquals(1, displayed.filterIsInstance<ChatUiItem.Tool>().count { it.name == "terminal" })
+
+        gateway.events.send(HermesRunEvent.ToolStarted("browser", "next step"))
+        advanceUntilIdle()
+        displayed = viewModel.state.value.displayedMessages
+        val currentToolGroup = groupChatTimeline(displayed)
+            .filterIsInstance<ChatTimelineItem.ToolGroup>()
+            .last()
+        assertEquals(listOf("terminal", "browser"), currentToolGroup.tools.map { it.name })
+
+        gateway.events.send(HermesRunEvent.Completed("done"))
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `an identical historical prompt does not hide the active prompt`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            messages["s1"] = mutableListOf(
+                HermesMessage("m1", "user", "repeat within this session"),
+                HermesMessage("m2", "assistant", "previous answer"),
+            )
+        }
+        val (viewModel, _) = buildViewModel(gateway)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("repeat within this session")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals(
+            2,
+            viewModel.state.value.displayedMessages
+                .filterIsInstance<ChatUiItem.User>()
+                .count { it.text == "repeat within this session" },
         )
 
         gateway.events.send(HermesRunEvent.Completed("done"))
@@ -1217,6 +1337,24 @@ class HermesViewModelTest {
         gateway.events.send(HermesRunEvent.Completed("done"))
         gateway.events.close()
         advanceUntilIdle()
+    }
+
+    @Test
+    fun `empty session with only heuristic activity can be deleted`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            sessions.clear()
+            sessions += HermesSession("empty", null, null, "api_server", null, null, 0, isActive = true)
+        }
+        val (viewModel, _) = buildViewModel(gateway)
+
+        assertTrue(viewModel.state.value.isSessionBusy("h1", "empty"))
+        assertFalse(viewModel.state.value.isSessionDeleteBlocked("h1", "empty"))
+        viewModel.requestDeleteSession("empty")
+        assertEquals("empty", viewModel.state.value.confirmDeleteSessionId)
+        viewModel.confirmDeleteSession()
+        advanceUntilIdle()
+
+        assertEquals(listOf("empty"), gateway.deletes)
     }
 
     @Test

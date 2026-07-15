@@ -177,6 +177,15 @@ internal fun automaticSessionTitle(input: String): String {
     else normalized.take(maxLength - 1).trimEnd() + "…"
 }
 
+internal fun uniqueAutomaticSessionTitle(input: String, sessions: List<HermesSession>): String {
+    val base = automaticSessionTitle(input)
+    val existing = sessions.mapNotNull(HermesSession::title).toHashSet()
+    if (base !in existing) return base
+    var suffix = 2
+    while ("$base #$suffix" in existing) suffix += 1
+    return "$base #$suffix"
+}
+
 internal fun taskProgressLabel(tasks: List<HermesTask>): String =
     "${tasks.count(HermesTask::isComplete)} / ${tasks.size} tasks"
 
@@ -244,6 +253,37 @@ private fun List<ChatUiItem>.withRunUsage(usageByMessageId: Map<String, HermesRu
         }
     }
 
+internal fun mergeStoredAndLiveTail(
+    storedMessages: List<ChatUiItem>,
+    liveTail: List<ChatUiItem>,
+    baselineMessageCount: Int?,
+): List<ChatUiItem> {
+    val baseline = baselineMessageCount ?: return storedMessages + liveTail
+    val livePrompt = liveTail.filterIsInstance<ChatUiItem.User>().firstOrNull()
+        ?: return storedMessages + liveTail
+    val storedPromptIndex = storedMessages.withIndex().indexOfLast { (index, item) ->
+        index >= baseline && item is ChatUiItem.User && item.text == livePrompt.text
+    }
+    if (storedPromptIndex < 0) return storedMessages + liveTail
+
+    val persistedToolCounts = storedMessages.drop(storedPromptIndex + 1)
+        .filterIsInstance<ChatUiItem.Tool>()
+        .groupingBy(ChatUiItem.Tool::name)
+        .eachCount()
+        .toMutableMap()
+    val reconciledTail = liveTail.filterNot { item ->
+        when {
+            item === livePrompt -> true
+            item is ChatUiItem.Tool && persistedToolCounts.getOrDefault(item.name, 0) > 0 -> {
+                persistedToolCounts[item.name] = persistedToolCounts.getValue(item.name) - 1
+                true
+            }
+            else -> false
+        }
+    }
+    return storedMessages + reconciledTail
+}
+
 /**
  * Immutable coordinates of the Run in flight. Holds the authenticated Host
  * snapshot so Stop/approval/reconciliation keep working even if the profile
@@ -254,6 +294,7 @@ data class ActiveRun(
     val sessionId: String,
     val sessionTitle: String?,
     val runId: String,
+    val baselineMessageCount: Int? = null,
     val tail: List<ChatUiItem> = emptyList(),
     val tasks: List<HermesTask> = emptyList(),
     val subagents: Map<String, HermesSubagent> = emptyMap(),
@@ -461,7 +502,7 @@ data class HermesUiState(
             val storedMessages = messages.withRunUsage(activeSessionKey?.let(runUsageByMessage::get).orEmpty())
             val run = activeRun ?: return storedMessages
             if (run.sessionId != activeSessionId) return storedMessages
-            val tail = storedMessages + run.tail
+            val tail = mergeStoredAndLiveTail(storedMessages, run.tail, run.baselineMessageCount)
             return if (run.awaitingApproval && !run.approvalDetailsLost) {
                 tail + ChatUiItem.Approval(
                     id = "approval:${run.runId}",
@@ -480,6 +521,13 @@ data class HermesUiState(
         SessionKey(hostId, sessionId) in activeRuns ||
             SessionKey(hostId, sessionId) in activeHostSessions ||
             (hostId == activeHostId && sessions.any { it.id == sessionId && it.isActive })
+
+    fun isSessionDeleteBlocked(hostId: String, sessionId: String): Boolean {
+        val key = SessionKey(hostId, sessionId)
+        if (key in activeRuns || key in activeHostSessions) return true
+        val session = sessions.firstOrNull { it.id == sessionId } ?: return false
+        return session.isActive && session.messageCount != 0
+    }
 
     fun hasActiveRunOnHost(hostId: String): Boolean =
         activeRuns.keys.any { it.hostId == hostId } ||
@@ -1047,21 +1095,16 @@ class HermesViewModel(
     fun createSession() {
         val host = mutableState.value.activeHost ?: return
         if (mutableState.value.connectionPhase != HostConnectionPhase.Connected) return
-        viewModelScope.launch {
-            runCatching { gateway.createSession(host, null) }
-                .onSuccess { session ->
-                    mutableState.update { state ->
-                        state.copy(
-                            sessions = listOf(session) + state.sessions.filterNot { item -> item.id == session.id },
-                            activeSessionId = session.id,
-                            pendingSessionTarget = null,
-                            messages = emptyList(),
-                            screen = DeckScreen.Chat,
-                            errorMessage = null,
-                        ).transferNewSessionSelections(host.id, session.id)
-                    }
-                }
-                .onFailure(::showFailure)
+        mutableState.update { state ->
+            state.copy(
+                activeSessionId = null,
+                pendingSessionTarget = null,
+                messages = emptyList(),
+                newSessionDrafts = state.newSessionDrafts - host.id,
+                screen = DeckScreen.Chat,
+                sessionActionsFor = null,
+                errorMessage = null,
+            )
         }
     }
 
@@ -1254,8 +1297,14 @@ class HermesViewModel(
         viewModelScope.launch {
             var draftKey = initialKey
             try {
+                val automaticTitle = uniqueAutomaticSessionTitle(text, snapshot.sessions)
                 var session = snapshot.activeSessionId?.let { id -> snapshot.sessions.firstOrNull { it.id == id } }
-                    ?: gateway.createSession(host, automaticSessionTitle(text)).also { created ->
+                    ?: try {
+                        gateway.createSession(host, automaticTitle)
+                    } catch (error: HermesApiException) {
+                        if (error.statusCode != 400 || !error.message.contains("already in use", ignoreCase = true)) throw error
+                        gateway.createSession(host, null)
+                    }.also { created ->
                         mutableState.update { state ->
                             state.copy(
                                 sessions = listOf(created) + state.sessions.filterNot { it.id == created.id },
@@ -1286,7 +1335,7 @@ class HermesViewModel(
                     capabilities.supportsSessionEdit &&
                     isAutomaticUntitledSessionTitle(session.title)
                 ) {
-                    runCatching { gateway.renameSession(host, page.sessionId, automaticSessionTitle(text)) }
+                    runCatching { gateway.renameSession(host, page.sessionId, automaticTitle) }
                         .getOrNull()
                         ?.let { renamed ->
                             session = renamed
@@ -1337,6 +1386,9 @@ class HermesViewModel(
                     sessionId = page.sessionId,
                     sessionTitle = session.title,
                     runId = runId,
+                    baselineMessageCount = page.messages.count { message ->
+                        message.role == "user" || message.role == "assistant" || message.role == "tool"
+                    },
                     assistantId = assistantId,
                     tail = listOf(
                         ChatUiItem.User(UUID.randomUUID().toString(), text),
@@ -1855,7 +1907,11 @@ class HermesViewModel(
     }
 
     fun requestDeleteSession(sessionId: String) {
-        if (guardSessionBusy(sessionId)) return
+        val hostId = mutableState.value.activeHostId
+        if (hostId != null && mutableState.value.isSessionDeleteBlocked(hostId, sessionId)) {
+            mutableState.update { it.copy(errorMessage = "A run is active in this session. Stop it first.", sessionActionsFor = null) }
+            return
+        }
         mutableState.update { it.copy(confirmDeleteSessionId = sessionId, sessionActionsFor = null) }
     }
 
