@@ -365,7 +365,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 state = listState,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(horizontal = 15.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(13.dp),
+                verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
                 items(displayedMessages, key = { it.id }) { item ->
                     when (item) {
@@ -645,38 +645,36 @@ internal fun firstAssistantIdsByTurn(messages: List<ChatUiItem>): Set<String> = 
 
 @Composable
 private fun ReasoningCard(item: ChatUiItem.Reasoning) {
-    var expanded by remember(item.id) { mutableStateOf(true) }
+    var expanded by remember(item.id) { mutableStateOf(false) }
     val latest = item.updates.lastOrNull().orEmpty()
     val action = if (expanded) "Collapse Hermes activity" else "Expand Hermes activity"
     Card(
         modifier = Modifier
-            .fillMaxWidth()
+            .fillMaxWidth(0.86f)
             .semantics { contentDescription = action }
             .clickable { expanded = !expanded },
-        shape = RoundedCornerShape(T.RadiusCard),
+        shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
         border = BorderStroke(1.dp, T.Cream.copy(alpha = 0.12f)),
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
-                Modifier.size(25.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.07f)),
+                Modifier.size(22.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.07f)),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Lucide.ScrollText, null, tint = T.CreamSoft, modifier = Modifier.size(13.dp))
+                Icon(Lucide.ScrollText, null, tint = T.CreamSoft, modifier = Modifier.size(12.dp))
             }
             Spacer(Modifier.width(8.dp))
             Text(
-                if (expanded) "Hermes activity" else latest.ifBlank { "Hermes is thinking…" },
-                style = if (expanded) T.Label else T.BodyMuted,
+                if (expanded) "Hermes activity" else latest.ifBlank { "Hermes is working…" },
+                style = if (expanded) T.Label else T.BodyMuted.copy(fontSize = 12.sp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.width(7.dp))
-            Text("LIVE", style = T.MicroBold.copy(color = T.CreamSoft))
             Spacer(Modifier.width(5.dp))
             Icon(
                 Lucide.ChevronDown,
@@ -687,13 +685,13 @@ private fun ReasoningCard(item: ChatUiItem.Reasoning) {
         }
         AnimatedVisibility(visible = expanded) {
             Column(
-                Modifier.fillMaxWidth().padding(start = 43.dp, end = 11.dp, bottom = 9.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                Modifier.fillMaxWidth().padding(start = 38.dp, end = 9.dp, bottom = 7.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                item.updates.forEach { update ->
+                item.updates.takeLast(6).forEach { update ->
                     Text(
                         update,
-                        style = T.BodyMuted.copy(color = T.TextSoft, fontSize = 11.sp, lineHeight = 16.sp),
+                        style = T.BodyMuted.copy(color = T.TextSoft, fontSize = 11.sp, lineHeight = 15.sp),
                     )
                 }
             }
@@ -785,37 +783,44 @@ private fun inlineAnnotated(text: String): AnnotatedString {
 
 @Composable
 private fun LiveToolCard(item: ChatUiItem.Tool) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(T.RadiusCard),
-        colors = CardDefaults.cardColors(containerColor = T.SurfaceLow),
+    Surface(
+        modifier = Modifier.fillMaxWidth(0.86f),
+        shape = RoundedCornerShape(14.dp),
+        color = T.SurfaceLow,
         border = BorderStroke(1.dp, if (item.failed) T.Error.copy(alpha = 0.3f) else T.Line),
     ) {
         Row(
-            Modifier.padding(horizontal = 9.dp, vertical = 7.dp),
+            Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
-                Modifier.size(27.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Tool.copy(alpha = 0.08f)),
+                Modifier.size(22.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Tool.copy(alpha = 0.08f)),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Lucide.Terminal, null, tint = if (item.failed) T.Error else T.Tool, modifier = Modifier.size(14.dp))
-            }
-            Spacer(Modifier.width(8.dp))
-            Column(Modifier.weight(1f)) {
-                Text(item.name, style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    item.preview ?: if (item.running) "Running…" else "Completed",
-                    style = T.MonoSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Icon(Lucide.Terminal, null, tint = if (item.failed) T.Error else T.Tool, modifier = Modifier.size(12.dp))
             }
             Spacer(Modifier.width(7.dp))
+            Text(
+                compactToolSummary(item),
+                style = T.MonoSmall.copy(color = T.TextSoft),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(6.dp))
             if (item.running) CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
             else Text(if (item.failed) "FAILED" else "DONE", style = T.MicroBold.copy(color = if (item.failed) T.Error else T.Cream))
         }
     }
+}
+
+internal fun compactToolSummary(item: ChatUiItem.Tool): String {
+    val detail = item.preview
+        ?.replace(Regex("\\s+"), " ")
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?: if (item.running) "Running" else "Completed"
+    return "${item.name} · $detail"
 }
 
 @Composable

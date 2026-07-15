@@ -61,6 +61,18 @@ class WorkSurfaceCopyTest {
         assertFalse(event("job.failed").requiresAttention)
     }
 
+    @Test
+    fun `tool activity summary remains one compact line`() {
+        assertEquals(
+            "terminal · Running tests now",
+            compactToolSummary(ChatUiItem.Tool("tool-1", "terminal", "Running\n tests now", running = true)),
+        )
+        assertEquals(
+            "search · Completed",
+            compactToolSummary(ChatUiItem.Tool("tool-2", "search", null, running = false)),
+        )
+    }
+
     private fun event(type: String) = MobilePushEvent(
         event = type,
         hostProfileId = "host-1",
