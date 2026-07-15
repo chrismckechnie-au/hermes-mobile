@@ -15,6 +15,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - Host model discovery with per-run model and reasoning-effort selection from the Chat model sheet
 - Independent streaming runs per host/session, with stop/cancel, multi-run process-death recovery, and unknown-submit protection
 - Local slash commands and host skill suggestions from the message composer
+- Optional Android system dictation from the composer, appending the recognizer result to the current draft
 - Markdown rendering of assistant replies (code blocks with copy, headings, bullets, bold/italic/inline code, links)
 - Live assistant deltas and structured tool start/completion cards
 - Collapsible live Hermes activity cards for host-provided reasoning progress
@@ -94,6 +95,10 @@ this does not require Firebase. The overlay is seeded from the local run and
 then reconciled against `/v1/active-sessions`, avoiding first-poll races.
 Terminal outcomes and approval requests remain counted until their session is
 opened, so an update is not lost when the phone is locked or the app is away.
+
+Dictation uses the Android device's installed speech recognizer. Its privacy
+and network behavior are controlled by that provider; some recognizers send
+audio to a remote service.
 
 Firebase is deliberately user-owned:
 

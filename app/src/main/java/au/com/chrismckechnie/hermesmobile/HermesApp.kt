@@ -1,7 +1,11 @@
 package au.com.chrismckechnie.hermesmobile
 
 import android.app.Activity
+import android.content.Intent
 import android.provider.Settings
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -118,6 +122,7 @@ import com.composables.icons.lucide.KeyRound
 import com.composables.icons.lucide.Lock
 import com.composables.icons.lucide.Lucide
 import com.composables.icons.lucide.MessageCircle
+import com.composables.icons.lucide.Mic
 import com.composables.icons.lucide.Pencil
 import com.composables.icons.lucide.Play
 import com.composables.icons.lucide.Plus
@@ -861,6 +866,17 @@ private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
     val enabled = state.connectionPhase == HostConnectionPhase.Connected &&
         !state.isSending && state.activeRun == null && state.unknownOutcome == null
     val focusManager = LocalFocusManager.current
+    val context = LocalContext.current
+    val dictationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val dictated = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+        if (dictated.isNotBlank()) {
+            viewModel.setComposerText(listOf(state.composerText.trim(), dictated).filter(String::isNotBlank).joinToString(" "))
+        }
+    }
     val suggestions = state.slashSuggestions()
 
     Column(Modifier.fillMaxWidth()) {
@@ -962,6 +978,17 @@ private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Cream)
                 }
             } else {
+                val dictationIntent = remember(context) {
+                    Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Dictate a message for Hermes")
+                        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                    }
+                }
+                val canDictate = enabled && dictationIntent.resolveActivity(context.packageManager) != null
+                IconButton(onClick = { dictationLauncher.launch(dictationIntent) }, enabled = canDictate) {
+                    Icon(Lucide.Mic, "Dictate message", tint = if (canDictate) T.Muted else T.Muted.copy(alpha = 0.35f), modifier = Modifier.size(19.dp))
+                }
                 val canSend = enabled && state.composerText.isNotBlank()
                 Box(
                     modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard))
