@@ -18,7 +18,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - Local slash commands and host skill suggestions from the message composer
 - Optional Android system dictation from the composer, appending the recognizer result to the current draft
 - Markdown rendering of assistant replies (code blocks with copy, headings, bullets, bold/italic/inline code, links)
-- Live assistant deltas plus compact, left-aligned terminal/tool status bubbles
+- Live assistant deltas plus collapsible, grouped tool activity and compact left-aligned Hermes progress bubbles
 - Collapsible, compact Hermes activity bubbles for host-provided reasoning progress
 - Tool-run approval cards (`approval.request` → approve/deny via `POST /v1/runs/{id}/approval`)
 - Compact ongoing work notification and a draggable edge icon that opens an attached session panel with latest safe activity; it hides while Hermes Mobile is open, restores when the app backgrounds, shows a count for updates to review, and can be dropped onto a close target to hide it until the next run

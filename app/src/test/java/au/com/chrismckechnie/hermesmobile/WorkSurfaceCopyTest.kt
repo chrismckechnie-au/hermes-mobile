@@ -73,6 +73,32 @@ class WorkSurfaceCopyTest {
         )
     }
 
+    @Test
+    fun `consecutive tool prompts become one expandable activity group`() {
+        val timeline = groupChatTimeline(
+            listOf(
+                ChatUiItem.User("user-1", "Check the build"),
+                ChatUiItem.Tool("tool-1", "terminal", "./gradlew test", running = false),
+                ChatUiItem.Tool("tool-2", "terminal", "./gradlew lint", running = true),
+                ChatUiItem.Assistant("assistant-1", "The build is running."),
+            ),
+        )
+
+        assertEquals(3, timeline.size)
+        val activity = timeline[1] as ChatTimelineItem.ToolGroup
+        assertEquals(listOf("tool-1", "tool-2"), activity.tools.map { it.id })
+        assertEquals("Working · terminal", toolActivitySummary(activity.tools))
+    }
+
+    @Test
+    fun `run banner prefers the current session name over a stale run label`() {
+        val host = HostProfile("host-1", "Host", "http://host.test", "key", allowInsecureHttp = true)
+        val run = ActiveRun(host, "session-1", "API session", "run-1")
+        val session = HermesSession("session-1", "Release verification", null, null, null, null, null)
+
+        assertEquals("Release verification", displayRunSessionName(run, listOf(session)))
+    }
+
     private fun event(type: String) = MobilePushEvent(
         event = type,
         hostProfileId = "host-1",

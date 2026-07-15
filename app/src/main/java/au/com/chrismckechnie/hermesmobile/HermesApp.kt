@@ -357,13 +357,12 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
             if (activeSession != null && state.capabilities?.supportsSessionEdit == true) {
                 IconButton(
                     onClick = { renameOpen = true },
-                    enabled = state.activeRun == null,
                     modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.SurfaceLow),
                 ) {
                     Icon(
                         Lucide.Pencil,
                         "Rename session",
-                        tint = if (state.activeRun == null) T.Cream else T.Muted,
+                        tint = T.Cream,
                         modifier = Modifier.size(17.dp),
                     )
                 }
@@ -385,17 +384,20 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 contentPadding = PaddingValues(horizontal = 15.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
-                items(displayedMessages, key = { it.id }) { item ->
-                    when (item) {
-                        is ChatUiItem.User -> UserBubble(item.text)
-                        is ChatUiItem.Assistant -> AssistantMessage(
-                            item.text,
-                            item.streaming,
-                            showAvatar = item.id in assistantAvatarIds,
-                        )
-                        is ChatUiItem.Reasoning -> ReasoningCard(item)
-                        is ChatUiItem.Tool -> LiveToolCard(item)
-                        is ChatUiItem.Approval -> ApprovalCard(item, viewModel)
+                items(groupChatTimeline(displayedMessages), key = { it.id }) { timelineItem ->
+                    when (timelineItem) {
+                        is ChatTimelineItem.Message -> when (val item = timelineItem.item) {
+                            is ChatUiItem.User -> UserBubble(item.text)
+                            is ChatUiItem.Assistant -> AssistantMessage(
+                                item.text,
+                                item.streaming,
+                                showAvatar = item.id in assistantAvatarIds,
+                            )
+                            is ChatUiItem.Reasoning -> ReasoningCard(item)
+                            is ChatUiItem.Tool -> ToolActivityGroup(listOf(item))
+                            is ChatUiItem.Approval -> ApprovalCard(item, viewModel)
+                        }
+                        is ChatTimelineItem.ToolGroup -> ToolActivityGroup(timelineItem.tools)
                     }
                 }
             }
@@ -437,6 +439,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
 private fun RunBanner(state: HermesUiState, viewModel: HermesViewModel) {
     AnimatedVisibility(visible = state.runBannerVisible) {
         val run = state.otherActiveRuns.firstOrNull() ?: state.activeRun ?: return@AnimatedVisibility
+        val sessionName = displayRunSessionName(run, state.sessions)
         Row(
             Modifier.fillMaxWidth().background(T.Cream.copy(alpha = 0.06f))
                 .padding(start = 14.dp, end = 5.dp, top = 7.dp, bottom = 7.dp),
@@ -448,7 +451,7 @@ private fun RunBanner(state: HermesUiState, viewModel: HermesViewModel) {
                 buildString {
                     append(if (run.awaitingApproval) "Waiting for approval" else if (run.stopping) "Stopping run" else "Run active")
                     append(" — ")
-                    append(run.sessionTitle?.takeIf { it.isNotBlank() } ?: run.sessionId)
+                    append(sessionName)
                 },
                 style = T.BodyMuted.copy(color = T.Cream),
                 maxLines = 1,
@@ -828,37 +831,113 @@ private fun inlineAnnotated(text: String): AnnotatedString {
     }
 }
 
-@Composable
-private fun LiveToolCard(item: ChatUiItem.Tool) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(0.86f),
-        shape = RoundedCornerShape(14.dp),
-        color = T.SurfaceLow,
-        border = BorderStroke(1.dp, if (item.failed) T.Error.copy(alpha = 0.3f) else T.Line),
-    ) {
-        Row(
-            Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                Modifier.size(22.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Tool.copy(alpha = 0.08f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Lucide.Terminal, null, tint = if (item.failed) T.Error else T.Tool, modifier = Modifier.size(12.dp))
-            }
-            Spacer(Modifier.width(7.dp))
-            Text(
-                compactToolSummary(item),
-                style = T.MonoSmall.copy(color = T.TextSoft),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(6.dp))
-            if (item.running) CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
-            else Text(if (item.failed) "FAILED" else "DONE", style = T.MicroBold.copy(color = if (item.failed) T.Error else T.Cream))
+internal fun displayRunSessionName(run: ActiveRun, sessions: List<HermesSession>): String =
+    sessions.firstOrNull { it.id == run.sessionId }?.title?.takeIf { it.isNotBlank() }
+        ?: run.sessionTitle?.takeIf { it.isNotBlank() }
+        ?: "Untitled session"
+
+internal sealed interface ChatTimelineItem {
+    val id: String
+
+    data class Message(val item: ChatUiItem) : ChatTimelineItem {
+        override val id: String = item.id
+    }
+
+    data class ToolGroup(
+        override val id: String,
+        val tools: List<ChatUiItem.Tool>,
+    ) : ChatTimelineItem
+}
+
+internal fun groupChatTimeline(items: List<ChatUiItem>): List<ChatTimelineItem> = buildList {
+    val pendingTools = mutableListOf<ChatUiItem.Tool>()
+    fun flushTools() {
+        if (pendingTools.isNotEmpty()) {
+            add(ChatTimelineItem.ToolGroup("tools:${pendingTools.first().id}", pendingTools.toList()))
+            pendingTools.clear()
         }
     }
+
+    items.forEach { item ->
+        if (item is ChatUiItem.Tool) {
+            pendingTools += item
+        } else {
+            flushTools()
+            add(ChatTimelineItem.Message(item))
+        }
+    }
+    flushTools()
+}
+
+@Composable
+private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>) {
+    var expanded by remember(tools.first().id) { mutableStateOf(false) }
+    val latest = tools.last()
+    val action = if (expanded) "Collapse tool activity" else "Expand tool activity"
+    val completed = tools.count { !it.running }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth(0.86f)
+            .semantics { contentDescription = action }
+            .clickable { expanded = !expanded },
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
+        border = BorderStroke(1.dp, if (latest.failed) T.Error.copy(alpha = 0.3f) else T.Tool.copy(alpha = 0.16f)),
+    ) {
+        Column {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier.size(22.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Tool.copy(alpha = 0.08f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Lucide.Terminal, null, tint = if (latest.failed) T.Error else T.Tool, modifier = Modifier.size(12.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Hermes activity", style = T.Label)
+                    Text(
+                        toolActivitySummary(tools),
+                        style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Spacer(Modifier.width(5.dp))
+                if (latest.running) CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
+                else Text("$completed/${tools.size}", style = T.MicroBold.copy(color = if (latest.failed) T.Error else T.Tool))
+                Icon(Lucide.ChevronDown, action, tint = T.Muted, modifier = Modifier.padding(start = 5.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    Modifier.fillMaxWidth().padding(start = 38.dp, end = 9.dp, bottom = 7.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    tools.forEach { tool -> ToolActivityRow(tool) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolActivityRow(item: ChatUiItem.Tool) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(compactToolSummary(item), style = T.MonoSmall.copy(color = T.TextSoft), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(6.dp))
+        Text(
+            if (item.running) "RUNNING" else if (item.failed) "FAILED" else "DONE",
+            style = T.MicroBold.copy(color = if (item.failed) T.Error else T.Tool),
+        )
+    }
+}
+
+internal fun toolActivitySummary(tools: List<ChatUiItem.Tool>): String {
+    val latest = tools.lastOrNull() ?: return "Working…"
+    val latestTool = latest.name.replace('_', ' ').replace('-', ' ')
+    return if (latest.running) "Working · $latestTool" else "${tools.size} tool step${if (tools.size == 1) "" else "s"} completed"
 }
 
 internal fun compactToolSummary(item: ChatUiItem.Tool): String {

@@ -413,6 +413,26 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `rename updates an active run session without interrupting it`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("keep working")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        viewModel.renameSession("s1", "Release follow-up")
+        advanceUntilIdle()
+
+        assertEquals("s1" to "Release follow-up", gateway.renames.single())
+        assertEquals("Release follow-up", viewModel.state.value.activeRun?.sessionTitle)
+        assertEquals("run-1", viewModel.state.value.activeRun?.runId)
+
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
     fun `approval card appears and responding posts the choice`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
         viewModel.selectSession("s1")
