@@ -98,6 +98,19 @@ class HermesHttpGatewayTest {
     }
 
     @Test
+    fun `listToolsets parses host tool metadata`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""
+            {"object":"list","data":[{"name":"terminal","label":"Terminal","description":"Run commands","enabled":true,"configured":true,"tools":["shell_command","read_thread_terminal"]}]}
+        """.trimIndent()))
+
+        val toolsets = gateway.listToolsets(profile)
+
+        assertEquals("/v1/toolsets", server.takeRequest().path)
+        assertEquals("Terminal", toolsets.single().label)
+        assertEquals(listOf("shell_command", "read_thread_terminal"), toolsets.single().tools)
+    }
+
+    @Test
     fun `listModels returns every unique model id advertised by the host`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
             {"object":"list","data":[

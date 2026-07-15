@@ -51,6 +51,24 @@ SKILLS = [
     {"name": "code-review", "description": "Review changes since a fixed point along Standards and Spec axes.", "category": None},
     {"name": "diagnosing-bugs", "description": "Diagnosis loop for hard bugs and performance regressions.", "category": None},
 ]
+TOOLSETS = [
+    {
+        "name": "terminal",
+        "label": "Terminal",
+        "description": "Run commands on the Hermes host.",
+        "enabled": True,
+        "configured": True,
+        "tools": ["shell_command", "read_thread_terminal"],
+    },
+    {
+        "name": "web",
+        "label": "Web research",
+        "description": "Search and inspect web pages.",
+        "enabled": True,
+        "configured": True,
+        "tools": ["web_search", "web_open"],
+    },
+]
 
 RUNS = {}  # run_id -> {status, session_id, input, approval_event, approval_choice, stopped}
 RUNS_LOCK = threading.Lock()
@@ -110,11 +128,14 @@ class Handler(BaseHTTPRequestHandler):
                     "run_approval_response": True,
                     "run_reasoning_effort": True,
                     "skills_api": True,
+                    "toolsets_api": True,
                     "jobs": True,
                 },
             })
         elif path == "/v1/skills":
             self._json(200, {"object": "list", "data": SKILLS})
+        elif path == "/v1/toolsets":
+            self._json(200, {"object": "list", "platform": "api_server", "data": TOOLSETS})
         elif path == "/v1/models":
             now = int(time.time())
             self._json(200, {"object": "list", "data": [

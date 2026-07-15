@@ -104,6 +104,16 @@ data class HermesSkill(
     val description: String?,
 )
 
+/** A host-configured group of tools. It may be backed by a plugin. */
+data class HermesToolset(
+    val name: String,
+    val label: String,
+    val description: String?,
+    val enabled: Boolean,
+    val configured: Boolean,
+    val tools: List<String>,
+)
+
 data class HermesRunStatus(
     val runId: String,
     val status: String,
@@ -152,6 +162,7 @@ interface HermesGateway {
     suspend fun setJobEnabled(host: HostProfile, jobId: String, enabled: Boolean)
     suspend fun runJob(host: HostProfile, jobId: String)
     suspend fun listSkills(host: HostProfile): List<HermesSkill>
+    suspend fun listToolsets(host: HostProfile): List<HermesToolset> = emptyList()
     suspend fun listModels(host: HostProfile): List<String>
     suspend fun submitRun(
         host: HostProfile,

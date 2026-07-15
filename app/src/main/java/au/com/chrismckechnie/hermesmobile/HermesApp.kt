@@ -851,22 +851,31 @@ internal sealed interface ChatTimelineItem {
 
 internal fun groupChatTimeline(items: List<ChatUiItem>): List<ChatTimelineItem> = buildList {
     val pendingTools = mutableListOf<ChatUiItem.Tool>()
-    fun flushTools() {
-        if (pendingTools.isNotEmpty()) {
-            add(ChatTimelineItem.ToolGroup("tools:${pendingTools.first().id}", pendingTools.toList()))
-            pendingTools.clear()
-        }
+    var toolGroupIndex: Int? = null
+    fun resetToolGroup() {
+        pendingTools.clear()
+        toolGroupIndex = null
     }
 
     items.forEach { item ->
-        if (item is ChatUiItem.Tool) {
-            pendingTools += item
-        } else {
-            flushTools()
-            add(ChatTimelineItem.Message(item))
+        when (item) {
+            is ChatUiItem.User -> {
+                resetToolGroup()
+                add(ChatTimelineItem.Message(item))
+            }
+            is ChatUiItem.Tool -> {
+                pendingTools += item
+                val index = toolGroupIndex
+                if (index == null) {
+                    toolGroupIndex = size
+                    add(ChatTimelineItem.ToolGroup("tools:${item.id}", pendingTools.toList()))
+                } else {
+                    this[index] = ChatTimelineItem.ToolGroup("tools:${pendingTools.first().id}", pendingTools.toList())
+                }
+            }
+            else -> add(ChatTimelineItem.Message(item))
         }
     }
-    flushTools()
 }
 
 @Composable
@@ -1363,6 +1372,7 @@ private fun JobCard(job: HermesJob, onToggle: () -> Unit, onRunNow: () -> Unit) 
 @Composable
 private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val host = state.activeHost
+    var libraryOpen by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 15.dp)) {
         ScreenHeading("Host", "Connection and capability status", Lucide.Server, "Manage hosts", viewModel::showHostPicker)
         if (host == null) {
@@ -1397,6 +1407,28 @@ private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
         HostStatusRow(Lucide.Wifi, "Hermes API", state.capabilities?.platform ?: "Waiting for capabilities", if (state.connectionPhase == HostConnectionPhase.Connected) "READY" else "OFFLINE", if (state.connectionPhase == HostConnectionPhase.Connected) T.Cream else T.Error)
         HostStatusRow(Lucide.ShieldCheck, "Authentication", "Bearer key stored with Android Keystore encryption", "SECURE", T.Cream)
         HostStatusRow(Lucide.Globe, "Transport", if (host.baseUrl.startsWith("https")) "HTTPS encrypted connection" else "Explicit private-network HTTP", if (host.baseUrl.startsWith("https")) "TLS" else "PRIVATE", if (host.baseUrl.startsWith("https")) T.Cream else T.Warn)
+        Text("SKILLS & TOOLS", style = T.Micro, modifier = Modifier.padding(top = 12.dp, bottom = 8.dp))
+        Surface(
+            color = T.SurfaceLow,
+            border = BorderStroke(1.dp, T.Line),
+            shape = RoundedCornerShape(T.RadiusCard),
+        ) {
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 58.dp).clickable { libraryOpen = true }.padding(horizontal = 13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Lucide.Terminal, null, tint = T.Tool, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Browse skills & tools", style = T.Label)
+                    Text(
+                        "${state.skills.size} skills · ${state.toolsets.count { it.enabled }} enabled toolsets",
+                        style = T.BodyMuted,
+                    )
+                }
+                Icon(Lucide.ChevronDown, "Browse skills and tools", tint = T.Muted, modifier = Modifier.size(16.dp).rotate(-90f))
+            }
+        }
         Text("DISCOVERED CAPABILITIES", style = T.Micro, modifier = Modifier.padding(top = 12.dp, bottom = 8.dp))
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             val features = state.capabilities?.features.orEmpty().ifEmpty { setOf("Waiting for host") }
@@ -1405,6 +1437,118 @@ private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
         Spacer(Modifier.height(16.dp))
         PrimaryButton("Choose or manage hosts", Lucide.Server, viewModel::showHostPicker)
         Spacer(Modifier.height(16.dp))
+    }
+    if (libraryOpen) {
+        SkillsAndToolsSheet(
+            state = state,
+            onDismiss = { libraryOpen = false },
+            onUseSkill = { name ->
+                viewModel.startSkill(name)
+                libraryOpen = false
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SkillsAndToolsSheet(
+    state: HermesUiState,
+    onDismiss: () -> Unit,
+    onUseSkill: (String) -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = T.SurfaceLow,
+        scrimColor = T.Scrim,
+        dragHandle = { Box(Modifier.padding(top = 9.dp, bottom = 4.dp).size(width = 38.dp, height = 4.dp).clip(CircleShape).background(T.LineStrong)) },
+    ) {
+        Column(
+            Modifier.fillMaxWidth().heightIn(max = 640.dp).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Skills & tools", style = T.SheetTitle)
+            Text("Available on ${state.activeHost?.name ?: "this host"}", style = T.BodyMuted)
+
+            Text("SKILLS", style = T.Micro, modifier = Modifier.padding(top = 8.dp))
+            if (state.skills.isEmpty()) {
+                Text("This host has not exposed any selectable skills.", style = T.BodyMuted)
+            } else {
+                state.skills.sortedBy(HermesSkill::name).forEach { skill ->
+                    SkillLibraryRow(skill, onUseSkill)
+                }
+            }
+
+            Text("TOOLS & PLUGINS", style = T.Micro, modifier = Modifier.padding(top = 10.dp))
+            Text(
+                "Host toolsets, including ones contributed by plugins, are listed here. Expand one to see the concrete tools Hermes can use.",
+                style = T.BodyMuted,
+            )
+            if (state.toolsets.isEmpty()) {
+                Text("This host does not expose a toolset catalog.", style = T.BodyMuted)
+            } else {
+                state.toolsets.sortedBy(HermesToolset::label).forEach { toolset ->
+                    ToolsetLibraryCard(toolset)
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun SkillLibraryRow(skill: HermesSkill, onUseSkill: (String) -> Unit) {
+    Surface(color = T.SurfaceOne, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 58.dp).padding(start = 13.dp, end = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(skill.name, style = T.Label)
+                Text(skill.description ?: "Host skill", style = T.BodyMuted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
+            }
+            TextButton(onClick = { onUseSkill(skill.name) }, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text("Use", style = T.MicroBold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolsetLibraryCard(toolset: HermesToolset) {
+    var expanded by remember(toolset.name) { mutableStateOf(false) }
+    val status = when {
+        toolset.enabled -> "ENABLED"
+        toolset.configured -> "CONFIGURED"
+        else -> "OFF"
+    }
+    val statusColor = when {
+        toolset.enabled -> T.Ok
+        toolset.configured -> T.Warn
+        else -> T.Muted
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
+        colors = CardDefaults.cardColors(containerColor = T.SurfaceOne),
+        border = BorderStroke(1.dp, if (toolset.enabled) T.Tool.copy(alpha = 0.2f) else T.Line),
+        shape = RoundedCornerShape(T.RadiusCard),
+    ) {
+        Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(toolset.label, style = T.Label)
+                    Text(toolset.description ?: "Host toolset", style = T.BodyMuted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
+                }
+                Text(status, style = T.MicroBold.copy(color = statusColor))
+                Icon(Lucide.ChevronDown, if (expanded) "Collapse tools" else "Expand tools", tint = T.Muted, modifier = Modifier.padding(start = 7.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
+            }
+            Text("${toolset.tools.size} exposed tool${if (toolset.tools.size == 1) "" else "s"}", style = T.Micro.copy(letterSpacing = 0.sp), modifier = Modifier.padding(top = 7.dp))
+            AnimatedVisibility(visible = expanded) {
+                Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    if (toolset.tools.isEmpty()) Text("No tools reported by the host.", style = T.BodyMuted)
+                    else toolset.tools.sorted().forEach { tool -> Text(tool, style = T.MonoSmall.copy(color = T.TextSoft)) }
+                }
+            }
+        }
     }
 }
 

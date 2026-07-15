@@ -223,6 +223,7 @@ data class HermesUiState(
     val messages: List<ChatUiItem> = emptyList(),
     val jobs: List<HermesJob> = emptyList(),
     val skills: List<HermesSkill> = emptyList(),
+    val toolsets: List<HermesToolset> = emptyList(),
     val models: List<String> = emptyList(),
     val modelSelections: Map<SessionKey, String> = emptyMap(),
     val reasoningSelections: Map<SessionKey, String> = emptyMap(),
@@ -518,6 +519,7 @@ class HermesViewModel(
                 messages = emptyList(),
                 jobs = emptyList(),
                 skills = emptyList(),
+                toolsets = emptyList(),
                 models = emptyList(),
                 errorMessage = null,
             )
@@ -568,6 +570,7 @@ class HermesViewModel(
                     messages = emptyList(),
                     jobs = emptyList(),
                     skills = emptyList(),
+                    toolsets = emptyList(),
                     models = emptyList(),
                     notificationHostIds = notificationHostIds,
                     overlayEnabled = state.overlayEnabled && notificationHostIds.isNotEmpty(),
@@ -1049,6 +1052,13 @@ class HermesViewModel(
         }
     }
 
+    fun startSkill(name: String) {
+        if (name !in mutableState.value.skills.map(HermesSkill::name)) return
+        mutableState.update { state ->
+            state.withDraft(state.activeSessionKey, "Use the $name skill: ").copy(screen = DeckScreen.Chat)
+        }
+    }
+
     fun respondApproval(choice: String) {
         val run = mutableState.value.activeRun ?: return
         val key = run.key()
@@ -1268,10 +1278,12 @@ class HermesViewModel(
                         if (capabilities.supportsSkills) runCatching { gateway.listSkills(host) }.getOrDefault(emptyList())
                         else emptyList()
                     }
+                    val toolsetsDeferred = async { runCatching { gateway.listToolsets(host) }.getOrDefault(emptyList()) }
                     val modelsDeferred = async { runCatching { gateway.listModels(host) }.getOrDefault(emptyList()) }
-                    Triple(sessionsDeferred.await(), jobsDeferred.await(), skillsDeferred.await() to modelsDeferred.await())
+                    Triple(sessionsDeferred.await(), jobsDeferred.await(), skillsDeferred.await() to (toolsetsDeferred.await() to modelsDeferred.await()))
                 }
-                val (skills, models) = extras
+                val (skills, toolsetsAndModels) = extras
+                val (toolsets, models) = toolsetsAndModels
                 val activeSessions = runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList())
                 if (mutableState.value.activeHostId != hostId) return@launch
                 mutableState.update {
@@ -1283,6 +1295,7 @@ class HermesViewModel(
                         activeHostSessions = activeSessions.associateBy(HermesActiveSession::sessionId),
                         jobs = jobs,
                         skills = skills,
+                        toolsets = toolsets,
                         models = models,
                         modelSelections = it.modelSelections.filter { (key, model) -> key.hostId != hostId || model in models },
                         activeSessionId = it.activeSessionId?.takeIf { id -> sessionPage.sessions.any { session -> session.id == id } },

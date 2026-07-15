@@ -123,6 +123,20 @@ class HermesHttpGateway(
         }.filter { it.name.isNotBlank() }
     }
 
+    override suspend fun listToolsets(host: HostProfile): List<HermesToolset> = withContext(Dispatchers.IO) {
+        val data = executeJson(host, request(host, listOf("v1", "toolsets")))
+        data.optJSONArray("data").toObjectList { json ->
+            HermesToolset(
+                name = json.optString("name"),
+                label = json.optString("label").ifBlank { json.optString("name") },
+                description = json.optNullableString("description"),
+                enabled = json.optBoolean("enabled", false),
+                configured = json.optBoolean("configured", false),
+                tools = json.optJSONArray("tools").toStringList(),
+            )
+        }.filter { it.name.isNotBlank() }
+    }
+
     override suspend fun listModels(host: HostProfile): List<String> = withContext(Dispatchers.IO) {
         val data = executeJson(host, request(host, listOf("v1", "models")))
         data.optJSONArray("data").toObjectList { json -> json.optString("id") }
@@ -386,6 +400,13 @@ private inline fun <T> JSONArray?.toObjectList(transform: (JSONObject) -> T): Li
             val row = optJSONObject(index) ?: continue
             runCatching { transform(row) }.getOrNull()?.let(::add)
         }
+    }
+}
+
+private fun JSONArray?.toStringList(): List<String> = buildList {
+    this@toStringList ?: return@buildList
+    for (index in 0 until length()) {
+        optString(index).takeIf { it.isNotBlank() }?.let(::add)
     }
 }
 

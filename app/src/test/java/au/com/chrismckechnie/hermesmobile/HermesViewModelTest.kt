@@ -35,6 +35,7 @@ private class FakeGateway : HermesGateway {
     )
     val resolvedIds = mutableMapOf<String, String>()
     var skills = listOf(HermesSkill("grill-me", "A relentless interview"))
+    var toolsets = listOf(HermesToolset("terminal", "Terminal", "Run commands", enabled = true, configured = true, tools = listOf("shell_command")))
     var models = listOf("hermes-agent", "hermes-fast", "gpt-5.6-terra")
     var activeSessions = emptyList<HermesActiveSession>()
     private val eventStreams = mutableMapOf<String, Channel<HermesRunEvent>>()
@@ -77,6 +78,7 @@ private class FakeGateway : HermesGateway {
     override suspend fun setJobEnabled(host: HostProfile, jobId: String, enabled: Boolean) = Unit
     override suspend fun runJob(host: HostProfile, jobId: String) = Unit
     override suspend fun listSkills(host: HostProfile) = skills
+    override suspend fun listToolsets(host: HostProfile) = toolsets
     override suspend fun listModels(host: HostProfile) = models
     override suspend fun listActiveSessions(host: HostProfile) = activeSessions
 
@@ -207,7 +209,19 @@ class HermesViewModelTest {
         assertTrue(state.capabilities!!.supportsRuns)
         assertEquals(listOf("s1"), state.sessions.map { it.id })
         assertEquals(listOf("grill-me"), state.skills.map { it.name })
+        assertEquals(listOf("terminal"), state.toolsets.map { it.name })
         assertEquals(listOf("hermes-agent", "hermes-fast", "gpt-5.6-terra"), state.models)
+    }
+
+    @Test
+    fun `starting a skill opens chat with a prepared skill prompt`() = runVmTest {
+        val (viewModel, _) = buildViewModel()
+        viewModel.selectScreen(DeckScreen.Host)
+
+        viewModel.startSkill("grill-me")
+
+        assertEquals(DeckScreen.Chat, viewModel.state.value.screen)
+        assertEquals("Use the grill-me skill: ", viewModel.state.value.composerText)
     }
 
     @Test
