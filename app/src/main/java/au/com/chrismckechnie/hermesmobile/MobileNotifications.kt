@@ -15,6 +15,7 @@ import android.os.Build
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.Person as PersonCompat
 import androidx.core.graphics.drawable.IconCompat
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
@@ -143,7 +144,18 @@ class HermesNotificationCoordinator(private val context: Context) {
             .setAutoCancel(event.isTerminal)
             .setOnlyAlertOnce(event.event == "session.started")
             .setContentIntent(contentPending)
-        if (!isJob) builder.setShortcutId(shortcutId(event))
+        if (!isJob) {
+            val hermes = PersonCompat.Builder().setName("Hermes").setKey("hermes-agent").setBot(true).build()
+            val localUser = PersonCompat.Builder().setName("You").build()
+            builder
+                .setShortcutId(shortcutId(event))
+                .setStyle(
+                    NotificationCompat.MessagingStyle(localUser)
+                        .setConversationTitle(event.title)
+                        .setGroupConversation(true)
+                        .addMessage(status, System.currentTimeMillis(), hermes)
+                )
+        }
 
         if (!isJob && Build.VERSION.SDK_INT >= 29) {
             publishShortcut(event)

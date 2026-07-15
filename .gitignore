@@ -2,6 +2,7 @@
 .gradle/
 .tools/
 .idea/
+.omc/
 local.properties
 app/google-services.json
 /build/

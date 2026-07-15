@@ -127,6 +127,7 @@ import com.composables.icons.lucide.Terminal
 import com.composables.icons.lucide.Trash2
 import com.composables.icons.lucide.Wifi
 import com.composables.icons.lucide.X
+import com.google.firebase.FirebaseApp
 
 private val T: HermesPalette
     @Composable get() = LocalHermes.current
@@ -1110,6 +1111,8 @@ private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
 @Composable
 private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
     var showLicenses by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val firebaseConfigured = remember(context) { FirebaseApp.getApps(context).isNotEmpty() }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 15.dp)) {
         ScreenHeading("Settings", "Appearance and app options")
         Text("APPEARANCE", style = T.Micro, modifier = Modifier.padding(bottom = 8.dp))
@@ -1163,6 +1166,13 @@ private fun SettingsScreen(state: HermesUiState, viewModel: HermesViewModel) {
             }
         }
         Text("NOTIFICATIONS", style = T.Micro, modifier = Modifier.padding(top = 14.dp, bottom = 8.dp))
+        if (!firebaseConfigured) {
+            Text(
+                "Push notifications and Android Bubbles require a Firebase-configured APK. The active-session overlay can still run locally.",
+                style = T.BodyMuted,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+        }
         Surface(color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 13.dp, vertical = 5.dp)) {
                 state.hosts.forEach { host ->

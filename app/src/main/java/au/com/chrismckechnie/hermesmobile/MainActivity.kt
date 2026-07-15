@@ -39,7 +39,7 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             val state by viewModel.state.collectAsStateWithLifecycle()
-            LaunchedEffect(state.notificationHostIds, state.overlayEnabled) {
+            LaunchedEffect(state.notificationHostIds, state.overlayEnabled, state.activeRun?.runId) {
                 configureMobileBackground(state)
             }
             HermesMobileApp(state = state, viewModel = viewModel)
