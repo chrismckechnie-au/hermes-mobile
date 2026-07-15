@@ -301,6 +301,97 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `desktop-reported active sessions remain visible without mobile run registry`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            sessions.clear()
+            sessions += HermesSession("recent", "Recent", null, "desktop", null, "1800000000", 1)
+            sessions += HermesSession("desktop-running", "Desktop work", null, "desktop", null, "1700000000", 1, isActive = true)
+        }
+        val (viewModel, _) = buildViewModel(gateway = gateway)
+
+        val state = viewModel.state.value
+        val desktopSession = state.sessions.single { it.id == "desktop-running" }
+        assertEquals(listOf("desktop-running", "recent"), state.orderedSessions.map { it.id })
+        assertEquals("working", state.activityFor(desktopSession)?.state)
+        assertTrue(state.isSessionBusy("h1", "desktop-running"))
+    }
+
+    @Test
+    fun `new chats receive a request-derived title`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+
+        viewModel.setComposerText("  Investigate\n the active desktop session list  ")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals("Investigate the active desktop session list", gateway.created.single().title)
+        assertEquals("Investigate the active desktop session list", viewModel.state.value.activeSession?.title)
+
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `empty default sessions are titled from their first request`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.createSession()
+        advanceUntilIdle()
+
+        viewModel.setComposerText("Make the session list show desktop work")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf("new-0" to "Make the session list show desktop work"),
+            gateway.renames,
+        )
+        assertEquals("Make the session list show desktop work", viewModel.state.value.activeSession?.title)
+
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `run work updates retain tasks and merge subagent context`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("Coordinate the release")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        gateway.events.send(
+            HermesRunEvent.TasksUpdated(
+                listOf(
+                    HermesTask("plan", "Plan the release", "completed"),
+                    HermesTask("ship", "Ship the release", "in_progress"),
+                ),
+            ),
+        )
+        gateway.events.send(
+            HermesRunEvent.SubagentUpdated(
+                HermesSubagent("subagent-1", "running", 0, 2, goal = "Inspect the API"),
+            ),
+        )
+        gateway.events.send(
+            HermesRunEvent.SubagentUpdated(
+                HermesSubagent("subagent-1", "working", 0, 2, toolCount = 2, activity = "Reading run events"),
+            ),
+        )
+        advanceUntilIdle()
+
+        val run = viewModel.state.value.activeRun
+        assertEquals("1 / 2 tasks", taskProgressLabel(run?.tasks.orEmpty()))
+        assertEquals("Inspect the API", run?.subagents?.get("subagent-1")?.goal)
+        assertEquals("Reading run events", run?.subagents?.get("subagent-1")?.activity)
+        assertEquals(2, run?.subagents?.get("subagent-1")?.toolCount)
+
+        gateway.events.send(HermesRunEvent.Cancelled)
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
     fun `send drives a run to completion without duplicating the user message`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
         viewModel.selectSession("s1")

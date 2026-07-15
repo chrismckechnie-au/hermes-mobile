@@ -62,6 +62,8 @@ data class HermesCapabilities(
     val supportsReasoningEffort: Boolean get() = "run_reasoning_effort" in features
     val supportsSessionEdit: Boolean get() = "session_resources" in features
     val supportsSessionFork: Boolean get() = "session_fork" in features
+    val supportsRunTaskUpdates: Boolean get() = "run_task_updates" in features
+    val supportsRunSubagentUpdates: Boolean get() = "run_subagent_updates" in features
     /** The host explicitly opts in before mobile exposes a remote updater. */
     val supportsHostUpdate: Boolean get() = "host_update_api" in features
 }
@@ -89,6 +91,8 @@ data class HermesSession(
     val model: String?,
     val lastActive: String?,
     val messageCount: Int?,
+    /** Mirrors the desktop session list's recent unfinished-work indicator. */
+    val isActive: Boolean = false,
 )
 
 data class HermesMessage(
@@ -187,6 +191,30 @@ data class HermesActiveSession(
     val surface: String,
 )
 
+/** A bounded, host-approved todo item for the active Run. */
+data class HermesTask(
+    val id: String,
+    val content: String,
+    val status: String,
+) {
+    val isComplete: Boolean get() = status == "completed"
+}
+
+/** A bounded, host-approved delegated-work status for the active Run. */
+data class HermesSubagent(
+    val id: String,
+    val status: String,
+    val taskIndex: Int = 0,
+    val taskCount: Int = 0,
+    val toolCount: Int = 0,
+    val goal: String? = null,
+    val activity: String? = null,
+) {
+    val isWorking: Boolean get() = status in ACTIVE_SUBAGENT_STATUSES
+}
+
+private val ACTIVE_SUBAGENT_STATUSES = setOf("running", "working", "thinking")
+
 /** Events on `GET /v1/runs/{run_id}/events` — data-only SSE, name in the JSON `event` field. */
 sealed interface HermesRunEvent {
     data class MessageDelta(val delta: String) : HermesRunEvent
@@ -194,6 +222,8 @@ sealed interface HermesRunEvent {
     data class ReasoningAvailable(val text: String) : HermesRunEvent
     data class ToolStarted(val tool: String, val preview: String?) : HermesRunEvent
     data class ToolCompleted(val tool: String, val failed: Boolean) : HermesRunEvent
+    data class TasksUpdated(val tasks: List<HermesTask>) : HermesRunEvent
+    data class SubagentUpdated(val subagent: HermesSubagent) : HermesRunEvent
     data class ApprovalRequested(val command: String?) : HermesRunEvent
     data class ApprovalResponded(val choice: String?) : HermesRunEvent
     data class Completed(val output: String, val usage: HermesRunUsage? = null) : HermesRunEvent

@@ -18,7 +18,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - API keys encrypted at rest with Android Keystore (AES-GCM); unlock failures surface a notice instead of silently wiping hosts
 - Capability discovery, host-version display, and authenticated connection status
 - Capability-gated Hermes host update checks and confirmed remote updates when the host explicitly exposes the update API
-- Session listing with pagination (`has_more`), pull-to-refresh, creation, direct chat-header rename, delete, history loading, and selection
+- Session listing with pagination (`has_more`), pull-to-refresh, request-derived titles for new chats, direct chat-header rename, delete, history loading, and selection
 - On-device session search across loaded titles, previews, sources, and models, plus explicit Android sharing of user/assistant transcripts without tool previews or progress details
 - Host model discovery with per-run model and reasoning-effort selection from the Chat model sheet
 - Independent streaming runs per host/session, with stop/cancel, follow-up messages that interrupt and replace the current run, multi-run process-death recovery, and unknown-submit protection
@@ -31,6 +31,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - Compact input, output, and total token usage beneath a completed reply when the Hermes host reports terminal Run usage
 - Tool-run approval cards (`approval.request` → approve/deny via `POST /v1/runs/{id}/approval`)
 - Compact ongoing work notification and a draggable edge icon that opens an attached session panel with latest safe activity; it hides while Hermes Mobile is open, restores when the app backgrounds, shows a count for updates to review, and can be dropped onto a close target to hide it until the next run
+- Optional host-provided task-plan and delegated-subagent pills above an active chat, each opening a compact live status drawer; desktop-active session rows remain visibly running even without a mobile-run registry entry
 - Scheduled job listing with pause/resume and run-now
 - Connected, connecting, empty, authentication-error, network-error, and retry states
 

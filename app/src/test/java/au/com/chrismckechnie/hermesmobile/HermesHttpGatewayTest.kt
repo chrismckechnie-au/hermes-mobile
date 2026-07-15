@@ -126,7 +126,7 @@ class HermesHttpGatewayTest {
     @Test
     fun `lists sessions including children`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
-            {"object":"list","data":[{"id":"session-1","title":"Mobile work","source":"api_server","model":"hermes-agent","last_active":1720000000}]}
+            {"object":"list","data":[{"id":"session-1","title":"Mobile work","source":"api_server","model":"hermes-agent","last_active":1720000000,"is_active":true}]}
         """.trimIndent()))
 
         val sessions = gateway.listSessions(profile)
@@ -135,6 +135,7 @@ class HermesHttpGatewayTest {
         assertTrue(request.path!!.contains("include_children=true"))
         assertEquals(1, sessions.sessions.size)
         assertEquals("session-1", sessions.sessions.single().id)
+        assertTrue(sessions.sessions.single().isActive)
     }
 
     @Test
@@ -251,6 +252,10 @@ class HermesHttpGatewayTest {
 
             data: {"event":"tool.completed","run_id":"run-1","timestamp":1.4,"tool":"terminal","duration":0.2,"error":true}
 
+            data: {"event":"tasks.updated","run_id":"run-1","timestamp":1.45,"tasks":[{"id":"plan","content":"Plan the release","status":"completed"},{"id":"ship","content":"Ship the release","status":"in_progress"}]}
+
+            data: {"event":"subagent.updated","run_id":"run-1","timestamp":1.46,"subagent":{"id":"subagent-1","status":"working","task_index":0,"task_count":2,"tool_count":3,"goal":"Inspect the API","activity":"Reading the run events"}}
+
             data: {"event":"approval.request","run_id":"run-1","timestamp":1.5,"command":"rm -rf x","choices":["once","session","always","deny"]}
 
             data: {"event":"approval.responded","run_id":"run-1","timestamp":1.6,"choice":"once","resolved":1}
@@ -274,12 +279,20 @@ class HermesHttpGatewayTest {
         assertTrue(events.any { it is HermesRunEvent.ToolStarted && it.tool == "terminal" && it.preview == "ls" })
         assertTrue(events.any { it is HermesRunEvent.ReasoningAvailable && it.text == "thinking" })
         assertTrue(events.any { it is HermesRunEvent.ToolCompleted && it.failed })
+        assertEquals(
+            listOf(HermesTask("plan", "Plan the release", "completed"), HermesTask("ship", "Ship the release", "in_progress")),
+            events.filterIsInstance<HermesRunEvent.TasksUpdated>().single().tasks,
+        )
+        assertEquals(
+            HermesSubagent("subagent-1", "working", 0, 2, 3, "Inspect the API", "Reading the run events"),
+            events.filterIsInstance<HermesRunEvent.SubagentUpdated>().single().subagent,
+        )
         assertTrue(events.any { it is HermesRunEvent.ApprovalRequested && it.command == "rm -rf x" })
         assertTrue(events.any { it is HermesRunEvent.ApprovalResponded && it.choice == "once" })
         val completed = events.filterIsInstance<HermesRunEvent.Completed>().single()
         assertEquals("Hello", completed.output)
         assertEquals(HermesRunUsage(inputTokens = 1, outputTokens = 2, totalTokens = 3), completed.usage)
-        assertEquals(8, events.size)
+        assertEquals(10, events.size)
     }
 
     @Test

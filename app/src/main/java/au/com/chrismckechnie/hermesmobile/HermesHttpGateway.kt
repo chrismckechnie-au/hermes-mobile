@@ -256,6 +256,12 @@ class HermesHttpGateway(
             payload.optNullableString("tool") ?: "tool",
             failed = payload.optBoolean("error", false),
         )
+        "tasks.updated" -> HermesRunEvent.TasksUpdated(
+            payload.optJSONArray("tasks").toObjectList(::parseTask).filterNotNull(),
+        )
+        "subagent.updated" -> payload.optJSONObject("subagent")
+            ?.let(::parseSubagent)
+            ?.let(HermesRunEvent::SubagentUpdated)
         "approval.request" -> HermesRunEvent.ApprovalRequested(payload.optNullableString("command"))
         "approval.responded" -> HermesRunEvent.ApprovalResponded(payload.optNullableString("choice"))
         "run.completed" -> HermesRunEvent.Completed(
@@ -416,6 +422,7 @@ class HermesHttpGateway(
         model = json.optNullableString("model"),
         lastActive = json.optNullableString("last_active"),
         messageCount = json.optInt("message_count").takeIf { json.has("message_count") && !json.isNull("message_count") },
+        isActive = json.optBoolean("is_active", false),
     )
 
     private fun parseMessage(json: JSONObject) = HermesMessage(
@@ -426,11 +433,38 @@ class HermesHttpGateway(
         timestamp = json.optNullableString("timestamp"),
     )
 
+    private fun parseTask(json: JSONObject): HermesTask? {
+        val id = json.optNullableString("id")?.trim()?.take(120) ?: return null
+        val content = json.optNullableString("content")?.trim()?.take(240) ?: return null
+        val status = json.optString("status", "pending").trim().lowercase()
+        if (id.isBlank() || content.isBlank() || status !in TASK_STATUSES) return null
+        return HermesTask(id = id, content = content, status = status)
+    }
+
+    private fun parseSubagent(json: JSONObject): HermesSubagent? {
+        val id = json.optNullableString("id")?.trim()?.take(120) ?: return null
+        val status = json.optString("status", "working").trim().lowercase()
+        if (id.isBlank() || status !in SUBAGENT_STATUSES) return null
+        return HermesSubagent(
+            id = id,
+            status = status,
+            taskIndex = json.optInt("task_index", 0).coerceAtLeast(0),
+            taskCount = json.optInt("task_count", 0).coerceAtLeast(0),
+            toolCount = json.optInt("tool_count", 0).coerceAtLeast(0),
+            goal = json.optNullableString("goal")?.trim()?.take(240),
+            activity = json.optNullableString("activity")?.trim()?.take(240),
+        )
+    }
+
     private companion object {
         const val CONNECT_TIMEOUT_SECONDS = 8L
         const val ORDINARY_READ_TIMEOUT_SECONDS = 30L
         const val WRITE_TIMEOUT_SECONDS = 20L
         const val ORDINARY_CALL_TIMEOUT_SECONDS = 45L
+        val TASK_STATUSES = setOf("pending", "in_progress", "completed", "cancelled")
+        val SUBAGENT_STATUSES = setOf(
+            "running", "working", "thinking", "completed", "failed", "timeout", "interrupted", "error",
+        )
 
         fun defaultOrdinaryClient(): OkHttpClient = secureClientBuilder()
             .readTimeout(ORDINARY_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)

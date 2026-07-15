@@ -59,11 +59,31 @@ be assumed solely because a host is reachable.
 | Host self-update | `host_update_api` | `GET`/`POST /v1/host-update` | Not implemented |
 | Scheduled-job administration | No stable stock flag | `/api/jobs...` | Not implemented in the stable API server |
 | Complete model inventory | No stock flag | Extended `/v1/models` contract | Not implemented |
+| Live task plan | `run_task_updates` | `tasks.updated` Run SSE event | Not implemented |
+| Live delegated-work status | `run_subagent_updates` | `subagent.updated` Run SSE event | Not implemented |
+| Desktop active marker | `is_active` session field | `GET /api/sessions` rows | Not implemented |
 
 An absent optional flag means “unsupported”, not “empty”. If a host advertises
 an optional read-only endpoint, the checker probes it. Device registration,
 updates, approvals, stops, pairing, and all other writes are intentionally
 never sent by the checker.
+
+Hosts that implement the live-work extensions may emit the following bounded,
+safe Run events. They are summaries for the user interface, not private model
+reasoning or raw tool output:
+
+```json
+{"event":"tasks.updated","tasks":[{"id":"plan","content":"Plan the work","status":"in_progress"}]}
+{"event":"subagent.updated","subagent":{"id":"agent-1","status":"working","task_index":0,"task_count":2,"tool_count":1,"goal":"Inspect the API","activity":"Reading run events"}}
+```
+
+Task status is one of `pending`, `in_progress`, `completed`, or `cancelled`.
+Subagent status is one of `running`, `working`, `thinking`, `completed`,
+`failed`, `timeout`, `interrupted`, or `error`. The optional `activity` field
+must remain absent unless the host has independently approved that progress for
+the connected API surface. A session list row may set `is_active: true` when
+the same desktop-visible session has recent unfinished work; mobile uses this
+as a fallback when its mobile-run registry has no matching entry.
 
 ## Proposed `hermes.mobile` 1.0 extension
 

@@ -344,7 +344,11 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val canRenameSession = activeSession != null && state.capabilities?.supportsSessionEdit == true
     var renameOpen by remember(activeSession?.id) { mutableStateOf(false) }
     var renameText by remember(activeSession?.id) { mutableStateOf(activeSession?.title.orEmpty()) }
+    var taskDrawerOpen by remember(activeSession?.id) { mutableStateOf(false) }
+    var subagentDrawerOpen by remember(activeSession?.id) { mutableStateOf(false) }
     val displayedMessages = state.displayedMessages
+    val tasks = state.activeRun?.tasks.orEmpty()
+    val workingSubagents = state.activeRun?.subagents?.values?.filter(HermesSubagent::isWorking).orEmpty()
     val transcript = remember(activeSession?.id, displayedMessages) {
         activeSession?.let { session ->
             formatSessionTranscript(session.title, displayedMessages)
@@ -407,6 +411,13 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.Cream.copy(alpha = 0.07f)),
             ) { Icon(Lucide.Plus, "New session", tint = if (state.connectionPhase == HostConnectionPhase.Connected) T.Cream else T.Muted) }
         }
+
+        LiveWorkPills(
+            tasks = tasks,
+            subagents = workingSubagents,
+            onShowTasks = { taskDrawerOpen = true },
+            onShowSubagents = { subagentDrawerOpen = true },
+        )
 
         if (displayedMessages.isEmpty()) {
             EmptyConversation(state, Modifier.weight(1f))
@@ -486,6 +497,150 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 TextButton(onClick = { renameOpen = false }) { Text("Cancel", style = T.BodyMuted.copy(fontSize = 13.sp)) }
             },
         )
+    }
+
+    if (taskDrawerOpen && tasks.isNotEmpty()) {
+        TaskPlanSheet(tasks = tasks, onDismiss = { taskDrawerOpen = false })
+    }
+    if (subagentDrawerOpen && workingSubagents.isNotEmpty()) {
+        SubagentSheet(subagents = workingSubagents, onDismiss = { subagentDrawerOpen = false })
+    }
+}
+
+@Composable
+private fun LiveWorkPills(
+    tasks: List<HermesTask>,
+    subagents: List<HermesSubagent>,
+    onShowTasks: () -> Unit,
+    onShowSubagents: () -> Unit,
+) {
+    if (tasks.isEmpty() && subagents.isEmpty()) return
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (tasks.isNotEmpty()) {
+            WorkPill(
+                icon = Lucide.ScrollText,
+                label = taskProgressLabel(tasks),
+                contentDescription = "Show task plan, ${taskProgressLabel(tasks)}",
+                onClick = onShowTasks,
+            )
+        }
+        if (subagents.isNotEmpty()) {
+            val label = "${subagents.size} subagent${if (subagents.size == 1) "" else "s"} working"
+            WorkPill(
+                icon = Lucide.MessageCircle,
+                label = label,
+                contentDescription = "Show working subagents, $label",
+                onClick = onShowSubagents,
+            )
+        }
+    }
+}
+
+@Composable
+private fun WorkPill(
+    icon: ImageVector,
+    label: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .heightIn(min = 36.dp)
+            .clip(CircleShape)
+            .background(T.Cream.copy(alpha = 0.09f))
+            .border(1.dp, T.Cream.copy(alpha = 0.18f), CircleShape)
+            .clickable(onClickLabel = contentDescription, onClick = onClick)
+            .semantics(mergeDescendants = true) { this.contentDescription = contentDescription }
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = T.Tool, modifier = Modifier.size(15.dp))
+        Spacer(Modifier.width(7.dp))
+        Text(label, style = T.MicroBold.copy(letterSpacing = 0.sp))
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TaskPlanSheet(tasks: List<HermesTask>, onDismiss: () -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = T.SurfaceLow,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
+            Text("Task plan", style = T.ScreenTitle)
+            Text(taskProgressLabel(tasks), style = T.BodyMuted, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
+            tasks.forEach { task ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 9.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    val icon = when (task.status) {
+                        "completed" -> Lucide.CircleCheck
+                        "cancelled" -> Lucide.X
+                        else -> Lucide.RefreshCw
+                    }
+                    val tint = when (task.status) {
+                        "completed" -> T.Ok
+                        "cancelled" -> T.Muted
+                        else -> T.Tool
+                    }
+                    Icon(icon, null, tint = tint, modifier = Modifier.size(17.dp).padding(top = 2.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(task.content, style = T.Body)
+                        Text(task.status.replace('_', ' ').uppercase(), style = T.Micro.copy(color = tint, letterSpacing = 0.5.sp), modifier = Modifier.padding(top = 3.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SubagentSheet(subagents: List<HermesSubagent>, onDismiss: () -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = T.SurfaceLow,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 28.dp)) {
+            Text("Working subagents", style = T.ScreenTitle)
+            Text("Live delegated work from this run", style = T.BodyMuted, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
+            subagents.sortedBy(HermesSubagent::taskIndex).forEach { subagent ->
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    colors = CardDefaults.cardColors(containerColor = T.Cream.copy(alpha = 0.055f)),
+                    border = BorderStroke(1.dp, T.Line),
+                    shape = RoundedCornerShape(T.RadiusCard),
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text(
+                            if (subagent.taskCount > 1) "Subagent ${subagent.taskIndex + 1} of ${subagent.taskCount}" else "Subagent",
+                            style = T.MicroBold.copy(color = T.Tool),
+                        )
+                        Text(subagent.goal ?: "Working on a delegated task", style = T.Label, modifier = Modifier.padding(top = 4.dp))
+                        subagent.activity?.takeIf(String::isNotBlank)?.let { activity ->
+                            Text(activity, style = T.BodyMuted, modifier = Modifier.padding(top = 5.dp))
+                        }
+                        Text(
+                            buildString {
+                                append(subagent.status.replace('_', ' ').uppercase())
+                                if (subagent.toolCount > 0) append(" · ${subagent.toolCount} tools")
+                            },
+                            style = T.Micro.copy(color = T.Muted, letterSpacing = 0.5.sp),
+                            modifier = Modifier.padding(top = 7.dp),
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 

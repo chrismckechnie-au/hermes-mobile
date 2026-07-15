@@ -168,6 +168,28 @@ internal fun filterSessions(
     }
 }
 
+/** Derives a local, deterministic session label without sending extra request content to the host. */
+internal fun automaticSessionTitle(input: String): String {
+    val normalized = input.trim().replace(Regex("\\s+"), " ")
+    if (normalized.isBlank()) return "New conversation"
+    val maxLength = 56
+    return if (normalized.length <= maxLength) normalized
+    else normalized.take(maxLength - 1).trimEnd() + "…"
+}
+
+internal fun taskProgressLabel(tasks: List<HermesTask>): String =
+    "${tasks.count(HermesTask::isComplete)} / ${tasks.size} tasks"
+
+private fun isAutomaticUntitledSessionTitle(title: String?): Boolean =
+    title.isNullOrBlank() || title.trim().lowercase() in setOf(
+        "hermes mobile",
+        "hermes session",
+        "new conversation",
+        "new session",
+        "untitled",
+        "untitled session",
+    )
+
 internal fun sessionActivityMillis(value: String?): Long {
     val raw = value?.trim().orEmpty()
     if (raw.isBlank()) return Long.MIN_VALUE
@@ -233,6 +255,8 @@ data class ActiveRun(
     val sessionTitle: String?,
     val runId: String,
     val tail: List<ChatUiItem> = emptyList(),
+    val tasks: List<HermesTask> = emptyList(),
+    val subagents: Map<String, HermesSubagent> = emptyMap(),
     val assistantId: String = "",
     val awaitingApproval: Boolean = false,
     val approvalCommand: String? = null,
@@ -260,6 +284,13 @@ internal fun safeRunStatusText(event: HermesRunEvent): String = when (event) {
     } else {
         "Continuing after ${safeToolLabel(event.tool)}…"
     }
+    is HermesRunEvent.TasksUpdated -> "Updated the task plan…"
+    is HermesRunEvent.SubagentUpdated -> event.subagent.activity
+        ?.trim()
+        ?.replace(Regex("\\s+"), " ")
+        ?.take(180)
+        ?.ifBlank { null }
+        ?: "A subagent is ${event.subagent.status.replace('_', ' ')}…"
     is HermesRunEvent.ApprovalRequested -> "Waiting for your approval"
     is HermesRunEvent.ApprovalResponded -> "Continuing after approval…"
     is HermesRunEvent.MessageDelta -> "Writing the response…"
@@ -379,10 +410,13 @@ data class HermesUiState(
     val otherActiveRuns: List<ActiveRun>
         get() = activeRuns.filterKeys { it != activeSessionKey }.values.toList()
     val activeSessionIds: Set<String>
-        get() = (activeHostSessions.keys + activeRuns.keys)
-            .filter { it.hostId == activeHostId }
-            .map(SessionKey::sessionId)
-            .toSet()
+        get() {
+            val hostReportedActive = sessions.filter(HermesSession::isActive).map(HermesSession::id)
+            val locallyActive = (activeHostSessions.keys + activeRuns.keys)
+                .filter { it.hostId == activeHostId }
+                .map(SessionKey::sessionId)
+            return (hostReportedActive + locallyActive).toSet()
+        }
     val orderedSessions: List<HermesSession>
         get() = sortSessionsByActivity(sessions, activeSessionIds)
 
@@ -404,6 +438,15 @@ data class HermesUiState(
         }
         val hostId = activeHostId ?: return null
         return activeHostSessions[SessionKey(hostId, session.id)]
+            ?: session.takeIf(HermesSession::isActive)?.let {
+                HermesActiveSession(
+                    sessionId = it.id,
+                    runId = null,
+                    title = it.title?.takeIf(String::isNotBlank) ?: "Hermes session",
+                    state = "working",
+                    surface = it.source?.takeIf(String::isNotBlank) ?: "desktop",
+                )
+            }
     }
 
     /** Loaded messages plus the live Run tail (and Approval card) when its Session is displayed. */
@@ -429,11 +472,13 @@ data class HermesUiState(
 
     fun isSessionBusy(hostId: String, sessionId: String): Boolean =
         SessionKey(hostId, sessionId) in activeRuns ||
-            SessionKey(hostId, sessionId) in activeHostSessions
+            SessionKey(hostId, sessionId) in activeHostSessions ||
+            (hostId == activeHostId && sessions.any { it.id == sessionId && it.isActive })
 
     fun hasActiveRunOnHost(hostId: String): Boolean =
         activeRuns.keys.any { it.hostId == hostId } ||
-            activeHostSessions.keys.any { it.hostId == hostId }
+            activeHostSessions.keys.any { it.hostId == hostId } ||
+            (hostId == activeHostId && sessions.any(HermesSession::isActive))
 
     fun slashSuggestions(): List<SlashSuggestion> {
         if (!composerText.startsWith("/") || composerText.contains(' ') || composerText.contains('\n')) return emptyList()
@@ -1181,8 +1226,8 @@ class HermesViewModel(
         viewModelScope.launch {
             var draftKey = initialKey
             try {
-                val session = snapshot.activeSessionId?.let { id -> snapshot.sessions.firstOrNull { it.id == id } }
-                    ?: gateway.createSession(host, text.take(44)).also { created ->
+                var session = snapshot.activeSessionId?.let { id -> snapshot.sessions.firstOrNull { it.id == id } }
+                    ?: gateway.createSession(host, automaticSessionTitle(text)).also { created ->
                         mutableState.update { state ->
                             state.copy(
                                 sessions = listOf(created) + state.sessions.filterNot { it.id == created.id },
@@ -1206,6 +1251,23 @@ class HermesViewModel(
                     mutableState.update { state -> state.rekeySession(runKey, resolvedKey) }
                     runKey = resolvedKey
                     draftKey = resolvedKey
+                }
+
+                if (
+                    page.messages.isEmpty() &&
+                    capabilities.supportsSessionEdit &&
+                    isAutomaticUntitledSessionTitle(session.title)
+                ) {
+                    runCatching { gateway.renameSession(host, page.sessionId, automaticSessionTitle(text)) }
+                        .getOrNull()
+                        ?.let { renamed ->
+                            session = renamed
+                            mutableState.update { state ->
+                                state.copy(sessions = state.sessions.map { existing ->
+                                    if (existing.id == renamed.id) renamed else existing
+                                })
+                            }
+                        }
                 }
 
                 val current = mutableState.value
@@ -1332,6 +1394,15 @@ class HermesViewModel(
                             item.copy(running = false, failed = event.failed)
                         } else item
                     }))
+                is HermesRunEvent.TasksUpdated -> state.withRun(key, current.copy(tasks = event.tasks))
+                is HermesRunEvent.SubagentUpdated -> {
+                    val previous = current.subagents[event.subagent.id]
+                    val merged = event.subagent.copy(
+                        goal = event.subagent.goal ?: previous?.goal,
+                        activity = event.subagent.activity ?: previous?.activity,
+                    )
+                    state.withRun(key, current.copy(subagents = current.subagents + (merged.id to merged)))
+                }
                 is HermesRunEvent.ApprovalRequested -> state.withRun(key,
                     // One actionable card per Run: a second request keeps the
                     // first card until it resolves (host queue is FIFO).

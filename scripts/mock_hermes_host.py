@@ -9,6 +9,7 @@ Fixtures:
   until POST /v1/runs/{id}/approval arrives (deny -> refusal output).
 - input containing "slow": the run streams deltas for ~15s so Stop can be
   exercised mid-run.
+- input containing "tasks" or "subagent": emits live task-plan and delegated-work updates.
 """
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +30,7 @@ SESSIONS = [
         "model": "hermes-agent",
         "message_count": 4,
         "last_active": time.time(),
+        "is_active": True,
     },
     {
         "id": "session-priorities",
@@ -130,6 +132,8 @@ class Handler(BaseHTTPRequestHandler):
                     "approval_events": True,
                     "run_approval_response": True,
                     "run_reasoning_effort": True,
+                    "run_task_updates": True,
+                    "run_subagent_updates": True,
                     "skills_api": True,
                     "toolsets_api": True,
                     "host_update_api": True,
@@ -178,6 +182,19 @@ class Handler(BaseHTTPRequestHandler):
                 {"id": "gpt-5.6-luna", "object": "model", "created": now, "owned_by": "hermes", "provider": "openai-codex", "root": "gpt-5.6-luna", "parent": "hermes-agent"},
                 {"id": "claude-fable-5", "object": "model", "created": now, "owned_by": "hermes", "provider": "opencode-zen", "root": "claude-fable-5", "parent": "hermes-agent"},
             ]})
+        elif path == "/v1/active-sessions":
+            active = [
+                {
+                    "session_id": run["session_id"],
+                    "run_id": run_id,
+                    "title": (_find_session(run["session_id"]) or {}).get("title", "Hermes session"),
+                    "state": run["status"],
+                    "surface": "api_server",
+                }
+                for run_id, run in RUNS.items()
+                if run["status"] not in {"completed", "failed", "cancelled"}
+            ]
+            self._json(200, {"object": "list", "active_count": len(active), "data": active})
         elif path == "/api/sessions":
             self._json(200, {"object": "list", "data": SESSIONS, "limit": 50, "offset": 0, "has_more": False})
         elif path == "/api/jobs":
@@ -346,6 +363,20 @@ class Handler(BaseHTTPRequestHandler):
         output = "Connected to Hermes. Run transport, stop, and approvals are working."
         try:
             self.wfile.write(b": keepalive\n\n")
+            if "tasks" in text.lower() or "subagent" in text.lower():
+                self._sse_data(run_id, "tasks.updated", tasks=[
+                    {"id": "plan", "content": "Plan the requested work", "status": "completed"},
+                    {"id": "implement", "content": "Implement and verify the change", "status": "in_progress"},
+                ])
+                self._sse_data(run_id, "subagent.updated", subagent={
+                    "id": "mock-subagent-1",
+                    "status": "working",
+                    "task_index": 0,
+                    "task_count": 1,
+                    "tool_count": 1,
+                    "goal": "Inspect the requested change",
+                    "activity": "Reviewing the current implementation",
+                })
             if "approve-me" in text:
                 self._sse_data(run_id, "tool.started", tool="terminal", preview="rm -rf /tmp/hermes-demo")
                 run["status"] = "waiting_for_approval"
