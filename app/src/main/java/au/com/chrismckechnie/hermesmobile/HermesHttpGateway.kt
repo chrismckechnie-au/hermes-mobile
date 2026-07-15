@@ -84,7 +84,7 @@ class HermesHttpGateway(
         val rows = data.optJSONArray("data")
             ?: throw HermesApiException(200, "Hermes returned an unexpected session list shape.")
         HermesSessionPage(
-            sessions = rows.toObjectList(::parseSession),
+            sessions = rows.toObjectList(::parseSession).distinctBy(HermesSession::id),
             hasMore = data.optBoolean("has_more", false),
         )
     }
@@ -335,6 +335,7 @@ class HermesHttpGateway(
                 state = json.optString("state", "active"),
                 surface = json.optString("surface", "unknown"),
                 latestStatus = json.optNullableString("latest_status"),
+                statusHistory = json.optJSONArray("status_history").toStringList().takeLast(12),
                 updatedAt = json.optNullableEpochSeconds("updated_at"),
                 leaseId = json.optNullableString("lease_id"),
             )

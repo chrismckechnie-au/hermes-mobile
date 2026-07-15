@@ -197,6 +197,7 @@ data class HermesActiveSession(
     val state: String,
     val surface: String,
     val latestStatus: String? = null,
+    val statusHistory: List<String> = emptyList(),
     val updatedAt: Long? = null,
     val leaseId: String? = null,
 )

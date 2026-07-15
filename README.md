@@ -23,13 +23,13 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 - Host model discovery with compact model, reasoning-effort, and permission controls directly above the Chat composer
 - Capability-gated live task, subagent, and workspace-change pills, including a bounded per-file diff sheet when the host exposes `run_workspace_updates`
 - Independent streaming runs per host/session, with stop/cancel, follow-up messages that interrupt and replace the current run, durable event-cursor replay after network/process loss, and idempotent submit retry protection
-- Sessions are sorted by latest activity, with active work pinned first, visible-list liveness refresh, missed-terminal reconciliation, distinct Running and Stalled filters, and safe manual cleanup for stale host activity
+- Sessions are sorted strictly by their latest host update, with compact timestamps and origin-aware labels for untitled mobile, desktop, Discord, scheduled, and delegated sessions; visible-list liveness refresh, missed-terminal reconciliation, distinct Running and Stalled filters, and safe manual cleanup remain available
 - Host-backed `/goal` and installed-skill `/plan` commands appear in composer autocomplete with a command indicator when the host advertises slash-command Run support
 - Browse host skills and toolsets from the Host tab; start a skill in Chat or inspect the concrete host tools it exposes, including plugin-contributed tools when available
 - Optional Android system dictation from the composer, appending the recognizer result to the current draft
 - Markdown rendering of assistant replies (code blocks with copy, headings, bullets, bold/italic/inline code, links)
 - Live assistant deltas plus collapsible, grouped tool activity and compact left-aligned Hermes progress bubbles
-- Collapsible, compact Hermes activity bubbles for host-provided reasoning progress
+- Collapsible, compact Hermes activity bubbles for host-provided reasoning progress, including a rolling status history for desktop-originated work opened on mobile
 - Compact input, output, and total token usage beneath a completed reply when the Hermes host reports terminal Run usage
 - Tool-run approval cards (`approval.request` → approve/deny via `POST /v1/runs/{id}/approval`)
 - Compact ongoing work notification and a draggable edge icon that opens an attached active-session panel with session names, latest bounded activity, and relative update times; it hides while Hermes Mobile is open, restores when the app backgrounds, and can be dropped onto a close target to hide it until the next run

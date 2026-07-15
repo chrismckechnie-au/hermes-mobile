@@ -436,7 +436,7 @@ class HermesHttpGatewayTest {
     @Test
     fun `lists active sessions for overlays`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
-            {"object":"list","active_count":1,"data":[{"lease_id":"lease-1","session_id":"session-1","run_id":"run-1","title":"Background work","state":"running","surface":"api_server","latest_status":"Using terminal…","updated_at":1720000000.75}]}
+            {"object":"list","active_count":1,"data":[{"lease_id":"lease-1","session_id":"session-1","run_id":"run-1","title":"Background work","state":"running","surface":"api_server","latest_status":"Using terminal…","status_history":["Reviewing the request…","Using terminal…"],"updated_at":1720000000.75}]}
         """.trimIndent()))
 
         val sessions = gateway.listActiveSessions(profile)
@@ -444,6 +444,7 @@ class HermesHttpGatewayTest {
         assertEquals("/v1/active-sessions", server.takeRequest().path)
         assertEquals("Background work", sessions.single().title)
         assertEquals("Using terminal…", sessions.single().latestStatus)
+        assertEquals(listOf("Reviewing the request…", "Using terminal…"), sessions.single().statusHistory)
         assertEquals(1_720_000_000L, sessions.single().updatedAt)
         assertEquals("lease-1", sessions.single().leaseId)
     }

@@ -548,7 +548,16 @@ class HermesViewModelTest {
             sessions += HermesSession("older", "Older", null, "api_server", null, "1700000000", 1)
             sessions += HermesSession("active", "Active", null, "api_server", null, "1600000000", 1)
             sessions += HermesSession("newer", "Newer", null, "api_server", null, "1800000000", 1)
-            activeSessions = listOf(HermesActiveSession("active", "run-1", "Active", "waiting_for_approval", "desktop"))
+            activeSessions = listOf(
+                HermesActiveSession(
+                    "active",
+                    "run-1",
+                    "Active",
+                    "waiting_for_approval",
+                    "desktop",
+                    updatedAt = 1_900_000_000L,
+                ),
+            )
         }
         val (viewModel, _) = buildViewModel(gateway = gateway)
 
@@ -568,7 +577,7 @@ class HermesViewModelTest {
 
         val state = viewModel.state.value
         val desktopSession = state.sessions.single { it.id == "desktop-running" }
-        assertEquals(listOf("desktop-running", "recent"), state.orderedSessions.map { it.id })
+        assertEquals(listOf("recent", "desktop-running"), state.orderedSessions.map { it.id })
         assertEquals("working", state.activityFor(desktopSession)?.state)
         assertTrue(state.isSessionBusy("h1", "desktop-running"))
     }
@@ -965,6 +974,29 @@ class HermesViewModelTest {
         advanceUntilIdle()
 
         assertFalse(viewModel.state.value.activeSessionIds.contains("s1"))
+    }
+
+    @Test
+    fun `desktop activity appears inside its open mobile chat`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            activeSessions = listOf(
+                HermesActiveSession(
+                    sessionId = "s1",
+                    runId = null,
+                    title = "First",
+                    state = "running",
+                    surface = "desktop",
+                    latestStatus = "Using terminal…",
+                    statusHistory = listOf("Reviewing the request…", "Using terminal…"),
+                ),
+            )
+        }
+        val (viewModel, _) = buildViewModel(gateway = gateway)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+
+        val activity = viewModel.state.value.displayedMessages.filterIsInstance<ChatUiItem.Reasoning>().single()
+        assertEquals(listOf("Reviewing the request…", "Using terminal…"), activity.updates)
     }
 
     @Test

@@ -109,6 +109,20 @@ class WorkSurfaceCopyTest {
     }
 
     @Test
+    fun `duplicate transcript ids receive unique compose keys`() {
+        val timeline = groupChatTimeline(
+            listOf(
+                ChatUiItem.User("same", "First render"),
+                ChatUiItem.Assistant("same", "Hydrated again"),
+                ChatUiItem.Tool("same", "terminal", "echo ok", running = false),
+                ChatUiItem.User("tools:same", "Collides with the tool group prefix"),
+            ),
+        )
+
+        assertEquals(timeline.size, timeline.map(ChatTimelineItem::id).toSet().size)
+    }
+
+    @Test
     fun `run banner prefers the current session name over a stale run label`() {
         val host = HostProfile("host-1", "Host", "http://host.test", "key", allowInsecureHttp = true)
         val run = ActiveRun(host, "session-1", "API session", "run-1")

@@ -17,6 +17,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.IOException
 import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -182,10 +185,14 @@ data class SessionKey(
 
 internal fun sortSessionsByActivity(
     sessions: List<HermesSession>,
-    activeSessionIds: Set<String>,
+    activityUpdatedAt: Map<String, Long> = emptyMap(),
 ): List<HermesSession> = sessions.sortedWith(
-    compareByDescending<HermesSession> { it.id in activeSessionIds }
-        .thenByDescending { sessionActivityMillis(it.lastActive) }
+    compareByDescending<HermesSession> { session ->
+        maxOf(
+            sessionActivityMillis(session.lastActive),
+            activityUpdatedAt[session.id]?.let(::epochValueMillis) ?: Long.MIN_VALUE,
+        )
+    }
         .thenBy { it.title.orEmpty().lowercase() },
 )
 
@@ -210,7 +217,13 @@ internal fun filterSessions(
             SessionFilter.Desktop -> !session.source.isMobileSessionSource()
         }
         matchesFilter && (needle.isBlank() ||
-            listOf(session.title, session.preview, session.source, displaySessionModel(session.model, defaultModel))
+            listOf(
+                session.title,
+                session.preview,
+                session.source,
+                sessionSourceLabel(session.source),
+                displaySessionModel(session.model, defaultModel),
+            )
                 .any { field -> field?.lowercase()?.contains(needle) == true })
     }
 }
@@ -262,7 +275,7 @@ internal fun uniqueAutomaticSessionTitle(input: String, sessions: List<HermesSes
 internal fun taskProgressLabel(tasks: List<HermesTask>): String =
     "${tasks.count(HermesTask::isComplete)} / ${tasks.size} tasks"
 
-private fun isAutomaticUntitledSessionTitle(title: String?): Boolean =
+internal fun isAutomaticUntitledSessionTitle(title: String?): Boolean =
     title.isNullOrBlank() || title.trim().lowercase() in setOf(
         "hermes mobile",
         "hermes session",
@@ -275,8 +288,65 @@ private fun isAutomaticUntitledSessionTitle(title: String?): Boolean =
 internal fun sessionActivityMillis(value: String?): Long {
     val raw = value?.trim().orEmpty()
     if (raw.isBlank()) return Long.MIN_VALUE
-    raw.toLongOrNull()?.let { epoch -> return if (epoch < 100_000_000_000L) epoch * 1_000 else epoch }
+    raw.toLongOrNull()?.let { epoch ->
+        if (epoch < 0L) return Long.MIN_VALUE
+        return if (epoch < 100_000_000_000L) epoch * 1_000L else epoch
+    }
     return runCatching { Instant.parse(raw).toEpochMilli() }.getOrDefault(Long.MIN_VALUE)
+}
+
+private fun epochValueMillis(value: Long): Long =
+    when {
+        value < 0L -> Long.MIN_VALUE
+        value < 100_000_000_000L -> value * 1_000L
+        else -> value
+    }
+
+internal fun sessionSourceLabel(source: String?): String = when (source?.trim()?.lowercase()) {
+    "api_server", "mobile" -> "Mobile"
+    "desktop", "tui" -> "Desktop"
+    "cli" -> "CLI"
+    "discord" -> "Discord"
+    "cron" -> "Scheduled"
+    "subagent" -> "Delegated"
+    null, "" -> "Hermes"
+    else -> source.trim().replace('_', ' ').replace('-', ' ')
+        .split(Regex("\\s+"))
+        .joinToString(" ") { word -> word.replaceFirstChar { it.uppercaseChar() } }
+}
+
+internal fun sessionDisplayTitle(session: HermesSession): String {
+    session.title?.trim()?.takeIf { !isAutomaticUntitledSessionTitle(it) }?.let { return it }
+    val kind = when (session.source?.trim()?.lowercase()) {
+        "discord" -> "Discord chat"
+        "cron" -> "Scheduled run"
+        "subagent" -> "Delegated task"
+        "api_server", "mobile" -> "Mobile session"
+        "desktop", "tui" -> "Desktop session"
+        "cli" -> "CLI session"
+        else -> "Hermes session"
+    }
+    return "$kind · ${session.id.take(8)}"
+}
+
+internal fun formatSessionUpdatedAt(
+    value: String?,
+    nowMillis: Long = System.currentTimeMillis(),
+    zoneId: ZoneId = ZoneId.systemDefault(),
+    locale: Locale = Locale.getDefault(),
+): String? {
+    val updatedMillis = sessionActivityMillis(value)
+    if (updatedMillis == Long.MIN_VALUE) return null
+    return runCatching {
+        val updated = Instant.ofEpochMilli(updatedMillis).atZone(zoneId)
+        val today = Instant.ofEpochMilli(nowMillis).atZone(zoneId).toLocalDate()
+        when {
+            updated.toLocalDate() == today -> DateTimeFormatter.ofPattern("h:mm a", locale).format(updated)
+            updated.toLocalDate() == today.minusDays(1) -> "Yesterday"
+            updated.year == today.year -> DateTimeFormatter.ofPattern("d MMM", locale).format(updated)
+            else -> DateTimeFormatter.ofPattern("d MMM yyyy", locale).format(updated)
+        }
+    }.getOrNull()
 }
 
 sealed interface ChatUiItem {
@@ -584,7 +654,13 @@ data class HermesUiState(
             return (hostReportedActive + locallyActive).toSet()
         }
     val orderedSessions: List<HermesSession>
-        get() = sortSessionsByActivity(sessions, activeSessionIds)
+        get() = sortSessionsByActivity(
+            sessions = sessions,
+            activityUpdatedAt = activeHostSessions
+                .filterKeys { it.hostId == activeHostId }
+                .mapNotNull { (key, activity) -> activity.updatedAt?.let { key.sessionId to it } }
+                .toMap(),
+        )
 
     fun activityFor(session: HermesSession): HermesActiveSession? {
         val key = activeHostId?.let { hostId -> SessionKey(hostId, session.id) }
@@ -623,8 +699,22 @@ data class HermesUiState(
     val displayedMessages: List<ChatUiItem>
         get() {
             val storedMessages = messages.withRunUsage(activeSessionKey?.let(runUsageByMessage::get).orEmpty())
-            val run = activeRun ?: return storedMessages
-            if (run.sessionId != activeSessionId) return storedMessages
+            val run = activeRun
+            if (run == null || run.sessionId != activeSessionId) {
+                val key = activeSessionKey ?: return storedMessages
+                val activity = activeHostSessions[key]
+                    ?.takeUnless(HermesActiveSession::isStalledActivity)
+                    ?: return storedMessages
+                val updates = (activity.statusHistory + listOfNotNull(activity.latestStatus))
+                    .map { it.trim() }
+                    .filter(String::isNotBlank)
+                    .distinct()
+                    .takeLast(12)
+                return if (updates.isEmpty()) storedMessages else storedMessages + ChatUiItem.Reasoning(
+                    id = "host-activity:${key.hostId}:${key.sessionId}",
+                    updates = updates,
+                )
+            }
             val tail = mergeStoredAndLiveTail(storedMessages, run.tail, run.baselineMessageCount)
             return if (run.awaitingApproval && !run.approvalDetailsLost) {
                 tail + ChatUiItem.Approval(

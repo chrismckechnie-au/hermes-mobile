@@ -420,10 +420,11 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
             listState.scrollToItem(timelineItems.lastIndex, scrollOffset = 100_000)
         }
     }
-    LaunchedEffect(state.activeHostId, state.activeRuns.keys) {
+    LaunchedEffect(state.activeHostId, state.activeSessionId, state.activeRuns.keys) {
         while (true) {
+            viewModel.refreshHostActivity()
             viewModel.reconcileActiveRuns()
-            delay(10_000L)
+            delay(5_000L)
         }
     }
 
@@ -1675,9 +1676,7 @@ internal fun displayRunSessionName(run: ActiveRun, sessions: List<HermesSession>
 internal sealed interface ChatTimelineItem {
     val id: String
 
-    data class Message(val item: ChatUiItem) : ChatTimelineItem {
-        override val id: String = item.id
-    }
+    data class Message(val item: ChatUiItem, override val id: String = item.id) : ChatTimelineItem
 
     data class ToolGroup(
         override val id: String,
@@ -1687,7 +1686,14 @@ internal sealed interface ChatTimelineItem {
 
 internal fun groupChatTimeline(items: List<ChatUiItem>): List<ChatTimelineItem> = buildList {
     val pendingTools = mutableListOf<ChatUiItem.Tool>()
+    val usedKeys = mutableSetOf<String>()
     var toolGroupIndex: Int? = null
+    fun uniqueKey(base: String): String {
+        if (usedKeys.add(base)) return base
+        var suffix = 2
+        while (!usedKeys.add("$base#$suffix")) suffix += 1
+        return "$base#$suffix"
+    }
     fun resetToolGroup() {
         pendingTools.clear()
         toolGroupIndex = null
@@ -1697,19 +1703,19 @@ internal fun groupChatTimeline(items: List<ChatUiItem>): List<ChatTimelineItem> 
         when (item) {
             is ChatUiItem.User -> {
                 resetToolGroup()
-                add(ChatTimelineItem.Message(item))
+                add(ChatTimelineItem.Message(item, uniqueKey(item.id)))
             }
             is ChatUiItem.Tool -> {
                 pendingTools += item
                 val index = toolGroupIndex
                 if (index == null) {
                     toolGroupIndex = size
-                    add(ChatTimelineItem.ToolGroup("tools:${item.id}", pendingTools.toList()))
+                    add(ChatTimelineItem.ToolGroup(uniqueKey("tools:${item.id}"), pendingTools.toList()))
                 } else {
-                    this[index] = ChatTimelineItem.ToolGroup("tools:${pendingTools.first().id}", pendingTools.toList())
+                    this[index] = (this[index] as ChatTimelineItem.ToolGroup).copy(tools = pendingTools.toList())
                 }
             }
-            else -> add(ChatTimelineItem.Message(item))
+            else -> add(ChatTimelineItem.Message(item, uniqueKey(item.id)))
         }
     }
 }
@@ -2264,7 +2270,7 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
             dragHandle = null,
         ) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp).padding(bottom = 18.dp)) {
-                Text(session.title?.takeIf { it.isNotBlank() } ?: "Untitled session", style = T.SheetTitle)
+                Text(sessionDisplayTitle(session), style = T.SheetTitle)
                 Text(
                     when {
                         busy && !deleteBlocked -> "This empty session can be deleted; other actions are unavailable."
@@ -2457,6 +2463,7 @@ private fun SessionCard(
     onLongClick: () -> Unit,
 ) {
     val activityColor = activity?.let { sessionActivityColor(it.state) }
+    val updatedAt = formatSessionUpdatedAt(session.lastActive)
     Card(
         modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick, onLongClickLabel = "Session actions"),
         colors = CardDefaults.cardColors(
@@ -2477,7 +2484,7 @@ private fun SessionCard(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(8.dp).clip(CircleShape).background(activityColor ?: if (selected) T.Cream else T.Muted.copy(alpha = 0.4f)))
                 Spacer(Modifier.width(9.dp))
-                Text(session.title?.takeIf { it.isNotBlank() } ?: "Untitled session", style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Text(sessionDisplayTitle(session), style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 activity?.let {
                     Text(sessionActivityLabel(it.state), style = T.MicroBold.copy(color = activityColor ?: T.Cream))
                     Spacer(Modifier.width(7.dp))
@@ -2485,13 +2492,28 @@ private fun SessionCard(
                 Text("${session.messageCount ?: 0} MSG", style = T.Micro)
             }
             Text(session.preview?.takeIf { it.isNotBlank() } ?: "No preview available", style = T.BodyMuted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp, start = 17.dp))
-            Text(
-                listOfNotNull(session.source, displaySessionModel(session.model, defaultModel))
-                    .joinToString(" · ")
-                    .ifBlank { "Hermes session" },
-                style = T.Micro.copy(color = T.Muted.copy(alpha = 0.72f), letterSpacing = 0.sp),
-                modifier = Modifier.padding(top = 9.dp, start = 17.dp),
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 9.dp, start = 17.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    listOfNotNull(sessionSourceLabel(session.source), displaySessionModel(session.model, defaultModel))
+                        .filter(String::isNotBlank)
+                        .joinToString(" · "),
+                    style = T.Micro.copy(color = T.Muted.copy(alpha = 0.72f), letterSpacing = 0.sp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                updatedAt?.let { timestamp ->
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        timestamp,
+                        style = T.Micro.copy(color = T.Muted.copy(alpha = 0.72f), letterSpacing = 0.sp),
+                        textAlign = TextAlign.End,
+                    )
+                }
+            }
         }
     }
 }
