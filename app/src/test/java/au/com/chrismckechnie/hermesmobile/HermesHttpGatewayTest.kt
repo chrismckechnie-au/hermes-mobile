@@ -42,7 +42,7 @@ class HermesHttpGatewayTest {
     @Test
     fun `probe uses bearer auth and reads capability bundle`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
-            {"object":"hermes.api_server.capabilities","platform":"hermes-agent","model":"hermes-agent","features":{"run_submission":true,"run_events_sse":true,"run_stop":true,"approval_events":true,"run_approval_response":true,"skills_api":true,"run_permission_mode":true,"file_upload":false}}
+            {"object":"hermes.api_server.capabilities","platform":"hermes-agent","model":"hermes-agent","default_model":"gpt-5.6-luna","features":{"run_submission":true,"run_events_sse":true,"run_stop":true,"approval_events":true,"run_approval_response":true,"skills_api":true,"run_permission_mode":true,"file_upload":false}}
         """.trimIndent()))
 
         val info = gateway.probe(profile)
@@ -54,6 +54,7 @@ class HermesHttpGatewayTest {
         assertTrue(info.supportsRuns)
         assertTrue(info.supportsSkills)
         assertFalse(info.supportsSessionFork)
+        assertEquals("gpt-5.6-luna", info.defaultModel)
     }
 
     @Test
@@ -375,13 +376,15 @@ class HermesHttpGatewayTest {
     @Test
     fun `lists active sessions for overlays`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
-            {"object":"list","active_count":1,"data":[{"session_id":"session-1","run_id":"run-1","title":"Background work","state":"running","surface":"api_server"}]}
+            {"object":"list","active_count":1,"data":[{"session_id":"session-1","run_id":"run-1","title":"Background work","state":"running","surface":"api_server","latest_status":"Using terminal…","updated_at":1720000000.75}]}
         """.trimIndent()))
 
         val sessions = gateway.listActiveSessions(profile)
 
         assertEquals("/v1/active-sessions", server.takeRequest().path)
         assertEquals("Background work", sessions.single().title)
+        assertEquals("Using terminal…", sessions.single().latestStatus)
+        assertEquals(1_720_000_000L, sessions.single().updatedAt)
     }
 
     @Test

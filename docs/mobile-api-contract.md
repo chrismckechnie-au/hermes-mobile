@@ -121,7 +121,9 @@ The 1.0 behavior target is:
 1. **Active run list.** A read-only authenticated endpoint returns every
    nonterminal run visible to the device, with stable run and session IDs,
    state, timestamps, pending-approval state, and an optional safe status
-   summary. It must work for runs started by other clients.
+   summary. Experimental hosts currently expose the safe summary as
+   `latest_status` and its epoch timestamp as `updated_at`. It must work for
+   runs started by other clients.
 2. **Replayable events.** Every run event has a stable monotonic sequence/cursor.
    Reconnect accepts an `after` cursor, replays retained events in order, and
    then follows live events without gaps. Duplicate delivery is allowed; event
@@ -144,6 +146,9 @@ The 1.0 behavior target is:
    the authenticated device may actually select, using a stable public ID and
    display label. It declares supported reasoning-effort values and relevant
    input capabilities without exposing provider keys or secret configuration.
+   Experimental capability responses may expose the concrete configured model
+   as `default_model`; clients should treat it as optional and fall back to a
+   generic “Host default” label rather than displaying an API routing alias.
 
 Endpoints and schemas beyond these minimum behaviors should be finalized in an
 official Hermes proposal before the mobile client treats `hermes.mobile` 1.x as

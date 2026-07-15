@@ -56,6 +56,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -436,6 +437,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                                     item.text,
                                     item.streaming,
                                     item.safeStatus,
+                                    item.safeStatusHistory,
                                     item.usage,
                                     showAvatar = item.id in assistantAvatarIds,
                                 )
@@ -696,7 +698,8 @@ private fun ModelChip(state: HermesUiState, viewModel: HermesViewModel) {
     var open by remember { mutableStateOf(false) }
     val supportsReasoning = state.capabilities?.supportsReasoningEffort == true
     val modelLabel = state.selectedModel
-        ?: state.capabilities?.model?.takeIf(String::isNotBlank)
+        ?: state.capabilities?.defaultModel?.takeIf(String::isNotBlank)
+        ?: displaySessionModel(state.capabilities?.model, null)
         ?: state.models.firstOrNull()
     if (state.activeHost == null || (modelLabel == null && state.models.isEmpty() && !supportsReasoning)) return
     val chipLabel = state.selectedReasoningEffort
@@ -767,8 +770,9 @@ private fun ModelSettingsSheet(
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val hostDefaultModel = state.capabilities?.model
+    val hostDefaultModel = state.capabilities?.defaultModel
         ?.takeIf { it.isNotBlank() }
+        ?: displaySessionModel(state.capabilities?.model, null)
         ?: state.models.firstOrNull()
 
     ModalBottomSheet(
@@ -962,6 +966,7 @@ private fun AssistantMessage(
     text: String,
     streaming: Boolean,
     safeStatus: String?,
+    safeStatusHistory: List<String>,
     usage: HermesRunUsage?,
     showAvatar: Boolean,
 ) {
@@ -970,7 +975,10 @@ private fun AssistantMessage(
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             if (text.isBlank() && streaming) {
-                LiveWorkingBubble(safeStatus ?: "Hermes is working…")
+                LiveWorkingBubble(
+                    status = safeStatus ?: "Hermes is working…",
+                    updates = safeStatusHistory,
+                )
             } else {
                 MarkdownText(text, modifier = Modifier.padding(top = 2.dp))
                 if (streaming) {
@@ -1549,8 +1557,37 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
     var renameTarget by remember { mutableStateOf<HermesSession?>(null) }
     var renameText by remember { mutableStateOf("") }
     var query by remember(state.activeHostId) { mutableStateOf("") }
+    var sessionFilter by remember(state.activeHostId) { mutableStateOf(SessionFilter.All) }
     val orderedSessions = state.orderedSessions
-    val filteredSessions = remember(orderedSessions, query) { filterSessions(orderedSessions, query) }
+    val activityBySession = remember(orderedSessions, state.activeRuns, state.activeHostSessions, state.activeHostId) {
+        orderedSessions.associate { session -> session.id to state.activityFor(session)?.state }
+    }
+    val activeSessionIds = remember(activityBySession) {
+        activityBySession.filterValues { it != null }.keys
+    }
+    val approvalSessionIds = remember(activityBySession) {
+        activityBySession.filterValues {
+            it?.lowercase() in setOf("waiting_for_approval", "approval_required")
+        }.keys
+    }
+    val defaultModel = state.capabilities?.defaultModel
+    val filteredSessions = remember(
+        orderedSessions,
+        query,
+        sessionFilter,
+        activeSessionIds,
+        approvalSessionIds,
+        defaultModel,
+    ) {
+        filterSessions(
+            sessions = orderedSessions,
+            query = query,
+            filter = sessionFilter,
+            activeSessionIds = activeSessionIds,
+            approvalSessionIds = approvalSessionIds,
+            defaultModel = defaultModel,
+        )
+    }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 15.dp)) {
         ScreenHeading("Sessions", "${state.sessions.size} on ${state.activeHost?.name ?: "no host"}", Lucide.Plus, "New session", viewModel::createSession)
@@ -1568,9 +1605,21 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                         }
                     }
                 },
-                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 5.dp),
                 textStyle = T.Body,
             )
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                SessionFilter.entries.forEach { filter ->
+                    FilterChip(
+                        selected = sessionFilter == filter,
+                        onClick = { sessionFilter = filter },
+                        label = { Text(filter.label, style = T.MicroBold.copy(letterSpacing = 0.sp)) },
+                    )
+                }
+            }
         }
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
@@ -1604,6 +1653,7 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                             session = session,
                             selected = state.activeSessionId == session.id,
                             activity = state.activityFor(session),
+                            defaultModel = defaultModel,
                             onClick = { viewModel.selectSession(session.id) },
                             onLongClick = { actionTarget = session },
                         )
@@ -1703,7 +1753,7 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
 }
 
 @Composable
-private fun LiveWorkingBubble(status: String) {
+private fun LiveWorkingBubble(status: String, updates: List<String>) {
     var expanded by remember { mutableStateOf(false) }
     val action = if (expanded) "Collapse live Hermes status" else "Expand live Hermes status"
     Card(
@@ -1736,11 +1786,20 @@ private fun LiveWorkingBubble(status: String) {
             )
         }
         AnimatedVisibility(visible = expanded) {
-            Text(
-                "Latest safe run status. Tool activity and host-provided progress are grouped directly above.",
-                style = T.BodyMuted.copy(color = T.Muted, fontSize = 11.sp, lineHeight = 15.sp),
+            Column(
                 modifier = Modifier.padding(start = 32.dp, end = 10.dp, bottom = 9.dp),
-            )
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                updates.takeLast(8).forEach { update ->
+                    Text(
+                        update,
+                        style = T.BodyMuted.copy(color = T.Muted, fontSize = 11.sp, lineHeight = 15.sp),
+                    )
+                }
+                if (updates.isEmpty()) {
+                    Text(status, style = T.BodyMuted.copy(color = T.Muted, fontSize = 11.sp, lineHeight = 15.sp))
+                }
+            }
         }
     }
 }
@@ -1805,6 +1864,7 @@ private fun SessionCard(
     session: HermesSession,
     selected: Boolean,
     activity: HermesActiveSession?,
+    defaultModel: String?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -1837,7 +1897,13 @@ private fun SessionCard(
                 Text("${session.messageCount ?: 0} MSG", style = T.Micro)
             }
             Text(session.preview?.takeIf { it.isNotBlank() } ?: "No preview available", style = T.BodyMuted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp, start = 17.dp))
-            Text(listOfNotNull(session.source, session.model).joinToString(" · ").ifBlank { "Hermes session" }, style = T.Micro.copy(color = T.Muted.copy(alpha = 0.72f), letterSpacing = 0.sp), modifier = Modifier.padding(top = 9.dp, start = 17.dp))
+            Text(
+                listOfNotNull(session.source, displaySessionModel(session.model, defaultModel))
+                    .joinToString(" · ")
+                    .ifBlank { "Hermes session" },
+                style = T.Micro.copy(color = T.Muted.copy(alpha = 0.72f), letterSpacing = 0.sp),
+                modifier = Modifier.padding(top = 9.dp, start = 17.dp),
+            )
         }
     }
 }

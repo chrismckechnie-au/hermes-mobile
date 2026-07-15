@@ -159,13 +159,46 @@ internal fun sortSessionsByActivity(
 internal fun filterSessions(
     sessions: List<HermesSession>,
     query: String,
+    filter: SessionFilter = SessionFilter.All,
+    activeSessionIds: Set<String> = emptySet(),
+    approvalSessionIds: Set<String> = emptySet(),
+    defaultModel: String? = null,
 ): List<HermesSession> {
     val needle = query.trim().lowercase()
-    if (needle.isBlank()) return sessions
     return sessions.filter { session ->
-        listOf(session.title, session.preview, session.source, session.model)
-            .any { field -> field?.lowercase()?.contains(needle) == true }
+        val matchesFilter = when (filter) {
+            SessionFilter.All -> true
+            SessionFilter.Running -> session.id in activeSessionIds
+            SessionFilter.Approval -> session.id in approvalSessionIds
+            SessionFilter.Mobile -> session.source.isMobileSessionSource()
+            SessionFilter.Desktop -> !session.source.isMobileSessionSource()
+        }
+        matchesFilter && (needle.isBlank() ||
+            listOf(session.title, session.preview, session.source, displaySessionModel(session.model, defaultModel))
+                .any { field -> field?.lowercase()?.contains(needle) == true })
     }
+}
+
+internal enum class SessionFilter(val label: String) {
+    All("All"),
+    Running("Running"),
+    Approval("Approval"),
+    Mobile("Mobile"),
+    Desktop("Desktop"),
+}
+
+internal fun displaySessionModel(sessionModel: String?, defaultModel: String?): String? {
+    val raw = sessionModel?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    if (raw.lowercase() !in setOf("hermes-default", "hermes-agent", "default")) return raw
+    val configured = defaultModel?.trim()?.takeIf(String::isNotEmpty)
+    return configured?.takeUnless {
+        it.lowercase() in setOf("hermes-default", "hermes-agent", "default")
+    } ?: "Host default"
+}
+
+private fun String?.isMobileSessionSource(): Boolean = when (this?.trim()?.lowercase()) {
+    "api_server", "mobile", "android" -> true
+    else -> false
 }
 
 /** Derives a local, deterministic session label without sending extra request content to the host. */
@@ -219,6 +252,7 @@ sealed interface ChatUiItem {
         val text: String,
         val streaming: Boolean = false,
         val safeStatus: String? = null,
+        val safeStatusHistory: List<String> = emptyList(),
         val usage: HermesRunUsage? = null,
     ) : ChatUiItem
 
@@ -348,6 +382,12 @@ private fun safeToolLabel(tool: String): String = tool
     .replace(Regex("\\s+"), " ")
     .take(60)
     .ifBlank { "a tool" }
+
+internal fun appendSafeStatus(history: List<String>, status: String): List<String> {
+    val clean = status.trim().replace(Regex("\\s+"), " ").take(180)
+    if (clean.isBlank() || history.lastOrNull() == clean) return history
+    return (history + clean).takeLast(10)
+}
 
 /** A submitRun whose response was lost: the Host may or may not be executing the turn. */
 data class UnknownOutcome(
@@ -1397,6 +1437,7 @@ class HermesViewModel(
                             text = "",
                             streaming = true,
                             safeStatus = "Starting task…",
+                            safeStatusHistory = listOf("Starting task…"),
                         ),
                     ),
                 )
@@ -1448,7 +1489,10 @@ class HermesViewModel(
             val current = existing.copy(
                 tail = existing.tail.map { item ->
                     if (item is ChatUiItem.Assistant && item.id == existing.assistantId) {
-                        item.copy(safeStatus = safeStatus)
+                        item.copy(
+                            safeStatus = safeStatus,
+                            safeStatusHistory = appendSafeStatus(item.safeStatusHistory, safeStatus),
+                        )
                     } else {
                         item
                     }
@@ -2173,7 +2217,7 @@ class HermesViewModel(
         val id = message.id ?: UUID.randomUUID().toString()
         return when (message.role) {
             "user" -> ChatUiItem.User(id, message.content)
-            "assistant" -> ChatUiItem.Assistant(id, message.content)
+            "assistant" -> message.content.takeIf(String::isNotBlank)?.let { ChatUiItem.Assistant(id, it) }
             "tool" -> ChatUiItem.Tool(id, message.toolName ?: "tool", message.content.take(180), running = false)
             else -> null
         }

@@ -43,6 +43,7 @@ class HermesHttpGateway(
             platform = data.optNullableString("platform") ?: "hermes-agent",
             features = features,
             version = data.optNullableString("version"),
+            defaultModel = data.optNullableString("default_model"),
         )
     }
 
@@ -292,6 +293,8 @@ class HermesHttpGateway(
                 title = json.optString("title", "Hermes session"),
                 state = json.optString("state", "active"),
                 surface = json.optString("surface", "unknown"),
+                latestStatus = json.optNullableString("latest_status"),
+                updatedAt = json.optNullableEpochSeconds("updated_at"),
             )
         }.filter { it.sessionId.isNotBlank() }
     }
@@ -503,6 +506,13 @@ private fun JSONObject.optRunUsage(): HermesRunUsage? {
 private fun JSONObject.optNonNegativeLong(name: String): Long? =
     takeIf { has(name) && !isNull(name) }
         ?.optLong(name, -1L)
+        ?.takeIf { it >= 0L }
+
+private fun JSONObject.optNullableEpochSeconds(name: String): Long? =
+    takeIf { has(name) && !isNull(name) }
+        ?.optDouble(name, Double.NaN)
+        ?.takeIf(Double::isFinite)
+        ?.toLong()
         ?.takeIf { it >= 0L }
 
 private inline fun <T> JSONArray?.toObjectList(transform: (JSONObject) -> T): List<T> {

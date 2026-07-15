@@ -51,6 +51,7 @@ data class HermesCapabilities(
     val platform: String,
     val features: Set<String>,
     val version: String? = null,
+    val defaultModel: String? = null,
 ) {
     // The full Run-control bundle; anything less recreates the silent-approval
     // hang the /v1/runs transport exists to fix (docs/adr/0001).
@@ -190,6 +191,8 @@ data class HermesActiveSession(
     val title: String,
     val state: String,
     val surface: String,
+    val latestStatus: String? = null,
+    val updatedAt: Long? = null,
 )
 
 /** A bounded, host-approved todo item for the active Run. */

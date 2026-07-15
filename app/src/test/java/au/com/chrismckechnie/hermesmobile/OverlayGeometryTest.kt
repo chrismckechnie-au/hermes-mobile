@@ -6,6 +6,29 @@ import org.junit.Test
 
 class OverlayGeometryTest {
     @Test
+    fun `overlay update prefers local status and adds relative freshness`() {
+        assertEquals(
+            "Checking tests · 2m ago",
+            overlayLatestUpdate(
+                localStatus = "Checking\n tests",
+                remoteStatus = "Remote update",
+                updatedAtSeconds = 1_000L,
+                nowMillis = 1_120_000L,
+            ),
+        )
+        assertEquals(
+            "Last update 2h ago",
+            overlayLatestUpdate(null, null, updatedAtSeconds = 1_000L, nowMillis = 8_200_000L),
+        )
+    }
+
+    @Test
+    fun `overlay uses the concrete local session name over a generic remote title`() {
+        assertEquals("Release Android build", overlaySessionTitle("Hermes session", "Release Android build"))
+        assertEquals("Host title", overlaySessionTitle("Host title", "Local title"))
+    }
+
+    @Test
     fun `icon snaps to the nearest screen edge`() {
         assertEquals(12, snapOverlayX(currentX = 30, chipWidth = 56, screenWidth = 400, margin = 12))
         assertEquals(332, snapOverlayX(currentX = 300, chipWidth = 56, screenWidth = 400, margin = 12))

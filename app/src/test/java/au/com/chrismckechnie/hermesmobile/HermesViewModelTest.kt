@@ -299,11 +299,34 @@ class HermesViewModelTest {
     fun `starting a skill opens chat with a prepared skill prompt`() = runVmTest {
         val (viewModel, _) = buildViewModel()
         viewModel.selectScreen(DeckScreen.Host)
+        val sessionIdsBefore = viewModel.state.value.sessions.map(HermesSession::id)
+        val activeSessionBefore = viewModel.state.value.activeSessionId
 
         viewModel.startSkill("grill-me")
 
         assertEquals(DeckScreen.Chat, viewModel.state.value.screen)
         assertEquals("Use the grill-me skill: ", viewModel.state.value.composerText)
+        assertEquals(sessionIdsBefore, viewModel.state.value.sessions.map(HermesSession::id))
+        assertEquals(activeSessionBefore, viewModel.state.value.activeSessionId)
+    }
+
+    @Test
+    fun `reloading a transcript drops empty persisted assistant rows`() = runVmTest {
+        val gateway = FakeGateway().apply {
+            messages["s1"] = mutableListOf(
+                HermesMessage("u1", "user", "Run checks"),
+                HermesMessage("t1", "tool", "done", "terminal"),
+                HermesMessage("blank", "assistant", ""),
+                HermesMessage("a1", "assistant", "Checks passed"),
+            )
+        }
+        val (viewModel, _) = buildViewModel(gateway = gateway)
+
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.messages.any { it is ChatUiItem.Assistant && it.text.isBlank() })
+        assertEquals(3, viewModel.state.value.messages.size)
     }
 
     @Test
@@ -913,6 +936,7 @@ class HermesViewModelTest {
         assistant = viewModel.state.value.activeRun!!.tail.filterIsInstance<ChatUiItem.Assistant>().single()
         assertEquals("Using terminal…", assistant.safeStatus)
         assertFalse(assistant.safeStatus.orEmpty().contains("secret command payload"))
+        assertEquals(listOf("Starting task…", "Using terminal…"), assistant.safeStatusHistory)
         assertEquals(
             "Host-provided progress",
             safeRunStatusText(HermesRunEvent.ReasoningAvailable("Host-provided progress")),
@@ -921,6 +945,17 @@ class HermesViewModelTest {
         gateway.events.send(HermesRunEvent.Completed("done"))
         gateway.events.close()
         advanceUntilIdle()
+    }
+
+    @Test
+    fun `safe status history is compact bounded and ignores duplicate updates`() {
+        var history = emptyList<String>()
+        repeat(12) { index -> history = appendSafeStatus(history, " Step   $index ") }
+        history = appendSafeStatus(history, "Step 11")
+
+        assertEquals(10, history.size)
+        assertEquals("Step 2", history.first())
+        assertEquals("Step 11", history.last())
     }
 
     @Test

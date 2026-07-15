@@ -91,22 +91,35 @@ class HermesOverlayService : Service() {
             val hosts = SecureHostStore(applicationContext).load().snapshot.hosts.filter { it.id in enabled }
             val attention = settings.loadAttentionItems().filter { it.hostId in hosts.map(HostProfile::id) }
             val gateway = HermesHttpGateway()
-            val remote = hosts.flatMap { host ->
-                runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList()).map { session ->
-                    OverlaySession(host, session)
-                }
-            }
             val hints = (localRunHints.values + settings.loadRunCheckpoints().map { checkpoint ->
                 LocalRunHint(checkpoint.hostId, checkpoint.sessionId, checkpoint.runId, "Hermes task")
             }).distinctBy(LocalRunHint::runId)
+            val remote = hosts.flatMap { host ->
+                runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList()).map { session ->
+                    val hintedTitle = hints.firstOrNull {
+                        it.hostId == host.id && it.sessionId == session.sessionId
+                    }?.title
+                    OverlaySession(host, session.copy(title = overlaySessionTitle(session.title, hintedTitle)))
+                }
+            }
+            val staleRunIds = mutableSetOf<String>()
             val local = hints.mapNotNull { value ->
                 val host = hosts.firstOrNull { it.id == value.hostId } ?: return@mapNotNull null
                 val alreadyReported = remote.any {
                     it.host.id == value.hostId && it.session.sessionId == value.sessionId
                 }
                 if (alreadyReported) return@mapNotNull null
-                val status = runCatching { gateway.getRunStatus(host, value.runId) }.getOrNull()
-                if (status?.isTerminal == true) null else OverlaySession(
+                val statusResult = runCatching { gateway.getRunStatus(host, value.runId) }
+                val statusError = statusResult.exceptionOrNull() as? HermesApiException
+                if (statusError?.statusCode in setOf(404, 410)) {
+                    staleRunIds += value.runId
+                    return@mapNotNull null
+                }
+                val status = statusResult.getOrNull()
+                if (status?.isTerminal == true) {
+                    staleRunIds += value.runId
+                    null
+                } else OverlaySession(
                     host,
                     HermesActiveSession(
                         sessionId = value.sessionId,
@@ -117,33 +130,30 @@ class HermesOverlayService : Service() {
                     ),
                 )
             }
+            if (staleRunIds.isNotEmpty()) {
+                staleRunIds.forEach {
+                    localRunHints = localRunHints - it
+                    settings.clearRunStatus(it)
+                }
+                settings.saveRunCheckpoints(
+                    settings.loadRunCheckpoints().filterNot { it.runId in staleRunIds },
+                )
+            }
             val active = (remote + local)
                 .distinctBy { it.host.id to it.session.sessionId }
                 .map { item ->
                     item.copy(
-                        latestStatus = item.session.runId?.let(settings::loadRunStatus),
+                        latestStatus = overlayLatestUpdate(
+                            localStatus = item.session.runId?.let(settings::loadRunStatus),
+                            remoteStatus = item.session.latestStatus,
+                            updatedAtSeconds = item.session.updatedAt,
+                        ),
                         attention = attention.firstOrNull {
                             it.hostId == item.host.id && it.sessionId == item.session.sessionId
                         },
                     )
                 }
-            active + attention.filter { item -> active.none { it.host.id == item.hostId && it.session.sessionId == item.sessionId } }
-                .mapNotNull { item ->
-                    hosts.firstOrNull { it.id == item.hostId }?.let { host ->
-                        OverlaySession(
-                            host = host,
-                            session = HermesActiveSession(
-                                sessionId = item.sessionId,
-                                runId = null,
-                                title = item.title,
-                                state = item.state,
-                                surface = "mobile_update",
-                            ),
-                            latestStatus = item.state,
-                            attention = item,
-                        )
-                    }
-                }
+            active
         }
 
         val sessionsChanged = sessions != next
@@ -710,6 +720,46 @@ internal fun anchoredPanelPosition(
         else -> margin
     }.coerceIn(margin, maxY)
     return OverlayPoint(x, y)
+}
+
+internal fun overlayLatestUpdate(
+    localStatus: String?,
+    remoteStatus: String?,
+    updatedAtSeconds: Long?,
+    nowMillis: Long = System.currentTimeMillis(),
+): String? {
+    val status = (localStatus ?: remoteStatus)
+        ?.trim()
+        ?.replace(Regex("\\s+"), " ")
+        ?.take(180)
+        ?.takeIf(String::isNotEmpty)
+    val age = updatedAtSeconds?.let { updatedAt ->
+        val elapsedSeconds = ((nowMillis / 1_000L) - updatedAt).coerceAtLeast(0L)
+        when {
+            elapsedSeconds < 60L -> "just now"
+            elapsedSeconds < 3_600L -> "${elapsedSeconds / 60L}m ago"
+            elapsedSeconds < 86_400L -> "${elapsedSeconds / 3_600L}h ago"
+            else -> "${elapsedSeconds / 86_400L}d ago"
+        }
+    }
+    return when {
+        status != null && age != null -> "$status · $age"
+        status != null -> status
+        age != null -> "Last update $age"
+        else -> null
+    }
+}
+
+internal fun overlaySessionTitle(remoteTitle: String?, localTitle: String?): String {
+    val remote = remoteTitle?.trim().orEmpty()
+    val local = localTitle?.trim().orEmpty()
+    val remoteIsGeneric = remote.isBlank() || remote.lowercase() in setOf("hermes session", "hermes task")
+    return when {
+        remoteIsGeneric && local.isNotBlank() && local.lowercase() !in setOf("hermes session", "hermes task") -> local
+        remote.isNotBlank() -> remote
+        local.isNotBlank() -> local
+        else -> "Hermes session"
+    }
 }
 
 internal data class ActiveWorkCopy(
