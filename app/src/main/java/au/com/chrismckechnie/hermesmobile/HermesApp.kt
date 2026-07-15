@@ -396,7 +396,6 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     } else Modifier,
                 )
             }
-            ModelChip(state, viewModel)
             if (transcript != null) {
                 Spacer(Modifier.width(4.dp))
                 IconButton(
@@ -694,36 +693,69 @@ private fun RunBanner(state: HermesUiState, viewModel: HermesViewModel) {
 
 @Composable
 private fun ModelChip(state: HermesUiState, viewModel: HermesViewModel) {
-    if (state.models.isEmpty()) return
     var open by remember { mutableStateOf(false) }
-    val modelLabel = state.selectedModel ?: state.capabilities?.model ?: state.models.first()
     val supportsReasoning = state.capabilities?.supportsReasoningEffort == true
+    val modelLabel = state.selectedModel
+        ?: state.capabilities?.model?.takeIf(String::isNotBlank)
+        ?: state.models.firstOrNull()
+    if (state.activeHost == null || (modelLabel == null && state.models.isEmpty() && !supportsReasoning)) return
     val chipLabel = state.selectedReasoningEffort
         ?.takeIf { supportsReasoning }
-        ?.let { "$modelLabel · $it" }
+        ?.let { "${modelLabel ?: "Model"} · $it" }
         ?: modelLabel
+        ?: "Model"
 
+    ComposerControlPill(
+        label = chipLabel,
+        icon = Lucide.ChevronDown,
+        contentDescription = "Model and reasoning settings",
+        onClick = { open = true },
+    )
+    if (open) ModelSettingsSheet(state, viewModel, supportsReasoning) { open = false }
+}
+
+@Composable
+private fun PermissionChip(state: HermesUiState, viewModel: HermesViewModel) {
+    if (state.capabilities?.supportsPermissionMode != true) return
+    var open by remember { mutableStateOf(false) }
+    ComposerControlPill(
+        label = if (state.selectedPermissionMode == "full-access") "Full access" else "Default permissions",
+        icon = if (state.selectedPermissionMode == "full-access") Lucide.ShieldCheck else Lucide.Lock,
+        contentDescription = "Permission settings",
+        highlight = state.selectedPermissionMode == "full-access",
+        onClick = { open = true },
+    )
+    if (open) PermissionSettingsSheet(state, viewModel) { open = false }
+}
+
+@Composable
+private fun ComposerControlPill(
+    label: String,
+    icon: ImageVector,
+    contentDescription: String,
+    highlight: Boolean = false,
+    onClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
-            .widthIn(max = 118.dp)
+            .widthIn(max = 210.dp)
             .heightIn(min = 48.dp)
             .clip(CircleShape)
-            .background(T.Cream.copy(alpha = 0.07f))
-            .clickable { open = true }
-            .padding(start = 10.dp, end = 7.dp),
+            .background(if (highlight) T.Cream.copy(alpha = 0.14f) else T.Cream.copy(alpha = 0.07f))
+            .clickable(onClickLabel = contentDescription, onClick = onClick)
+            .padding(start = 11.dp, end = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            chipLabel,
+            label,
             style = T.MicroBold.copy(letterSpacing = 0.sp),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1f, fill = false),
         )
-        Spacer(Modifier.width(4.dp))
-        Icon(Lucide.ChevronDown, "Model and reasoning settings", tint = T.Muted, modifier = Modifier.size(15.dp))
+        Spacer(Modifier.width(5.dp))
+        Icon(icon, contentDescription, tint = if (highlight) T.Cream else T.Muted, modifier = Modifier.size(15.dp))
     }
-    if (open) ModelSettingsSheet(state, viewModel, supportsReasoning) { open = false }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -780,6 +812,45 @@ private fun ModelSettingsSheet(
                     options = (listOf<String?>(null) + REASONING_EFFORTS).map { it to (it ?: "host default") },
                     selectedKey = state.selectedReasoningEffort,
                     onSelect = viewModel::selectReasoningEffort,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PermissionSettingsSheet(
+    state: HermesUiState,
+    viewModel: HermesViewModel,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = T.SurfaceLow,
+        scrimColor = T.Scrim,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+            Text("Permissions", style = T.SheetTitle)
+            Text(
+                "Choose how Hermes handles ordinary command approvals for runs in this session.",
+                style = T.BodyMuted,
+                modifier = Modifier.padding(top = 3.dp, bottom = 14.dp),
+            )
+            SelectorField(
+                label = "RUN PERMISSIONS",
+                value = if (state.selectedPermissionMode == "full-access") "Full access" else "Default permissions",
+                options = listOf(null to "Default permissions", "full-access" to "Full access"),
+                selectedKey = state.selectedPermissionMode,
+                onSelect = viewModel::selectPermissionMode,
+            )
+            if (state.selectedPermissionMode == "full-access") {
+                Text(
+                    "Full access skips ordinary approval prompts for runs started while selected. Host safety blocks still apply and the host-wide policy is unchanged.",
+                    style = T.BodyMuted.copy(color = T.Warn),
+                    modifier = Modifier.padding(top = 12.dp),
                 )
             }
         }
@@ -1366,6 +1437,19 @@ private fun Composer(state: HermesUiState, viewModel: HermesViewModel) {
                         if (suggestion.kind == SlashKind.Skill) Text("SKILL", style = T.MicroBold)
                     }
                 }
+            }
+        }
+
+        if (state.activeHost != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(start = 11.dp, end = 11.dp, top = 7.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ModelChip(state, viewModel)
+                PermissionChip(state, viewModel)
             }
         }
 

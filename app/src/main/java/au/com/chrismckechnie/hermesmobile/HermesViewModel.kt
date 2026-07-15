@@ -337,6 +337,7 @@ data class SlashSuggestion(
 
 /** Host-valid reasoning effort levels (hermes_constants.VALID_REASONING_EFFORTS). */
 val REASONING_EFFORTS = listOf("none", "minimal", "low", "medium", "high", "xhigh", "max")
+private val PERMISSION_MODES = listOf("full-access")
 
 val LOCAL_COMMANDS = listOf(
     SlashSuggestion(SlashKind.Command, "new", "Start a new session"),
@@ -369,8 +370,10 @@ data class HermesUiState(
     val models: List<String> = emptyList(),
     val modelSelections: Map<SessionKey, String> = emptyMap(),
     val reasoningSelections: Map<SessionKey, String> = emptyMap(),
+    val permissionSelections: Map<SessionKey, String> = emptyMap(),
     val newSessionModelSelections: Map<String, String> = emptyMap(),
     val newSessionReasoningSelections: Map<String, String> = emptyMap(),
+    val newSessionPermissionSelections: Map<String, String> = emptyMap(),
     val composerDrafts: Map<SessionKey, String> = emptyMap(),
     val newSessionDrafts: Map<String, String> = emptyMap(),
     val sendingSessions: Set<SessionKey> = emptySet(),
@@ -399,6 +402,9 @@ data class HermesUiState(
     val selectedReasoningEffort: String? get() = activeSessionKey
         ?.let(reasoningSelections::get)
         ?: activeHostId?.takeIf { activeSessionKey == null }?.let(newSessionReasoningSelections::get)
+    val selectedPermissionMode: String? get() = activeSessionKey
+        ?.let(permissionSelections::get)
+        ?: activeHostId?.takeIf { activeSessionKey == null }?.let(newSessionPermissionSelections::get)
     val composerText: String get() = activeSessionKey?.let { composerDrafts[it] }
         ?: activeHostId?.let { newSessionDrafts[it] }
         .orEmpty()
@@ -532,15 +538,29 @@ class HermesViewModel(
         return copy(newSessionReasoningSelections = nextReasoning)
     }
 
+    private fun HermesUiState.withPermissionSelection(key: SessionKey?, permission: String?): HermesUiState {
+        if (key != null) {
+            val nextPermissions = permission?.let { permissionSelections + (key to it) } ?: permissionSelections - key
+            return copy(permissionSelections = nextPermissions)
+        }
+        val hostId = activeHostId ?: return this
+        val nextPermissions = permission?.let { newSessionPermissionSelections + (hostId to it) }
+            ?: newSessionPermissionSelections - hostId
+        return copy(newSessionPermissionSelections = nextPermissions)
+    }
+
     private fun HermesUiState.transferNewSessionSelections(hostId: String, sessionId: String): HermesUiState {
         val key = SessionKey(hostId, sessionId)
         val model = newSessionModelSelections[hostId]
         val reasoning = newSessionReasoningSelections[hostId]
+        val permission = newSessionPermissionSelections[hostId]
         return copy(
             modelSelections = if (model == null) modelSelections else modelSelections + (key to model),
             reasoningSelections = if (reasoning == null) reasoningSelections else reasoningSelections + (key to reasoning),
+            permissionSelections = if (permission == null) permissionSelections else permissionSelections + (key to permission),
             newSessionModelSelections = newSessionModelSelections - hostId,
             newSessionReasoningSelections = newSessionReasoningSelections - hostId,
+            newSessionPermissionSelections = newSessionPermissionSelections - hostId,
         )
     }
 
@@ -612,6 +632,7 @@ class HermesViewModel(
             },
             modelSelections = modelSelections.move(),
             reasoningSelections = reasoningSelections.move(),
+            permissionSelections = permissionSelections.move(),
             composerDrafts = composerDrafts.move(),
             sendingSessions = if (oldKey in sendingSessions) (sendingSessions - oldKey) + newKey else sendingSessions,
             activeRuns = activeRuns.move { run -> run.copy(sessionId = newKey.sessionId) },
@@ -1079,6 +1100,13 @@ class HermesViewModel(
         }
     }
 
+    /** null uses the Host policy; full-access asks the Host to isolate bypass to each submitted Run. */
+    fun selectPermissionMode(mode: String?) {
+        mutableState.update { state ->
+            state.withPermissionSelection(state.activeSessionKey, mode?.takeIf { it in PERMISSION_MODES })
+        }
+    }
+
     fun toggleJob(job: HermesJob) {
         val host = mutableState.value.activeHost ?: return
         val enabled = !job.enabled
@@ -1279,6 +1307,7 @@ class HermesViewModel(
                         page.messages,
                         current.modelSelections[runKey],
                         current.reasoningSelections[runKey].takeIf { capabilities.supportsReasoningEffort },
+                        current.permissionSelections[runKey].takeIf { capabilities.supportsPermissionMode },
                     )
                 } catch (error: HermesApiException) {
                     // The host answered: the run was not accepted.

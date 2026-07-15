@@ -288,6 +288,7 @@ def check_host(base_url: str, api_key: str, timeout: float) -> tuple[int, dict[s
         ("scoped_device_tokens", ("scoped_device_tokens",), None, None, None, False),
         ("complete_model_inventory", ("complete_model_inventory",), "models", "GET", "/v1/models", False),
         ("run_reasoning_effort", ("run_reasoning_effort",), None, None, None, False),
+        ("run_permission_mode", ("run_permission_mode",), None, None, None, False),
     )
     optional_failures: list[str] = []
     optional_report: dict[str, Any] = {}

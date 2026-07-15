@@ -175,12 +175,14 @@ class HermesHttpGateway(
         history: List<HermesMessage>,
         model: String?,
         reasoningEffort: String?,
+        permissionMode: String?,
     ): String = withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
             put("input", input)
             put("session_id", sessionId)
             if (!model.isNullOrBlank()) put("model", model)
             if (!reasoningEffort.isNullOrBlank()) put("reasoning_effort", reasoningEffort)
+            if (!permissionMode.isNullOrBlank()) put("permission_mode", permissionMode)
             put("conversation_history", JSONArray().apply {
                 // Tool messages don't survive the host's {role, content}
                 // reduction; send only substantive user/assistant turns.

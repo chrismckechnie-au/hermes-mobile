@@ -22,7 +22,7 @@ import java.io.IOException
 
 private val RUN_BUNDLE = setOf(
     "run_submission", "run_events_sse", "run_stop", "approval_events", "run_approval_response",
-    "skills_api", "session_resources", "session_fork", "run_reasoning_effort", "host_update_api",
+    "skills_api", "session_resources", "session_fork", "run_reasoning_effort", "run_permission_mode", "host_update_api",
 )
 
 private class FakeGateway : HermesGateway {
@@ -67,7 +67,14 @@ private class FakeGateway : HermesGateway {
     val forks = mutableListOf<String>()
     val created = mutableListOf<HermesSession>()
 
-    data class SubmitCall(val sessionId: String, val input: String, val history: List<HermesMessage>, val model: String?, val reasoningEffort: String?)
+    data class SubmitCall(
+        val sessionId: String,
+        val input: String,
+        val history: List<HermesMessage>,
+        val model: String?,
+        val reasoningEffort: String?,
+        val permissionMode: String?,
+    )
 
     fun eventsFor(runId: String): Channel<HermesRunEvent> =
         eventStreams.getOrPut(runId) { Channel(Channel.UNLIMITED) }
@@ -106,9 +113,17 @@ private class FakeGateway : HermesGateway {
     override suspend fun listModels(host: HostProfile) = models
     override suspend fun listActiveSessions(host: HostProfile) = activeSessionsByHost[host.id] ?: activeSessions
 
-    override suspend fun submitRun(host: HostProfile, sessionId: String, input: String, history: List<HermesMessage>, model: String?, reasoningEffort: String?): String {
+    override suspend fun submitRun(
+        host: HostProfile,
+        sessionId: String,
+        input: String,
+        history: List<HermesMessage>,
+        model: String?,
+        reasoningEffort: String?,
+        permissionMode: String?,
+    ): String {
         submitError?.let { throw it }
-        submits += SubmitCall(sessionId, input, history, model, reasoningEffort)
+        submits += SubmitCall(sessionId, input, history, model, reasoningEffort, permissionMode)
         return "run-${submits.size}"
     }
 
@@ -487,14 +502,16 @@ class HermesViewModelTest {
     }
 
     @Test
-    fun `model and reasoning selected before a session transfer to the created session`() = runVmTest {
+    fun `run settings selected before a session transfer to the created session`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
 
         assertNull(viewModel.state.value.activeSessionId)
         viewModel.selectModel("gpt-5.6-terra")
         viewModel.selectReasoningEffort("high")
+        viewModel.selectPermissionMode("full-access")
         assertEquals("gpt-5.6-terra", viewModel.state.value.selectedModel)
         assertEquals("high", viewModel.state.value.selectedReasoningEffort)
+        assertEquals("full-access", viewModel.state.value.selectedPermissionMode)
 
         viewModel.setComposerText("start with these settings")
         viewModel.sendMessage()
@@ -503,10 +520,13 @@ class HermesViewModelTest {
         assertEquals("new-0", viewModel.state.value.activeSessionId)
         assertEquals("gpt-5.6-terra", gateway.submits.single().model)
         assertEquals("high", gateway.submits.single().reasoningEffort)
+        assertEquals("full-access", gateway.submits.single().permissionMode)
         assertEquals("gpt-5.6-terra", viewModel.state.value.selectedModel)
         assertEquals("high", viewModel.state.value.selectedReasoningEffort)
+        assertEquals("full-access", viewModel.state.value.selectedPermissionMode)
         assertTrue(viewModel.state.value.newSessionModelSelections.isEmpty())
         assertTrue(viewModel.state.value.newSessionReasoningSelections.isEmpty())
+        assertTrue(viewModel.state.value.newSessionPermissionSelections.isEmpty())
 
         gateway.events.close()
         advanceUntilIdle()
@@ -660,6 +680,43 @@ class HermesViewModelTest {
         advanceUntilIdle()
 
         assertNull(gateway.submits.single().reasoningEffort)
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `selected permission mode rides the run submission`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+
+        viewModel.selectPermissionMode("unsafe")
+        assertNull(viewModel.state.value.selectedPermissionMode)
+
+        viewModel.selectPermissionMode("full-access")
+        viewModel.setComposerText("handle this")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertEquals("full-access", gateway.submits.single().permissionMode)
+        gateway.events.close()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `permission mode is dropped when the host lacks the capability`() = runVmTest {
+        val gateway = FakeGateway()
+        gateway.capabilities = HermesCapabilities("m", "p", RUN_BUNDLE - "run_permission_mode")
+        val (viewModel, _) = buildViewModel(gateway)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+
+        viewModel.selectPermissionMode("full-access")
+        viewModel.setComposerText("handle this")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        assertNull(gateway.submits.single().permissionMode)
         gateway.events.close()
         advanceUntilIdle()
     }

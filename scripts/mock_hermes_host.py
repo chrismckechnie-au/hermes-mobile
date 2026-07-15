@@ -132,6 +132,7 @@ class Handler(BaseHTTPRequestHandler):
                     "approval_events": True,
                     "run_approval_response": True,
                     "run_reasoning_effort": True,
+                    "run_permission_mode": True,
                     "run_task_updates": True,
                     "run_subagent_updates": True,
                     "skills_api": True,
@@ -248,6 +249,10 @@ class Handler(BaseHTTPRequestHandler):
             effort = body.get("reasoning_effort")
             if effort is not None and effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}:
                 self._json(400, {"error": {"message": f"Invalid reasoning_effort: {effort!r}", "code": "invalid_reasoning_effort"}})
+                return
+            permission_mode = body.get("permission_mode", "default")
+            if not isinstance(permission_mode, str) or permission_mode not in {"default", "full-access"}:
+                self._json(400, {"error": {"message": f"Invalid permission_mode: {permission_mode!r}", "code": "invalid_permission_mode"}})
                 return
             run_id = f"run_{uuid.uuid4().hex[:8]}"
             with RUNS_LOCK:

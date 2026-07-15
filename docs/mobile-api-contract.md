@@ -56,6 +56,7 @@ be assumed solely because a host is reachable.
 | Active work recovery | `active_session_registry` | `GET /v1/active-sessions` | Not implemented |
 | Push wake registration | `mobile_notifications` | `PUT`/`DELETE /v1/mobile/devices/{installation_id}` | Not implemented |
 | Per-run reasoning | `run_reasoning_effort` | Run request field | Not implemented |
+| Per-run permissions | `run_permission_mode` | `permission_mode` Run request field | Not implemented |
 | Host self-update | `host_update_api` | `GET`/`POST /v1/host-update` | Not implemented |
 | Scheduled-job administration | No stable stock flag | `/api/jobs...` | Not implemented in the stable API server |
 | Complete model inventory | No stock flag | Extended `/v1/models` contract | Not implemented |

@@ -60,6 +60,7 @@ data class HermesCapabilities(
         )
     val supportsSkills: Boolean get() = "skills_api" in features
     val supportsReasoningEffort: Boolean get() = "run_reasoning_effort" in features
+    val supportsPermissionMode: Boolean get() = "run_permission_mode" in features
     val supportsSessionEdit: Boolean get() = "session_resources" in features
     val supportsSessionFork: Boolean get() = "session_fork" in features
     val supportsRunTaskUpdates: Boolean get() = "run_task_updates" in features
@@ -257,6 +258,7 @@ interface HermesGateway {
         history: List<HermesMessage>,
         model: String? = null,
         reasoningEffort: String? = null,
+        permissionMode: String? = null,
     ): String
     suspend fun streamRunEvents(host: HostProfile, runId: String, onEvent: (HermesRunEvent) -> Unit)
     suspend fun getRunStatus(host: HostProfile, runId: String): HermesRunStatus

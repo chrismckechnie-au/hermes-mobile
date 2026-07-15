@@ -42,13 +42,14 @@ class HermesHttpGatewayTest {
     @Test
     fun `probe uses bearer auth and reads capability bundle`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
-            {"object":"hermes.api_server.capabilities","platform":"hermes-agent","model":"hermes-agent","features":{"run_submission":true,"run_events_sse":true,"run_stop":true,"approval_events":true,"run_approval_response":true,"skills_api":true,"file_upload":false}}
+            {"object":"hermes.api_server.capabilities","platform":"hermes-agent","model":"hermes-agent","features":{"run_submission":true,"run_events_sse":true,"run_stop":true,"approval_events":true,"run_approval_response":true,"skills_api":true,"run_permission_mode":true,"file_upload":false}}
         """.trimIndent()))
 
         val info = gateway.probe(profile)
         val request = server.takeRequest()
 
         assertEquals("/v1/capabilities", request.path)
+        assertTrue(info.supportsPermissionMode)
         assertEquals("Bearer test-key", request.getHeader("Authorization"))
         assertTrue(info.supportsRuns)
         assertTrue(info.supportsSkills)
@@ -202,15 +203,25 @@ class HermesHttpGatewayTest {
         server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run-9","status":"started"}"""))
         server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run-10","status":"started"}"""))
 
-        gateway.submitRun(profile, "session-1", "hello", emptyList(), model = "hermes-fast", reasoningEffort = "high")
+        gateway.submitRun(
+            profile,
+            "session-1",
+            "hello",
+            emptyList(),
+            model = "hermes-fast",
+            reasoningEffort = "high",
+            permissionMode = "full-access",
+        )
         val withOverrides = JSONObject(server.takeRequest().body.readUtf8())
         gateway.submitRun(profile, "session-1", "hello", emptyList())
         val withoutOverrides = JSONObject(server.takeRequest().body.readUtf8())
 
         assertEquals("hermes-fast", withOverrides.getString("model"))
         assertEquals("high", withOverrides.getString("reasoning_effort"))
+        assertEquals("full-access", withOverrides.getString("permission_mode"))
         assertFalse(withoutOverrides.has("model"))
         assertFalse(withoutOverrides.has("reasoning_effort"))
+        assertFalse(withoutOverrides.has("permission_mode"))
     }
 
     @Test

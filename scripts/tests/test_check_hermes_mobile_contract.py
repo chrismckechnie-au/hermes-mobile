@@ -147,6 +147,7 @@ class ContractCheckerTest(unittest.TestCase):
                 "mobile_notifications": True,
                 "host_update_api": True,
                 "run_reasoning_effort": True,
+                "run_permission_mode": True,
             }
         )
         capabilities["endpoints"].update(
