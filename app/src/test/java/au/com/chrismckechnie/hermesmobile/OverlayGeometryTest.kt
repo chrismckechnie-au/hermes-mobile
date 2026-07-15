@@ -1,7 +1,9 @@
 package au.com.chrismckechnie.hermesmobile
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OverlayGeometryTest {
@@ -26,6 +28,15 @@ class OverlayGeometryTest {
     fun `overlay uses the concrete local session name over a generic remote title`() {
         assertEquals("Release Android build", overlaySessionTitle("Hermes session", "Release Android build"))
         assertEquals("Host title", overlaySessionTitle("Host title", "Local title"))
+    }
+
+    @Test
+    fun `overlay excludes terminal and unresponsive sessions`() {
+        assertTrue(isOverlayActiveSession("running"))
+        assertTrue(isOverlayActiveSession("approval"))
+        assertFalse(isOverlayActiveSession("completed"))
+        assertFalse(isOverlayActiveSession("unresponsive"))
+        assertFalse(isOverlayActiveSession("stalled"))
     }
 
     @Test

@@ -120,9 +120,10 @@ tool output, commands, and credentials are never included in FCM payloads.
 Runs started in Hermes Mobile also show an ongoing local work notification;
 this does not require Firebase. The overlay is seeded from the local run and
 then reconciled against `/v1/active-sessions`, avoiding first-poll races. The
-overlay contains active work only, so completed sessions cannot linger there;
-terminal outcomes remain available through Android notifications. Approval
-requests remain visible while their session is active.
+overlay contains responsive active work only, so completed, stalled, and
+unresponsive sessions cannot linger there; terminal outcomes remain available
+through Android notifications. Approval requests remain visible while their
+session is active.
 
 Dictation uses the Android device's installed speech recognizer. Its privacy
 and network behavior are controlled by that provider; some recognizers send

@@ -95,12 +95,14 @@ class HermesOverlayService : Service() {
                 LocalRunHint(checkpoint.hostId, checkpoint.sessionId, checkpoint.runId, "Hermes task")
             }).distinctBy(LocalRunHint::runId)
             val remote = hosts.flatMap { host ->
-                runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList()).map { session ->
-                    val hintedTitle = hints.firstOrNull {
-                        it.hostId == host.id && it.sessionId == session.sessionId
-                    }?.title
-                    OverlaySession(host, session.copy(title = overlaySessionTitle(session.title, hintedTitle)))
-                }
+                runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList())
+                    .filter { session -> isOverlayActiveSession(session.state) }
+                    .map { session ->
+                        val hintedTitle = hints.firstOrNull {
+                            it.hostId == host.id && it.sessionId == session.sessionId
+                        }?.title
+                        OverlaySession(host, session.copy(title = overlaySessionTitle(session.title, hintedTitle)))
+                    }
             }
             val staleRunIds = mutableSetOf<String>()
             val local = hints.mapNotNull { value ->
@@ -762,6 +764,17 @@ internal fun overlaySessionTitle(remoteTitle: String?, localTitle: String?): Str
         else -> "Hermes session"
     }
 }
+
+internal fun isOverlayActiveSession(state: String?): Boolean =
+    state?.trim()?.lowercase() !in setOf(
+        "completed",
+        "failed",
+        "cancelled",
+        "stopped",
+        "terminal",
+        "unresponsive",
+        "stalled",
+    )
 
 internal data class ActiveWorkCopy(
     val title: String,
