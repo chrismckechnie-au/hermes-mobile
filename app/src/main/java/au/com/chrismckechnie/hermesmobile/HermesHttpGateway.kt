@@ -109,7 +109,7 @@ class HermesHttpGateway(
             // The envelope carries the resolved id — a rotated session resolves
             // to its continuation here.
             sessionId = data.optNullableString("session_id") ?: sessionId,
-            messages = data.optJSONArray("data").toObjectList(::parseMessage),
+            messages = data.requireListArray("data", "message").toObjectList(::parseMessage),
         )
     }
 
@@ -118,7 +118,7 @@ class HermesHttpGateway(
             .addQueryParameter("include_disabled", "true")
             .build()
         val data = executeJson(host, request(host, url))
-        data.optJSONArray("jobs").toObjectList { json ->
+        data.requireListArray("jobs", "job").toObjectList { json ->
             HermesJob(
                 id = json.optString("id"),
                 name = json.optString("name", "Scheduled job"),
@@ -140,7 +140,7 @@ class HermesHttpGateway(
 
     override suspend fun listSkills(host: HostProfile): List<HermesSkill> = withContext(Dispatchers.IO) {
         val data = executeJson(host, request(host, listOf("v1", "skills")))
-        data.optJSONArray("data").toObjectList { json ->
+        data.requireListArray("data", "skill").toObjectList { json ->
             HermesSkill(
                 name = json.optString("name"),
                 description = json.optNullableString("description"),
@@ -150,7 +150,7 @@ class HermesHttpGateway(
 
     override suspend fun listToolsets(host: HostProfile): List<HermesToolset> = withContext(Dispatchers.IO) {
         val data = executeJson(host, request(host, listOf("v1", "toolsets")))
-        data.optJSONArray("data").toObjectList { json ->
+        data.requireListArray("data", "toolset").toObjectList { json ->
             HermesToolset(
                 name = json.optString("name"),
                 label = json.optString("label").ifBlank { json.optString("name") },
@@ -164,7 +164,7 @@ class HermesHttpGateway(
 
     override suspend fun listModels(host: HostProfile): List<String> = withContext(Dispatchers.IO) {
         val data = executeJson(host, request(host, listOf("v1", "models")))
-        data.optJSONArray("data").toObjectList { json -> json.optString("id") }
+        data.requireListArray("data", "model").toObjectList { json -> json.optString("id") }
             .filter { it.isNotBlank() }
             .distinct()
     }
@@ -177,6 +177,7 @@ class HermesHttpGateway(
         model: String?,
         reasoningEffort: String?,
         permissionMode: String?,
+        idempotencyKey: String?,
     ): String = withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
             put("input", input)
@@ -197,16 +198,30 @@ class HermesHttpGateway(
                     }
             })
         }
-        val data = executeJson(host, request(host, endpoint(host, "v1", "runs"), method = "POST", body = body))
+        val submitRequest = request(host, endpoint(host, "v1", "runs"), method = "POST", body = body)
+            .newBuilder()
+            .apply {
+                idempotencyKey?.trim()?.takeIf(String::isNotBlank)?.let {
+                    header("Idempotency-Key", it)
+                }
+            }
+            .build()
+        val data = executeJson(host, submitRequest)
         data.optNullableString("run_id") ?: throw HermesApiException(502, "Hermes did not return a run id.")
     }
 
     override suspend fun streamRunEvents(
         host: HostProfile,
         runId: String,
+        afterEventId: Long?,
         onEvent: (HermesRunEvent) -> Unit,
     ) = suspendCancellableCoroutine { continuation ->
         val streamRequest = request(host, endpoint(host, "v1", "runs", runId, "events"))
+            .newBuilder()
+            .apply {
+                afterEventId?.takeIf { it > 0L }?.let { header("Last-Event-ID", it.toString()) }
+            }
+            .build()
         val call = eventStreamClient.newCall(streamRequest)
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
@@ -248,32 +263,58 @@ class HermesHttpGateway(
         })
     }
 
-    private fun parseRunEvent(payload: JSONObject): HermesRunEvent? = when (payload.optString("event")) {
-        "message.delta" -> HermesRunEvent.MessageDelta(payload.optString("delta"))
-        "reasoning.available" -> HermesRunEvent.ReasoningAvailable(payload.optString("text"))
-        "tool.started" -> HermesRunEvent.ToolStarted(
-            payload.optNullableString("tool") ?: "tool",
-            payload.optNullableString("preview"),
-        )
-        "tool.completed" -> HermesRunEvent.ToolCompleted(
-            payload.optNullableString("tool") ?: "tool",
-            failed = payload.optBoolean("error", false),
-        )
-        "tasks.updated" -> HermesRunEvent.TasksUpdated(
-            payload.optJSONArray("tasks").toObjectList(::parseTask).filterNotNull(),
-        )
-        "subagent.updated" -> payload.optJSONObject("subagent")
-            ?.let(::parseSubagent)
-            ?.let(HermesRunEvent::SubagentUpdated)
-        "approval.request" -> HermesRunEvent.ApprovalRequested(payload.optNullableString("command"))
-        "approval.responded" -> HermesRunEvent.ApprovalResponded(payload.optNullableString("choice"))
-        "run.completed" -> HermesRunEvent.Completed(
-            output = payload.optString("output"),
-            usage = payload.optRunUsage(),
-        )
-        "run.failed" -> HermesRunEvent.Failed(payload.optString("error", "Hermes run failed."))
-        "run.cancelled" -> HermesRunEvent.Cancelled
-        else -> null // Future events remain forward-compatible.
+    private fun parseRunEvent(payload: JSONObject): HermesRunEvent? {
+        val eventId = payload.optLong("event_id").takeIf { payload.has("event_id") && it > 0L }
+        return when (payload.optString("event")) {
+            "message.delta" -> HermesRunEvent.MessageDelta(payload.optString("delta"), eventId)
+            "reasoning.available" -> HermesRunEvent.ReasoningAvailable(payload.optString("text"), eventId)
+            "tool.started" -> HermesRunEvent.ToolStarted(
+                payload.optNullableString("tool") ?: "tool",
+                payload.optNullableString("preview"),
+                eventId,
+            )
+            "tool.completed" -> HermesRunEvent.ToolCompleted(
+                payload.optNullableString("tool") ?: "tool",
+                failed = payload.optBoolean("error", false),
+                eventId = eventId,
+            )
+            "tasks.updated" -> HermesRunEvent.TasksUpdated(
+                payload.optJSONArray("tasks").toObjectList(::parseTask).filterNotNull(),
+                eventId,
+            )
+            "subagent.updated" -> payload.optJSONObject("subagent")
+                ?.let(::parseSubagent)
+                ?.let { HermesRunEvent.SubagentUpdated(it, eventId) }
+            "workspace.updated" -> HermesRunEvent.WorkspaceUpdated(
+                parseWorkspaceUpdate(payload),
+                eventId,
+            )
+            "approval.request" -> HermesRunEvent.ApprovalRequested(payload.optNullableString("command"), eventId)
+            "approval.responded" -> HermesRunEvent.ApprovalResponded(payload.optNullableString("choice"), eventId)
+            "run.completed" -> HermesRunEvent.Completed(
+                output = payload.optString("output"),
+                usage = payload.optRunUsage(),
+                eventId = eventId,
+            )
+            "run.failed" -> HermesRunEvent.Failed(payload.optString("error", "Hermes run failed."), eventId)
+            "run.cancelled" -> HermesRunEvent.Cancelled
+            else -> null // Future events remain forward-compatible.
+        }
+    }
+
+    private fun parseWorkspaceUpdate(payload: JSONObject): HermesWorkspaceUpdate {
+        val files = payload.optJSONArray("files").toObjectList { item ->
+            HermesWorkspaceChange(
+                path = item.optString("path").trim().take(MAX_WORKSPACE_PATH_LENGTH),
+                status = item.optString("status", "modified").trim().take(MAX_WORKSPACE_STATUS_LENGTH),
+                additions = item.optInt("additions").takeIf { item.has("additions") },
+                deletions = item.optInt("deletions").takeIf { item.has("deletions") },
+                diff = item.optNullableString("diff")?.take(MAX_WORKSPACE_DIFF_LENGTH),
+            )
+        }.filter { it.path.isNotBlank() }.distinctBy(HermesWorkspaceChange::path).take(MAX_WORKSPACE_FILES)
+        val hostTruncated = payload.optBoolean("truncated", false)
+        val clientTruncated = (payload.optJSONArray("files")?.length() ?: 0) > files.size
+        return HermesWorkspaceUpdate(files, hostTruncated || clientTruncated)
     }
 
     override suspend fun getRunStatus(host: HostProfile, runId: String): HermesRunStatus = withContext(Dispatchers.IO) {
@@ -295,6 +336,7 @@ class HermesHttpGateway(
                 surface = json.optString("surface", "unknown"),
                 latestStatus = json.optNullableString("latest_status"),
                 updatedAt = json.optNullableEpochSeconds("updated_at"),
+                leaseId = json.optNullableString("lease_id"),
             )
         }.filter { it.sessionId.isNotBlank() }
     }
@@ -321,6 +363,12 @@ class HermesHttpGateway(
 
     override suspend fun unregisterMobileDevice(host: HostProfile, installationId: String) = withContext(Dispatchers.IO) {
         executeIgnoringBody(request(host, endpoint(host, "v1", "mobile", "devices", installationId), method = "DELETE"))
+    }
+
+    override suspend fun clearStaleActiveSession(host: HostProfile, leaseId: String) = withContext(Dispatchers.IO) {
+        executeIgnoringBody(
+            request(host, endpoint(host, "v1", "active-sessions", leaseId), method = "DELETE"),
+        )
     }
 
     override suspend fun respondApproval(host: HostProfile, runId: String, choice: String) {
@@ -466,6 +514,10 @@ class HermesHttpGateway(
         const val ORDINARY_READ_TIMEOUT_SECONDS = 30L
         const val WRITE_TIMEOUT_SECONDS = 20L
         const val ORDINARY_CALL_TIMEOUT_SECONDS = 45L
+        const val MAX_WORKSPACE_FILES = 100
+        const val MAX_WORKSPACE_PATH_LENGTH = 320
+        const val MAX_WORKSPACE_STATUS_LENGTH = 32
+        const val MAX_WORKSPACE_DIFF_LENGTH = 20_000
         val TASK_STATUSES = setOf("pending", "in_progress", "completed", "cancelled")
         val SUBAGENT_STATUSES = setOf(
             "running", "working", "thinking", "completed", "failed", "timeout", "interrupted", "error",
@@ -536,3 +588,7 @@ private fun JSONObject.optNullableString(name: String): String? {
     if (!has(name) || isNull(name)) return null
     return opt(name)?.toString()?.takeIf { it.isNotBlank() }
 }
+
+private fun JSONObject.requireListArray(name: String, resource: String): JSONArray =
+    optJSONArray(name)
+        ?: throw HermesApiException(200, "Hermes returned an unexpected $resource list shape.")

@@ -11,6 +11,7 @@ import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -153,6 +154,19 @@ class HermesHttpGatewayTest {
     }
 
     @Test
+    fun `listJobs parses the jobs listing`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""
+            {"jobs":[{"id":"job-1","name":"Daily report","schedule":"0 9 * * *","enabled":false,"deliver":"mobile"}]}
+        """.trimIndent()))
+
+        val jobs = gateway.listJobs(profile)
+        val request = server.takeRequest()
+
+        assertEquals("/api/jobs?include_disabled=true", request.path)
+        assertEquals(HermesJob("job-1", "Daily report", "0 9 * * *", false, "mobile"), jobs.single())
+    }
+
+    @Test
     fun `listSkills parses the skills listing`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
             {"object":"list","data":[{"name":"grill-me","description":"A relentless interview.","category":null}]}
@@ -200,6 +214,38 @@ class HermesHttpGatewayTest {
     }
 
     @Test
+    fun `collection endpoints reject a successful response with a missing list envelope`() = runBlocking {
+        val calls = listOf<Pair<String, suspend () -> Any>>(
+            "messages" to { gateway.loadMessages(profile, "session-1") },
+            "jobs" to { gateway.listJobs(profile) },
+            "skills" to { gateway.listSkills(profile) },
+            "toolsets" to { gateway.listToolsets(profile) },
+            "models" to { gateway.listModels(profile) },
+        )
+
+        calls.forEach { (name, call) ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+            val error = runCatching { call() }.exceptionOrNull()
+
+            assertTrue("$name should reject a malformed list envelope", error is HermesApiException)
+            assertNotNull(error?.message)
+        }
+    }
+
+    @Test
+    fun `collection endpoints preserve genuine empty lists`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"session_id":"session-1","data":[]}"""))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"jobs":[]}"""))
+        repeat(3) { server.enqueue(MockResponse().setResponseCode(200).setBody("""{"data":[]}""")) }
+
+        assertTrue(gateway.loadMessages(profile, "session-1").messages.isEmpty())
+        assertTrue(gateway.listJobs(profile).isEmpty())
+        assertTrue(gateway.listSkills(profile).isEmpty())
+        assertTrue(gateway.listToolsets(profile).isEmpty())
+        assertTrue(gateway.listModels(profile).isEmpty())
+    }
+
+    @Test
     fun `submitRun carries the selected model and omits it by default`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run-9","status":"started"}"""))
         server.enqueue(MockResponse().setResponseCode(202).setBody("""{"run_id":"run-10","status":"started"}"""))
@@ -212,14 +258,17 @@ class HermesHttpGatewayTest {
             model = "hermes-fast",
             reasoningEffort = "high",
             permissionMode = "full-access",
+            idempotencyKey = "submit-123",
         )
-        val withOverrides = JSONObject(server.takeRequest().body.readUtf8())
+        val overrideRequest = server.takeRequest()
+        val withOverrides = JSONObject(overrideRequest.body.readUtf8())
         gateway.submitRun(profile, "session-1", "hello", emptyList())
         val withoutOverrides = JSONObject(server.takeRequest().body.readUtf8())
 
         assertEquals("hermes-fast", withOverrides.getString("model"))
         assertEquals("high", withOverrides.getString("reasoning_effort"))
         assertEquals("full-access", withOverrides.getString("permission_mode"))
+        assertEquals("submit-123", overrideRequest.getHeader("Idempotency-Key"))
         assertFalse(withoutOverrides.has("model"))
         assertFalse(withoutOverrides.has("reasoning_effort"))
         assertFalse(withoutOverrides.has("permission_mode"))
@@ -254,7 +303,8 @@ class HermesHttpGatewayTest {
         server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "text/event-stream").setBody("""
             : keepalive
 
-            data: {"event":"message.delta","run_id":"run-1","timestamp":1.0,"delta":"Hel"}
+            id: 5
+            data: {"event":"message.delta","event_id":5,"run_id":"run-1","timestamp":1.0,"delta":"Hel"}
 
             data: {"event":"message.delta","run_id":"run-1","timestamp":1.1,"delta":"lo"}
 
@@ -268,6 +318,8 @@ class HermesHttpGatewayTest {
 
             data: {"event":"subagent.updated","run_id":"run-1","timestamp":1.46,"subagent":{"id":"subagent-1","status":"working","task_index":0,"task_count":2,"tool_count":3,"goal":"Inspect the API","activity":"Reading the run events"}}
 
+            data: {"event":"workspace.updated","run_id":"run-1","timestamp":1.47,"files":[{"path":"app/Main.kt","status":"modified","additions":3,"deletions":1,"diff":"@@ -1 +1 @@"}],"truncated":false}
+
             data: {"event":"approval.request","run_id":"run-1","timestamp":1.5,"command":"rm -rf x","choices":["once","session","always","deny"]}
 
             data: {"event":"approval.responded","run_id":"run-1","timestamp":1.6,"choice":"once","resolved":1}
@@ -279,11 +331,13 @@ class HermesHttpGatewayTest {
         """.trimIndent()))
         val events = mutableListOf<HermesRunEvent>()
 
-        gateway.streamRunEvents(profile, "run-1", events::add)
+        gateway.streamRunEvents(profile, "run-1", 4L, events::add)
         val request = server.takeRequest()
 
         assertEquals("/v1/runs/run-1/events", request.path)
         assertEquals("text/event-stream", request.getHeader("Accept"))
+        assertEquals("4", request.getHeader("Last-Event-ID"))
+        assertEquals(5L, events.filterIsInstance<HermesRunEvent.MessageDelta>().first().eventId)
         assertEquals(
             listOf("Hel", "lo"),
             events.filterIsInstance<HermesRunEvent.MessageDelta>().map { it.delta },
@@ -299,12 +353,18 @@ class HermesHttpGatewayTest {
             HermesSubagent("subagent-1", "working", 0, 2, 3, "Inspect the API", "Reading the run events"),
             events.filterIsInstance<HermesRunEvent.SubagentUpdated>().single().subagent,
         )
+        assertEquals(
+            HermesWorkspaceUpdate(
+                files = listOf(HermesWorkspaceChange("app/Main.kt", "modified", 3, 1, "@@ -1 +1 @@")),
+            ),
+            events.filterIsInstance<HermesRunEvent.WorkspaceUpdated>().single().update,
+        )
         assertTrue(events.any { it is HermesRunEvent.ApprovalRequested && it.command == "rm -rf x" })
         assertTrue(events.any { it is HermesRunEvent.ApprovalResponded && it.choice == "once" })
         val completed = events.filterIsInstance<HermesRunEvent.Completed>().single()
         assertEquals("Hello", completed.output)
         assertEquals(HermesRunUsage(inputTokens = 1, outputTokens = 2, totalTokens = 3), completed.usage)
-        assertEquals(10, events.size)
+        assertEquals(11, events.size)
     }
 
     @Test
@@ -353,7 +413,7 @@ class HermesHttpGatewayTest {
         val startedAt = System.nanoTime()
         val result = runCatching {
             withTimeout(250) {
-                gateway.streamRunEvents(profile, "run-never-responds") { }
+                gateway.streamRunEvents(profile, "run-never-responds", onEvent = { })
             }
         }
         val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
@@ -376,7 +436,7 @@ class HermesHttpGatewayTest {
     @Test
     fun `lists active sessions for overlays`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
-            {"object":"list","active_count":1,"data":[{"session_id":"session-1","run_id":"run-1","title":"Background work","state":"running","surface":"api_server","latest_status":"Using terminal…","updated_at":1720000000.75}]}
+            {"object":"list","active_count":1,"data":[{"lease_id":"lease-1","session_id":"session-1","run_id":"run-1","title":"Background work","state":"running","surface":"api_server","latest_status":"Using terminal…","updated_at":1720000000.75}]}
         """.trimIndent()))
 
         val sessions = gateway.listActiveSessions(profile)
@@ -385,6 +445,18 @@ class HermesHttpGatewayTest {
         assertEquals("Background work", sessions.single().title)
         assertEquals("Using terminal…", sessions.single().latestStatus)
         assertEquals(1_720_000_000L, sessions.single().updatedAt)
+        assertEquals("lease-1", sessions.single().leaseId)
+    }
+
+    @Test
+    fun `clears stale active session by lease id`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+
+        gateway.clearStaleActiveSession(profile, "lease-1")
+        val request = server.takeRequest()
+
+        assertEquals("DELETE", request.method)
+        assertEquals("/v1/active-sessions/lease-1", request.path)
     }
 
     @Test

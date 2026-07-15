@@ -66,6 +66,11 @@ data class HermesCapabilities(
     val supportsSessionFork: Boolean get() = "session_fork" in features
     val supportsRunTaskUpdates: Boolean get() = "run_task_updates" in features
     val supportsRunSubagentUpdates: Boolean get() = "run_subagent_updates" in features
+    val supportsRunWorkspaceUpdates: Boolean get() = "run_workspace_updates" in features
+    val supportsRunEventReplay: Boolean get() = "run_event_replay" in features
+    val supportsRunSubmissionIdempotency: Boolean get() = "run_submission_idempotency" in features
+    val supportsActiveSessionCleanup: Boolean get() = "active_session_cleanup" in features
+    val supportsRunSlashCommands: Boolean get() = "run_slash_commands" in features
     /** The host explicitly opts in before mobile exposes a remote updater. */
     val supportsHostUpdate: Boolean get() = "host_update_api" in features
 }
@@ -193,6 +198,7 @@ data class HermesActiveSession(
     val surface: String,
     val latestStatus: String? = null,
     val updatedAt: Long? = null,
+    val leaseId: String? = null,
 )
 
 /** A bounded, host-approved todo item for the active Run. */
@@ -219,19 +225,40 @@ data class HermesSubagent(
 
 private val ACTIVE_SUBAGENT_STATUSES = setOf("running", "working", "thinking")
 
+/** Bounded, host-reported workspace changes for a Run. Diff text may be omitted. */
+data class HermesWorkspaceChange(
+    val path: String,
+    val status: String,
+    val additions: Int? = null,
+    val deletions: Int? = null,
+    val diff: String? = null,
+)
+
+data class HermesWorkspaceUpdate(
+    val files: List<HermesWorkspaceChange>,
+    val truncated: Boolean = false,
+)
+
 /** Events on `GET /v1/runs/{run_id}/events` — data-only SSE, name in the JSON `event` field. */
 sealed interface HermesRunEvent {
-    data class MessageDelta(val delta: String) : HermesRunEvent
+    val eventId: Long? get() = null
+
+    data class MessageDelta(val delta: String, override val eventId: Long? = null) : HermesRunEvent
     /** Host-approved progress text; this is not the model's private chain of thought. */
-    data class ReasoningAvailable(val text: String) : HermesRunEvent
-    data class ToolStarted(val tool: String, val preview: String?) : HermesRunEvent
-    data class ToolCompleted(val tool: String, val failed: Boolean) : HermesRunEvent
-    data class TasksUpdated(val tasks: List<HermesTask>) : HermesRunEvent
-    data class SubagentUpdated(val subagent: HermesSubagent) : HermesRunEvent
-    data class ApprovalRequested(val command: String?) : HermesRunEvent
-    data class ApprovalResponded(val choice: String?) : HermesRunEvent
-    data class Completed(val output: String, val usage: HermesRunUsage? = null) : HermesRunEvent
-    data class Failed(val error: String) : HermesRunEvent
+    data class ReasoningAvailable(val text: String, override val eventId: Long? = null) : HermesRunEvent
+    data class ToolStarted(val tool: String, val preview: String?, override val eventId: Long? = null) : HermesRunEvent
+    data class ToolCompleted(val tool: String, val failed: Boolean, override val eventId: Long? = null) : HermesRunEvent
+    data class TasksUpdated(val tasks: List<HermesTask>, override val eventId: Long? = null) : HermesRunEvent
+    data class SubagentUpdated(val subagent: HermesSubagent, override val eventId: Long? = null) : HermesRunEvent
+    data class WorkspaceUpdated(val update: HermesWorkspaceUpdate, override val eventId: Long? = null) : HermesRunEvent
+    data class ApprovalRequested(val command: String?, override val eventId: Long? = null) : HermesRunEvent
+    data class ApprovalResponded(val choice: String?, override val eventId: Long? = null) : HermesRunEvent
+    data class Completed(
+        val output: String,
+        val usage: HermesRunUsage? = null,
+        override val eventId: Long? = null,
+    ) : HermesRunEvent
+    data class Failed(val error: String, override val eventId: Long? = null) : HermesRunEvent
     data object Cancelled : HermesRunEvent
 }
 
@@ -262,8 +289,19 @@ interface HermesGateway {
         model: String? = null,
         reasoningEffort: String? = null,
         permissionMode: String? = null,
+        idempotencyKey: String? = null,
     ): String
-    suspend fun streamRunEvents(host: HostProfile, runId: String, onEvent: (HermesRunEvent) -> Unit)
+    suspend fun streamRunEvents(
+        host: HostProfile,
+        runId: String,
+        onEvent: (HermesRunEvent) -> Unit,
+    ) = streamRunEvents(host, runId, null, onEvent)
+    suspend fun streamRunEvents(
+        host: HostProfile,
+        runId: String,
+        afterEventId: Long?,
+        onEvent: (HermesRunEvent) -> Unit,
+    )
     suspend fun getRunStatus(host: HostProfile, runId: String): HermesRunStatus
     suspend fun respondApproval(host: HostProfile, runId: String, choice: String)
     suspend fun stopRun(host: HostProfile, runId: String)
@@ -271,6 +309,7 @@ interface HermesGateway {
     suspend fun deleteSession(host: HostProfile, sessionId: String)
     suspend fun forkSession(host: HostProfile, sessionId: String): HermesSession
     suspend fun listActiveSessions(host: HostProfile): List<HermesActiveSession> = emptyList()
+    suspend fun clearStaleActiveSession(host: HostProfile, leaseId: String) = Unit
     suspend fun registerMobileDevice(
         host: HostProfile,
         installationId: String,

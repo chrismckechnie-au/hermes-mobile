@@ -48,6 +48,8 @@ interface SettingsStore {
     fun saveQueuedInterruptRecords(records: List<QueuedInterruptRecord>) = Unit
     fun loadNotificationHostIds(): Set<String> = emptySet()
     fun saveNotificationHostIds(hostIds: Set<String>) = Unit
+    fun loadMonitoredHostIds(): Set<String> = loadNotificationHostIds()
+    fun saveMonitoredHostIds(hostIds: Set<String>) = Unit
     fun loadOverlayEnabled(): Boolean = false
     fun saveOverlayEnabled(enabled: Boolean) = Unit
     fun loadAttentionItems(): List<AttentionItem> = emptyList()
@@ -73,6 +75,7 @@ private class InMemorySettingsStore : SettingsStore {
     private var unknownOutcomeRecords = emptyList<UnknownOutcomeRecord>()
     private var queuedInterruptRecords = emptyList<QueuedInterruptRecord>()
     private var notificationHosts = emptySet<String>()
+    private var monitoredHosts: Set<String>? = null
     private var overlay = false
     private var attentionItems = emptyList<AttentionItem>()
     override fun loadThemeMode(): ThemeMode = mode
@@ -97,6 +100,8 @@ private class InMemorySettingsStore : SettingsStore {
     }
     override fun loadNotificationHostIds(): Set<String> = notificationHosts
     override fun saveNotificationHostIds(hostIds: Set<String>) { notificationHosts = hostIds }
+    override fun loadMonitoredHostIds(): Set<String> = monitoredHosts ?: notificationHosts
+    override fun saveMonitoredHostIds(hostIds: Set<String>) { monitoredHosts = hostIds }
     override fun loadOverlayEnabled(): Boolean = overlay
     override fun saveOverlayEnabled(enabled: Boolean) { overlay = enabled }
     override fun loadAttentionItems(): List<AttentionItem> = attentionItems
@@ -108,6 +113,7 @@ data class RunCheckpoint(
     val hostId: String,
     val sessionId: String,
     val runId: String,
+    val lastEventId: Long? = null,
 )
 
 data class UnknownOutcomeRecord(
@@ -124,12 +130,30 @@ data class QueuedInterruptRecord(
     val sessionId: String,
     val runId: String,
     val text: String,
+    val mode: FollowUpMode = FollowUpMode.Interrupt,
 )
+
+enum class FollowUpMode { Queue, Interrupt }
 
 data class QueuedInterrupt(
     val runId: String,
     val text: String,
+    val mode: FollowUpMode = FollowUpMode.Interrupt,
     val requiresAcknowledgement: Boolean = false,
+)
+
+data class PendingFollowUpChoice(
+    val hostId: String,
+    val sessionId: String,
+    val runId: String,
+    val text: String,
+) {
+    val sessionKey: SessionKey get() = SessionKey(hostId, sessionId)
+}
+
+data class FullAccessConfirmation(
+    val hostId: String,
+    val sessionId: String?,
 )
 
 /** A durable, non-secret indication that a session has an update to review. */
@@ -162,6 +186,7 @@ internal fun filterSessions(
     filter: SessionFilter = SessionFilter.All,
     activeSessionIds: Set<String> = emptySet(),
     approvalSessionIds: Set<String> = emptySet(),
+    stalledSessionIds: Set<String> = emptySet(),
     defaultModel: String? = null,
 ): List<HermesSession> {
     val needle = query.trim().lowercase()
@@ -170,6 +195,7 @@ internal fun filterSessions(
             SessionFilter.All -> true
             SessionFilter.Running -> session.id in activeSessionIds
             SessionFilter.Approval -> session.id in approvalSessionIds
+            SessionFilter.Stalled -> session.id in stalledSessionIds
             SessionFilter.Mobile -> session.source.isMobileSessionSource()
             SessionFilter.Desktop -> !session.source.isMobileSessionSource()
         }
@@ -183,9 +209,13 @@ internal enum class SessionFilter(val label: String) {
     All("All"),
     Running("Running"),
     Approval("Approval"),
+    Stalled("Stalled"),
     Mobile("Mobile"),
     Desktop("Desktop"),
 }
+
+internal val HermesActiveSession.isStalledActivity: Boolean
+    get() = state.trim().lowercase() in setOf("unresponsive", "stalled")
 
 internal fun displaySessionModel(sessionModel: String?, defaultModel: String?): String? {
     val raw = sessionModel?.trim()?.takeIf(String::isNotEmpty) ?: return null
@@ -332,6 +362,7 @@ data class ActiveRun(
     val tail: List<ChatUiItem> = emptyList(),
     val tasks: List<HermesTask> = emptyList(),
     val subagents: Map<String, HermesSubagent> = emptyMap(),
+    val workspaceUpdate: HermesWorkspaceUpdate? = null,
     val assistantId: String = "",
     val awaitingApproval: Boolean = false,
     val approvalCommand: String? = null,
@@ -341,6 +372,7 @@ data class ActiveRun(
     val recovered: Boolean = false,
     val reconcilingTranscript: Boolean = false,
     val terminalUnsynced: Boolean = false,
+    val lastEventId: Long? = null,
 ) {
     val ref: RunRef get() = RunRef(host.id, sessionId, runId)
 
@@ -366,6 +398,11 @@ internal fun safeRunStatusText(event: HermesRunEvent): String = when (event) {
         ?.take(180)
         ?.ifBlank { null }
         ?: "A subagent is ${event.subagent.status.replace('_', ' ')}…"
+    is HermesRunEvent.WorkspaceUpdated -> when (event.update.files.size) {
+        0 -> "Checked the workspace…"
+        1 -> "Updated ${event.update.files.single().path.substringAfterLast('/')}…"
+        else -> "Updated ${event.update.files.size} workspace files…"
+    }
     is HermesRunEvent.ApprovalRequested -> "Waiting for your approval"
     is HermesRunEvent.ApprovalResponded -> "Continuing after approval…"
     is HermesRunEvent.MessageDelta -> "Writing the response…"
@@ -400,15 +437,15 @@ data class UnknownOutcome(
 
 private data class HostConnectionData(
     val sessions: HermesSessionPage,
-    val jobs: List<HermesJob>,
-    val skills: List<HermesSkill>,
-    val toolsets: List<HermesToolset>,
-    val models: List<String>,
+    val jobs: ResourceState<List<HermesJob>>,
+    val skills: ResourceState<List<HermesSkill>>,
+    val toolsets: ResourceState<List<HermesToolset>>,
+    val models: ResourceState<List<String>>,
     val version: String?,
     val update: HermesHostUpdate?,
 )
 
-enum class SlashKind { Command, Skill }
+enum class SlashKind { Command, HostCommand, Skill }
 
 data class SlashSuggestion(
     val kind: SlashKind,
@@ -418,7 +455,8 @@ data class SlashSuggestion(
 
 /** Host-valid reasoning effort levels (hermes_constants.VALID_REASONING_EFFORTS). */
 val REASONING_EFFORTS = listOf("none", "minimal", "low", "medium", "high", "xhigh", "max")
-private val PERMISSION_MODES = listOf("full-access")
+private const val FULL_ACCESS_MODE = "full-access"
+private val PERMISSION_MODES = listOf(FULL_ACCESS_MODE)
 
 val LOCAL_COMMANDS = listOf(
     SlashSuggestion(SlashKind.Command, "new", "Start a new session"),
@@ -426,6 +464,11 @@ val LOCAL_COMMANDS = listOf(
     SlashSuggestion(SlashKind.Command, "fork", "Fork this session into a new branch"),
     SlashSuggestion(SlashKind.Command, "delete", "Delete this session"),
     SlashSuggestion(SlashKind.Command, "stop", "Stop the active run"),
+)
+
+val HOST_COMMANDS = listOf(
+    SlashSuggestion(SlashKind.HostCommand, "goal", "Set or manage a persistent Hermes goal"),
+    SlashSuggestion(SlashKind.HostCommand, "plan", "Create an implementation plan with the host plan skill"),
 )
 
 data class HermesUiState(
@@ -439,16 +482,20 @@ data class HermesUiState(
     val hostUpdate: HermesHostUpdate? = null,
     val hostUpdateChecking: Boolean = false,
     val hostUpdateStarting: Boolean = false,
-    val sessions: List<HermesSession> = emptyList(),
+    val sessionsResource: ResourceState<List<HermesSession>> = ResourceState.Empty(),
     val sessionsHasMore: Boolean = false,
+    val sessionsLoadingMore: Boolean = false,
+    val sessionsLoadMoreError: String? = null,
     val activeSessionId: String? = null,
     val pendingSessionTarget: SessionKey? = null,
-    val messages: List<ChatUiItem> = emptyList(),
+    val transcriptResource: ResourceState<List<ChatUiItem>> = ResourceState.Empty(),
     val runUsageByMessage: Map<SessionKey, Map<String, HermesRunUsage>> = emptyMap(),
-    val jobs: List<HermesJob> = emptyList(),
-    val skills: List<HermesSkill> = emptyList(),
-    val toolsets: List<HermesToolset> = emptyList(),
-    val models: List<String> = emptyList(),
+    val jobsResource: ResourceState<List<HermesJob>> = ResourceState.Empty(),
+    val jobActionsInFlight: Set<String> = emptySet(),
+    val jobActionMessage: String? = null,
+    val skillsResource: ResourceState<List<HermesSkill>> = ResourceState.Empty(),
+    val toolsetsResource: ResourceState<List<HermesToolset>> = ResourceState.Empty(),
+    val modelsResource: ResourceState<List<String>> = ResourceState.Empty(),
     val modelSelections: Map<SessionKey, String> = emptyMap(),
     val reasoningSelections: Map<SessionKey, String> = emptyMap(),
     val permissionSelections: Map<SessionKey, String> = emptyMap(),
@@ -459,18 +506,30 @@ data class HermesUiState(
     val newSessionDrafts: Map<String, String> = emptyMap(),
     val sendingSessions: Set<SessionKey> = emptySet(),
     val creatingRunHosts: Set<String> = emptySet(),
-    val isRefreshing: Boolean = false,
     val activeRuns: Map<SessionKey, ActiveRun> = emptyMap(),
+    val workspaceUpdates: Map<SessionKey, HermesWorkspaceUpdate> = emptyMap(),
     val activeHostSessions: Map<SessionKey, HermesActiveSession> = emptyMap(),
     val queuedInterrupts: Map<SessionKey, QueuedInterrupt> = emptyMap(),
+    val pendingFollowUpChoice: PendingFollowUpChoice? = null,
     val unknownOutcomes: Map<SessionKey, UnknownOutcome> = emptyMap(),
+    val pendingFullAccessConfirmation: FullAccessConfirmation? = null,
     val sessionActionsFor: String? = null,
     val confirmDeleteSessionId: String? = null,
     val errorMessage: String? = null,
     val themeMode: ThemeMode = ThemeMode.System,
     val notificationHostIds: Set<String> = emptySet(),
+    val monitoredHostIds: Set<String> = emptySet(),
     val overlayEnabled: Boolean = false,
 ) {
+    val sessions: List<HermesSession> get() = sessionsResource.itemsOrEmpty()
+    val messages: List<ChatUiItem> get() = transcriptResource.itemsOrEmpty()
+    val jobs: List<HermesJob> get() = jobsResource.itemsOrEmpty()
+    val skills: List<HermesSkill> get() = skillsResource.itemsOrEmpty()
+    val toolsets: List<HermesToolset> get() = toolsetsResource.itemsOrEmpty()
+    val models: List<String> get() = modelsResource.itemsOrEmpty()
+    val sessionsRefreshing: Boolean get() = sessionsResource.isRefreshing
+    val jobsRefreshing: Boolean get() = jobsResource.isRefreshing
+    val isRefreshing: Boolean get() = sessionsRefreshing || jobsRefreshing
     val activeHost: HostProfile? get() = hosts.firstOrNull { it.id == activeHostId }
     val activeSession: HermesSession? get() = sessions.firstOrNull { it.id == activeSessionId }
     val editingHost: HostProfile? get() = hosts.firstOrNull { it.id == editingHostId }
@@ -494,12 +553,22 @@ data class HermesUiState(
     val activeRun: ActiveRun? get() = activeSessionKey?.let(activeRuns::get)
     val unknownOutcome: UnknownOutcome? get() = activeSessionKey?.let(unknownOutcomes::get)
     val queuedInterrupt: QueuedInterrupt? get() = activeSessionKey?.let(queuedInterrupts::get)
+    val isFullAccessConfirmationPending: Boolean
+        get() = pendingFullAccessConfirmation == activeHostId?.let { FullAccessConfirmation(it, activeSessionId) }
     val otherActiveRuns: List<ActiveRun>
         get() = activeRuns.filterKeys { it != activeSessionKey }.values.toList()
     val activeSessionIds: Set<String>
         get() {
-            val hostReportedActive = sessions.filter(HermesSession::isActive).map(HermesSession::id)
-            val locallyActive = (activeHostSessions.keys + activeRuns.keys)
+            val stalled = activeHostSessions.filterValues { it.isStalledActivity }.keys
+            val hostReportedActive = sessions
+                .filter(HermesSession::isActive)
+                .map { SessionKey(activeHostId.orEmpty(), it.id) }
+                .filterNot(stalled::contains)
+                .map(SessionKey::sessionId)
+            val locallyActive = (
+                activeHostSessions.filterValues { !it.isStalledActivity }.keys + activeRuns.keys
+            )
+                .filterNot(stalled::contains)
                 .filter { it.hostId == activeHostId }
                 .map(SessionKey::sessionId)
             return (hostReportedActive + locallyActive).toSet()
@@ -561,32 +630,47 @@ data class HermesUiState(
     val runBannerVisible: Boolean
         get() = otherActiveRuns.isNotEmpty() || (activeRun != null && screen != DeckScreen.Chat)
 
-    fun isSessionBusy(hostId: String, sessionId: String): Boolean =
-        SessionKey(hostId, sessionId) in activeRuns ||
-            SessionKey(hostId, sessionId) in activeHostSessions ||
-            (hostId == activeHostId && sessions.any { it.id == sessionId && it.isActive })
+    fun isSessionBusy(hostId: String, sessionId: String): Boolean {
+        val key = SessionKey(hostId, sessionId)
+        val hostActivity = activeHostSessions[key]
+        if (hostActivity?.isStalledActivity == true) return false
+        return key in activeRuns ||
+            hostActivity?.isStalledActivity == false ||
+            (hostId == activeHostId && hostActivity == null && sessions.any { it.id == sessionId && it.isActive })
+    }
 
     fun isSessionDeleteBlocked(hostId: String, sessionId: String): Boolean {
         val key = SessionKey(hostId, sessionId)
-        if (key in activeRuns || key in activeHostSessions) return true
+        if (activeHostSessions[key]?.isStalledActivity == true) return false
+        if (key in activeRuns || activeHostSessions[key]?.isStalledActivity == false) return true
         val session = sessions.firstOrNull { it.id == sessionId } ?: return false
         return session.isActive && session.messageCount != 0
     }
 
     fun hasActiveRunOnHost(hostId: String): Boolean =
-        activeRuns.keys.any { it.hostId == hostId } ||
-            activeHostSessions.keys.any { it.hostId == hostId } ||
+        activeRuns.keys.any { key ->
+            key.hostId == hostId && activeHostSessions[key]?.isStalledActivity != true
+        } ||
+            activeHostSessions.any { (key, activity) -> key.hostId == hostId && !activity.isStalledActivity } ||
             (hostId == activeHostId && sessions.any(HermesSession::isActive))
 
     fun slashSuggestions(): List<SlashSuggestion> {
         if (!composerText.startsWith("/") || composerText.contains(' ') || composerText.contains('\n')) return emptyList()
         val query = composerText.drop(1).lowercase()
-        val commands = LOCAL_COMMANDS.filter { it.name.startsWith(query) }
+        val hostCommands = HOST_COMMANDS
+            .takeIf { capabilities?.supportsRunSlashCommands == true }
+            .orEmpty()
+            .filter { command ->
+                command.name != "plan" || skills.any { it.name.equals("plan", ignoreCase = true) }
+            }
+        val commands = (LOCAL_COMMANDS + hostCommands).filter { it.name.startsWith(query) }
         val skillMatches = if (capabilities?.supportsSkills == true) {
             skills.filter { it.name.lowercase().contains(query) }
                 .map { SlashSuggestion(SlashKind.Skill, it.name, it.description ?: "Host skill") }
         } else emptyList()
-        return (commands + skillMatches).take(10)
+        return (commands + skillMatches)
+            .distinctBy { it.name.lowercase() }
+            .take(10)
     }
 }
 
@@ -596,19 +680,51 @@ class HermesViewModel(
     private val savedState: SavedStateHandle = SavedStateHandle(),
     private val settingsStore: SettingsStore = InMemorySettingsStore(),
 ) : ViewModel() {
-    private val mutableState = MutableStateFlow(HermesUiState())
+    private val mutableState = MutableStateFlow(
+        HermesUiState(
+            composerDrafts = savedState.get<HashMap<String, String>>(SAVED_SESSION_DRAFTS)
+                .orEmpty()
+                .mapNotNull { (encoded, draft) -> decodeDraftKey(encoded)?.let { it to draft } }
+                .toMap(),
+            newSessionDrafts = savedState.get<HashMap<String, String>>(SAVED_NEW_SESSION_DRAFTS).orEmpty(),
+        ),
+    )
     val state: StateFlow<HermesUiState> = mutableState.asStateFlow()
     private val runStatusChecks = mutableSetOf<String>()
     private val hostActivityChecks = mutableSetOf<String>()
+    private val checkpointLock = Any()
 
     private fun ActiveRun.key(): SessionKey = SessionKey(host.id, sessionId)
 
     private fun HermesUiState.withDraft(key: SessionKey?, value: String): HermesUiState {
         val trimmed = value.take(MAX_COMPOSER_LENGTH)
-        if (key != null) return copy(composerDrafts = composerDrafts + (key to trimmed))
-        val hostId = activeHostId ?: return this
-        return copy(newSessionDrafts = newSessionDrafts + (hostId to trimmed))
+        val next = if (key != null) {
+            copy(composerDrafts = if (trimmed.isBlank()) composerDrafts - key else composerDrafts + (key to trimmed))
+        } else {
+            val hostId = activeHostId ?: return this
+            copy(newSessionDrafts = if (trimmed.isBlank()) newSessionDrafts - hostId else newSessionDrafts + (hostId to trimmed))
+        }
+        persistDrafts(next)
+        return next
     }
+
+    private fun persistDrafts(state: HermesUiState) {
+        savedState[SAVED_SESSION_DRAFTS] = HashMap(
+            state.composerDrafts.mapKeys { (key, _) -> encodeDraftKey(key) },
+        )
+        savedState[SAVED_NEW_SESSION_DRAFTS] = HashMap(state.newSessionDrafts)
+    }
+
+    private fun encodeDraftKey(key: SessionKey): String = "${key.hostId}$DRAFT_KEY_SEPARATOR${key.sessionId}"
+
+    private fun decodeDraftKey(encoded: String): SessionKey? {
+        val separator = encoded.indexOf(DRAFT_KEY_SEPARATOR)
+        if (separator <= 0 || separator == encoded.lastIndex) return null
+        return SessionKey(encoded.substring(0, separator), encoded.substring(separator + 1))
+    }
+
+    private fun HermesUiState.clearDraftIfMatches(key: SessionKey, text: String): HermesUiState =
+        if (composerDrafts[key]?.trim() == text) withDraft(key, "") else this
 
     private fun HermesUiState.withModelSelection(key: SessionKey?, model: String?): HermesUiState {
         if (key != null) {
@@ -662,11 +778,11 @@ class HermesViewModel(
         hostId: String,
         key: SessionKey?,
         text: String,
-    ): HermesUiState = if (key == null) {
+    ): HermesUiState = (if (key == null) {
         copy(newSessionDrafts = newSessionDrafts + (hostId to text.take(MAX_COMPOSER_LENGTH)))
     } else {
         copy(composerDrafts = composerDrafts + (key to text.take(MAX_COMPOSER_LENGTH)))
-    }
+    }).also(::persistDrafts)
 
     private fun HermesUiState.withSending(key: SessionKey, sending: Boolean): HermesUiState = copy(
         sendingSessions = if (sending) sendingSessions + key else sendingSessions - key,
@@ -706,7 +822,7 @@ class HermesViewModel(
             )
         })
         settingsStore.saveQueuedInterruptRecords(state.queuedInterrupts.map { (key, queued) ->
-            QueuedInterruptRecord(key.hostId, key.sessionId, queued.runId, queued.text)
+            QueuedInterruptRecord(key.hostId, key.sessionId, queued.runId, queued.text, queued.mode)
         })
     }
 
@@ -717,12 +833,12 @@ class HermesViewModel(
         return copy(
             activeSessionId = if (activeHostId == oldKey.hostId && activeSessionId == oldKey.sessionId) newKey.sessionId else activeSessionId,
             pendingSessionTarget = if (pendingSessionTarget == oldKey) newKey else pendingSessionTarget,
-            sessions = if (activeHostId == oldKey.hostId) {
-                sessions.map { session ->
+            sessionsResource = if (activeHostId == oldKey.hostId) {
+                sessionsResource.withItems(sessions.map { session ->
                     if (session.id == oldKey.sessionId) session.copy(id = newKey.sessionId) else session
-                }.distinctBy(HermesSession::id)
+                }.distinctBy(HermesSession::id))
             } else {
-                sessions
+                sessionsResource
             },
             modelSelections = modelSelections.move(),
             reasoningSelections = reasoningSelections.move(),
@@ -730,13 +846,25 @@ class HermesViewModel(
             composerDrafts = composerDrafts.move(),
             sendingSessions = if (oldKey in sendingSessions) (sendingSessions - oldKey) + newKey else sendingSessions,
             activeRuns = activeRuns.move { run -> run.copy(sessionId = newKey.sessionId) },
+            workspaceUpdates = workspaceUpdates.move(),
             queuedInterrupts = queuedInterrupts.move(),
+            pendingFollowUpChoice = pendingFollowUpChoice?.let { pending ->
+                if (pending.sessionKey == oldKey) pending.copy(sessionId = newKey.sessionId) else pending
+            },
             unknownOutcomes = unknownOutcomes.move { pending -> pending.copy(sessionId = newKey.sessionId) },
+            pendingFullAccessConfirmation = pendingFullAccessConfirmation?.let { pending ->
+                if (pending == FullAccessConfirmation(oldKey.hostId, oldKey.sessionId)) {
+                    FullAccessConfirmation(newKey.hostId, newKey.sessionId)
+                } else {
+                    pending
+                }
+            },
             runUsageByMessage = runUsageByMessage.move(),
-        )
+        ).also(::persistDrafts)
     }
 
     init {
+        val restoredDrafts = mutableState.value
         val loadResult = hostStore.load()
         val snapshot = loadResult.snapshot
         val selected = snapshot.selectedHostId?.takeIf { id -> snapshot.hosts.any { it.id == id } }
@@ -753,6 +881,7 @@ class HermesViewModel(
             SessionKey(record.hostId, record.sessionId) to QueuedInterrupt(
                 runId = record.runId,
                 text = record.text,
+                mode = record.mode,
                 requiresAcknowledgement = true,
             )
         }
@@ -761,11 +890,19 @@ class HermesViewModel(
             activeHostId = selected,
             showHostPicker = snapshot.hosts.isEmpty(),
             connectionPhase = if (selected == null) HostConnectionPhase.NoHost else HostConnectionPhase.Connecting,
+            sessionsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
+            jobsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
+            skillsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
+            toolsetsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
+            modelsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
             themeMode = settingsStore.loadThemeMode(),
             notificationHostIds = settingsStore.loadNotificationHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
+            monitoredHostIds = settingsStore.loadMonitoredHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
             overlayEnabled = settingsStore.loadOverlayEnabled(),
             unknownOutcomes = recoveredUnknownOutcomes,
             queuedInterrupts = recoveredQueuedInterrupts,
+            composerDrafts = restoredDrafts.composerDrafts,
+            newSessionDrafts = restoredDrafts.newSessionDrafts,
             errorMessage = if (loadResult.unlockFailed) {
                 "Saved hosts could not be unlocked on this device (Keystore key changed). Re-add your host and API key."
             } else null,
@@ -790,6 +927,20 @@ class HermesViewModel(
         }
         settingsStore.saveNotificationHostIds(ids)
         mutableState.update { it.copy(notificationHostIds = ids) }
+    }
+
+    fun setHostMonitoringEnabled(hostId: String, enabled: Boolean) {
+        val ids = mutableState.value.monitoredHostIds.toMutableSet().apply {
+            if (enabled) add(hostId) else remove(hostId)
+        }
+        settingsStore.saveMonitoredHostIds(ids)
+        mutableState.update { state ->
+            state.copy(
+                monitoredHostIds = ids,
+                overlayEnabled = state.overlayEnabled && ids.isNotEmpty(),
+            )
+        }
+        if (ids.isEmpty()) settingsStore.saveOverlayEnabled(false)
     }
 
     fun setOverlayEnabled(enabled: Boolean) {
@@ -831,16 +982,17 @@ class HermesViewModel(
                     connectionPhase = HostConnectionPhase.Connecting,
                     capabilities = null,
                     hostUpdate = null,
-                    sessions = listOf(placeholder),
+                    sessionsResource = listOf(placeholder).asResourceState(),
                     sessionsHasMore = false,
+                    sessionsLoadingMore = false,
+                    sessionsLoadMoreError = null,
                     activeSessionId = sessionId,
                     pendingSessionTarget = target,
-                    messages = emptyList(),
-                    jobs = emptyList(),
-                    skills = emptyList(),
-                    toolsets = emptyList(),
-                    models = emptyList(),
-                    isRefreshing = false,
+                    transcriptResource = ResourceState.Loading,
+                    jobsResource = ResourceState.Loading,
+                    skillsResource = ResourceState.Loading,
+                    toolsetsResource = ResourceState.Loading,
+                    modelsResource = ResourceState.Loading,
                     errorMessage = null,
                 )
             }
@@ -850,10 +1002,12 @@ class HermesViewModel(
                 state.copy(
                     screen = DeckScreen.Chat,
                     connectionPhase = if (reconnectExistingHost) HostConnectionPhase.Connecting else state.connectionPhase,
-                    sessions = listOf(placeholder) + state.sessions.filterNot { it.id == sessionId },
+                    sessionsResource = state.sessionsResource.withItems(
+                        listOf(placeholder) + state.sessions.filterNot { it.id == sessionId },
+                    ),
                     activeSessionId = sessionId,
                     pendingSessionTarget = target,
-                    messages = emptyList(),
+                    transcriptResource = ResourceState.Loading,
                     errorMessage = null,
                 )
             }
@@ -867,12 +1021,21 @@ class HermesViewModel(
             }
             if (metadata != null && mutableState.value.activeHostId == host.id) {
                 mutableState.update { state ->
-                    state.copy(sessions = listOf(metadata) + state.sessions.filterNot { it.id == metadata.id })
+                    state.copy(
+                        sessionsResource = state.sessionsResource.withItems(
+                            listOf(metadata) + state.sessions.filterNot { it.id == metadata.id },
+                        ),
+                    )
                 }
             }
             messagesResult
                 .onSuccess { applyLoadedMessages(host.id, sessionId, it) }
-                .onFailure { error -> if (mutableState.value.activeHostId == host.id) showFailure(error) }
+                .onFailure { error ->
+                    mutableState.update { state ->
+                        if (state.activeHostId != host.id || state.activeSessionId != sessionId) state
+                        else state.copy(transcriptResource = ResourceState.Error(friendlyMessage(error)))
+                    }
+                }
         }
     }
 
@@ -938,7 +1101,17 @@ class HermesViewModel(
                 hostUpdateChecking = false,
                 hostUpdateStarting = false,
                 activeHostSessions = it.activeHostSessions.filterKeys { key -> key.hostId != profile.id },
-                isRefreshing = false,
+                sessionsResource = ResourceState.Loading,
+                sessionsHasMore = false,
+                sessionsLoadingMore = false,
+                sessionsLoadMoreError = null,
+                activeSessionId = null,
+                pendingSessionTarget = null,
+                transcriptResource = ResourceState.Empty(),
+                jobsResource = ResourceState.Loading,
+                skillsResource = ResourceState.Loading,
+                toolsetsResource = ResourceState.Loading,
+                modelsResource = ResourceState.Loading,
                 errorMessage = null,
             )
         }
@@ -961,16 +1134,17 @@ class HermesViewModel(
                 hostUpdate = null,
                 hostUpdateChecking = false,
                 hostUpdateStarting = false,
-                sessions = emptyList(),
+                sessionsResource = ResourceState.Loading,
                 sessionsHasMore = false,
+                sessionsLoadingMore = false,
+                sessionsLoadMoreError = null,
                 activeSessionId = null,
                 pendingSessionTarget = null,
-                messages = emptyList(),
-                jobs = emptyList(),
-                skills = emptyList(),
-                toolsets = emptyList(),
-                models = emptyList(),
-                isRefreshing = false,
+                transcriptResource = ResourceState.Empty(),
+                jobsResource = ResourceState.Loading,
+                skillsResource = ResourceState.Loading,
+                toolsetsResource = ResourceState.Loading,
+                modelsResource = ResourceState.Loading,
                 errorMessage = null,
             )
         }
@@ -992,8 +1166,10 @@ class HermesViewModel(
         }
         val hosts = mutableState.value.hosts.filterNot { it.id == hostId }
         val notificationHostIds = mutableState.value.notificationHostIds - hostId
+        val monitoredHostIds = mutableState.value.monitoredHostIds - hostId
         settingsStore.saveNotificationHostIds(notificationHostIds)
-        if (notificationHostIds.isEmpty()) settingsStore.saveOverlayEnabled(false)
+        settingsStore.saveMonitoredHostIds(monitoredHostIds)
+        if (monitoredHostIds.isEmpty()) settingsStore.saveOverlayEnabled(false)
         val selected = mutableState.value.activeHostId?.takeIf { it != hostId && hosts.any { host -> host.id == it } }
             ?: hosts.firstOrNull()?.id
         persist(HostSnapshot(hosts, selected))
@@ -1005,6 +1181,7 @@ class HermesViewModel(
                     editingHostId = state.editingHostId?.takeIf { it != hostId },
                     showHostPicker = hosts.isEmpty(),
                     notificationHostIds = notificationHostIds,
+                    monitoredHostIds = monitoredHostIds,
                     activeHostSessions = state.activeHostSessions.filterKeys { key -> key.hostId != hostId },
                 )
             } else {
@@ -1017,19 +1194,21 @@ class HermesViewModel(
                     hostUpdate = null,
                     hostUpdateChecking = false,
                     hostUpdateStarting = false,
-                    sessions = emptyList(),
+                    sessionsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
                     sessionsHasMore = false,
+                    sessionsLoadingMore = false,
+                    sessionsLoadMoreError = null,
                     activeSessionId = null,
                     pendingSessionTarget = null,
                     activeHostSessions = state.activeHostSessions.filterKeys { key -> key.hostId != hostId },
-                    messages = emptyList(),
-                    jobs = emptyList(),
-                    skills = emptyList(),
-                    toolsets = emptyList(),
-                    models = emptyList(),
-                    isRefreshing = false,
+                    transcriptResource = ResourceState.Empty(),
+                    jobsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
+                    skillsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
+                    toolsetsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
+                    modelsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
                     notificationHostIds = notificationHostIds,
-                    overlayEnabled = state.overlayEnabled && notificationHostIds.isNotEmpty(),
+                    monitoredHostIds = monitoredHostIds,
+                    overlayEnabled = state.overlayEnabled && monitoredHostIds.isNotEmpty(),
                 )
             }
         }
@@ -1092,19 +1271,33 @@ class HermesViewModel(
     }
 
     fun refresh() {
-        val host = mutableState.value.activeHost ?: return
-        mutableState.update { it.copy(isRefreshing = true) }
+        val snapshot = mutableState.value
+        val host = snapshot.activeHost ?: return
+        val refreshJobs = snapshot.jobsResource !is ResourceState.Unsupported
+        mutableState.update { state ->
+            state.copy(
+                sessionsResource = state.sessionsResource.beginRefresh(),
+                jobsResource = if (refreshJobs) state.jobsResource.beginRefresh() else state.jobsResource,
+            )
+        }
         viewModelScope.launch {
-            val sessions = runCatching { gateway.listSessions(host) }.getOrNull()
-            val jobs = runCatching { gateway.listJobs(host) }.getOrNull()
+            val sessions = runCatching { gateway.listSessions(host) }
+            val jobs = if (refreshJobs) runCatching { gateway.listJobs(host) } else null
             val activeSessions = runCatching { gateway.listActiveSessions(host) }.getOrNull()
             if (mutableState.value.activeHostId == host.id) {
                 mutableState.update { state ->
+                    val sessionPage = sessions.getOrNull()
                     state.withHostActivity(host.id, activeSessions).copy(
-                        sessions = sessions?.sessions ?: state.sessions,
-                        sessionsHasMore = sessions?.hasMore ?: state.sessionsHasMore,
-                        jobs = jobs ?: state.jobs,
-                        isRefreshing = false,
+                        sessionsResource = sessionPage?.sessions?.asResourceState()
+                            ?: state.sessionsResource.refreshError(friendlyMessage(checkNotNull(sessions.exceptionOrNull()))),
+                        sessionsHasMore = sessionPage?.hasMore ?: state.sessionsHasMore,
+                        jobsResource = jobs?.fold(
+                            onSuccess = { it.asResourceState() },
+                            onFailure = { error ->
+                                if (error.isUnsupportedResourceEndpoint()) ResourceState.Unsupported
+                                else state.jobsResource.refreshError(friendlyMessage(error))
+                            },
+                        ) ?: state.jobsResource,
                     )
                 }
             }
@@ -1114,25 +1307,32 @@ class HermesViewModel(
     fun loadMoreSessions() {
         val snapshot = mutableState.value
         val host = snapshot.activeHost ?: return
-        if (!snapshot.sessionsHasMore || snapshot.isRefreshing) return
-        mutableState.update { it.copy(isRefreshing = true) }
+        if (!snapshot.sessionsHasMore || snapshot.sessionsLoadingMore || snapshot.sessionsRefreshing) return
+        mutableState.update { it.copy(sessionsLoadingMore = true, sessionsLoadMoreError = null) }
         viewModelScope.launch {
             runCatching { gateway.listSessions(host, offset = snapshot.sessions.size) }
                 .onSuccess { page ->
                     if (mutableState.value.activeHostId == host.id) {
-                        mutableState.update {
-                            it.copy(
-                                sessions = (it.sessions + page.sessions).distinctBy(HermesSession::id),
+                        mutableState.update { state ->
+                            state.copy(
+                                sessionsResource = state.sessionsResource.withItems(
+                                    (state.sessions + page.sessions).distinctBy(HermesSession::id),
+                                ),
                                 sessionsHasMore = page.hasMore,
-                                isRefreshing = false,
+                                sessionsLoadingMore = false,
+                                sessionsLoadMoreError = null,
                             )
                         }
                     }
                 }
-                .onFailure {
+                .onFailure { error ->
                     if (mutableState.value.activeHostId == host.id) {
-                        mutableState.update { state -> state.copy(isRefreshing = false) }
-                        showFailure(it)
+                        mutableState.update { state ->
+                            state.copy(
+                                sessionsLoadingMore = false,
+                                sessionsLoadMoreError = friendlyMessage(error),
+                            )
+                        }
                     }
                 }
         }
@@ -1141,12 +1341,12 @@ class HermesViewModel(
     fun createSession() {
         val host = mutableState.value.activeHost ?: return
         if (mutableState.value.connectionPhase != HostConnectionPhase.Connected) return
+        if (mutableState.value.activeSessionId == null) return
         mutableState.update { state ->
             state.copy(
                 activeSessionId = null,
                 pendingSessionTarget = null,
-                messages = emptyList(),
-                newSessionDrafts = state.newSessionDrafts - host.id,
+                transcriptResource = ResourceState.Empty(),
                 screen = DeckScreen.Chat,
                 sessionActionsFor = null,
                 errorMessage = null,
@@ -1162,7 +1362,7 @@ class HermesViewModel(
                 activeSessionId = sessionId,
                 pendingSessionTarget = null,
                 screen = DeckScreen.Chat,
-                messages = emptyList(),
+                transcriptResource = ResourceState.Loading,
                 errorMessage = null,
             )
         }
@@ -1170,9 +1370,16 @@ class HermesViewModel(
             runCatching { gateway.loadMessages(host, sessionId) }
                 .onSuccess { page -> applyLoadedMessages(host.id, requestedId = sessionId, page = page) }
                 .onFailure { error ->
-                    if (mutableState.value.activeHostId == host.id) showFailure(error)
+                    mutableState.update { state ->
+                        if (state.activeHostId != host.id || state.activeSessionId != sessionId) state
+                        else state.copy(transcriptResource = ResourceState.Error(friendlyMessage(error)))
+                    }
                 }
         }
+    }
+
+    fun retryTranscript() {
+        mutableState.value.activeSessionId?.let(::selectSession)
     }
 
     /** null selects the Host default; unknown aliases fall back host-side anyway. */
@@ -1206,6 +1413,36 @@ class HermesViewModel(
         }
     }
 
+    fun clearStaleActivity(sessionId: String) {
+        val state = mutableState.value
+        val host = state.activeHost ?: return
+        val key = SessionKey(host.id, sessionId)
+        val activity = state.activeHostSessions[key]
+        val leaseId = activity?.leaseId
+        if (
+            activity?.isStalledActivity != true ||
+            leaseId.isNullOrBlank() ||
+            state.capabilities?.supportsActiveSessionCleanup != true
+        ) return
+
+        viewModelScope.launch {
+            try {
+                gateway.clearStaleActiveSession(host, leaseId)
+                val localRun = mutableState.value.activeRuns[key]
+                mutableState.update { current ->
+                    current.withRun(key, null).copy(
+                        activeHostSessions = current.activeHostSessions - key,
+                        errorMessage = null,
+                    )
+                }
+                if (localRun != null) clearRunCoordinates(localRun)
+                refreshHostActivity()
+            } catch (error: Throwable) {
+                showFailure(error)
+            }
+        }
+    }
+
     fun reconcileActiveRuns() {
         mutableState.value.activeRuns.values.forEach { run ->
             if (!runStatusChecks.add(run.runId)) return@forEach
@@ -1231,24 +1468,83 @@ class HermesViewModel(
         }
     }
 
-    /** null uses the Host policy; full-access asks the Host to isolate bypass to each submitted Run. */
+    /**
+     * null uses the Host policy. Full Access is never armed by selection alone:
+     * the UI must confirm the explicit one-shot request first.
+     */
     fun selectPermissionMode(mode: String?) {
         mutableState.update { state ->
-            state.withPermissionSelection(state.activeSessionKey, mode?.takeIf { it in PERMISSION_MODES })
+            val selected = mode?.takeIf { it in PERMISSION_MODES }
+            if (selected == FULL_ACCESS_MODE) {
+                val hostId = state.activeHostId ?: return@update state
+                if (state.selectedPermissionMode == FULL_ACCESS_MODE) state else state.copy(
+                    pendingFullAccessConfirmation = FullAccessConfirmation(hostId, state.activeSessionId),
+                    errorMessage = null,
+                )
+            } else {
+                state.withPermissionSelection(state.activeSessionKey, null).copy(
+                    pendingFullAccessConfirmation = null,
+                    errorMessage = null,
+                )
+            }
         }
+    }
+
+    fun confirmFullAccessForNextRun() {
+        mutableState.update { state ->
+            val pending = state.pendingFullAccessConfirmation ?: return@update state
+            val current = state.activeHostId?.let { FullAccessConfirmation(it, state.activeSessionId) }
+            if (pending != current) {
+                state.copy(
+                    pendingFullAccessConfirmation = null,
+                    errorMessage = "The selected conversation changed. Confirm Full Access again if it is still needed.",
+                )
+            } else {
+                state.withPermissionSelection(state.activeSessionKey, FULL_ACCESS_MODE).copy(
+                    pendingFullAccessConfirmation = null,
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun cancelFullAccessConfirmation() {
+        mutableState.update { it.copy(pendingFullAccessConfirmation = null) }
     }
 
     fun toggleJob(job: HermesJob) {
         val host = mutableState.value.activeHost ?: return
         val enabled = !job.enabled
+        val actionKey = "${host.id}:toggle:${job.id}"
+        if (actionKey in mutableState.value.jobActionsInFlight) return
         mutableState.update { state ->
-            state.copy(jobs = state.jobs.map { if (it.id == job.id) it.copy(enabled = enabled) else it })
+            state.copy(
+                jobActionsInFlight = state.jobActionsInFlight + actionKey,
+                jobActionMessage = null,
+                jobsResource = state.jobsResource.withItems(
+                    state.jobs.map { if (it.id == job.id) it.copy(enabled = enabled) else it },
+                ),
+            )
         }
         viewModelScope.launch {
             runCatching { gateway.setJobEnabled(host, job.id, enabled) }
+                .onSuccess {
+                    mutableState.update { state ->
+                        val cleared = state.copy(jobActionsInFlight = state.jobActionsInFlight - actionKey)
+                        if (state.activeHostId != host.id) cleared else cleared.copy(
+                            jobActionMessage = if (enabled) "${job.name} resumed" else "${job.name} paused",
+                        )
+                    }
+                }
                 .onFailure { error ->
                     mutableState.update { state ->
-                        state.copy(jobs = state.jobs.map { if (it.id == job.id) it.copy(enabled = job.enabled) else it })
+                        val cleared = state.copy(jobActionsInFlight = state.jobActionsInFlight - actionKey)
+                        if (state.activeHostId != host.id) cleared else cleared.copy(
+                            jobActionMessage = "Could not update ${job.name}",
+                            jobsResource = state.jobsResource.withItems(
+                                state.jobs.map { if (it.id == job.id) it.copy(enabled = job.enabled) else it },
+                            ),
+                        )
                     }
                     showFailure(error)
                 }
@@ -1257,8 +1553,26 @@ class HermesViewModel(
 
     fun runJobNow(jobId: String) {
         val host = mutableState.value.activeHost ?: return
+        val actionKey = "${host.id}:run:$jobId"
+        if (actionKey in mutableState.value.jobActionsInFlight) return
+        mutableState.update {
+            it.copy(jobActionsInFlight = it.jobActionsInFlight + actionKey, jobActionMessage = null)
+        }
         viewModelScope.launch {
-            runCatching { gateway.runJob(host, jobId) }.onFailure(::showFailure)
+            runCatching { gateway.runJob(host, jobId) }
+                .onSuccess {
+                    mutableState.update { state ->
+                        val cleared = state.copy(jobActionsInFlight = state.jobActionsInFlight - actionKey)
+                        if (state.activeHostId != host.id) cleared else cleared.copy(jobActionMessage = "Job started")
+                    }
+                }
+                .onFailure { error ->
+                    mutableState.update { state ->
+                        val cleared = state.copy(jobActionsInFlight = state.jobActionsInFlight - actionKey)
+                        if (state.activeHostId != host.id) cleared else cleared.copy(jobActionMessage = "Could not start job")
+                    }
+                    if (mutableState.value.activeHostId == host.id) showFailure(error)
+                }
         }
     }
 
@@ -1285,32 +1599,113 @@ class HermesViewModel(
         val text = mutableState.value.composerText.trim()
         if (text.isBlank()) return
         if (text.startsWith("/") && dispatchLocalCommand(text)) return
-        if (mutableState.value.queuedInterrupt?.requiresAcknowledgement == true) {
-            mutableState.update { it.copy(errorMessage = "Review the recovered follow-up before sending another message.") }
+        val snapshot = mutableState.value
+        if (snapshot.pendingFullAccessConfirmation != null) {
+            mutableState.update { it.copy(errorMessage = "Confirm or cancel Full Access before sending.") }
             return
         }
-        mutableState.value.activeRun?.let { run ->
+        if (snapshot.pendingFollowUpChoice != null) {
+            mutableState.update { it.copy(errorMessage = "Choose Queue or Interrupt for the pending follow-up first.") }
+            return
+        }
+        val queuedFollowUp = snapshot.queuedInterrupt
+        if (queuedFollowUp != null) {
+            val message = if (queuedFollowUp.requiresAcknowledgement) {
+                "Review the recovered follow-up before sending another message."
+            } else {
+                "A follow-up is already queued for this conversation."
+            }
+            mutableState.update { it.copy(errorMessage = message) }
+            return
+        }
+        snapshot.activeRun?.let { run ->
             if (run.terminalUnsynced || run.reconcilingTranscript) {
                 mutableState.update { it.copy(errorMessage = "This run has finished. Sync its transcript before sending another message.") }
                 return
             }
-            interruptAndSubmit(run, text)
+            stageFollowUpChoice(run, text)
             return
         }
         submitChat(text)
     }
 
-    private fun interruptAndSubmit(run: ActiveRun, text: String) {
+    private fun stageFollowUpChoice(run: ActiveRun, text: String) {
         val key = run.key()
-        val queued = QueuedInterrupt(runId = run.runId, text = text)
         mutableState.update { state ->
-            state.withDraft(key, "").copy(
-                queuedInterrupts = state.queuedInterrupts + (key to queued),
+            if (state.activeRuns[key]?.runId != run.runId || state.pendingFollowUpChoice != null) return@update state
+            state.copy(
+                pendingFollowUpChoice = PendingFollowUpChoice(
+                    hostId = key.hostId,
+                    sessionId = key.sessionId,
+                    runId = run.runId,
+                    text = text,
+                ),
                 errorMessage = null,
             )
         }
+    }
+
+    fun queuePendingFollowUp() {
+        commitPendingFollowUp(FollowUpMode.Queue)
+    }
+
+    fun interruptPendingFollowUp() {
+        commitPendingFollowUp(FollowUpMode.Interrupt)
+    }
+
+    fun cancelPendingFollowUp() {
+        mutableState.update { state ->
+            if (state.pendingFollowUpChoice == null) state else state.copy(
+                pendingFollowUpChoice = null,
+                errorMessage = null,
+            )
+        }
+    }
+
+    private fun commitPendingFollowUp(mode: FollowUpMode) {
+        val pending = mutableState.value.pendingFollowUpChoice ?: return
+        val key = pending.sessionKey
+        val run = mutableState.value.activeRuns[key]
+        if (run?.runId != pending.runId || run.terminalUnsynced || run.reconcilingTranscript) {
+            mutableState.update { state ->
+                if (state.pendingFollowUpChoice != pending) state else state.copy(
+                    pendingFollowUpChoice = null,
+                    errorMessage = "That run has already finished. Review the draft before sending it.",
+                )
+            }
+            return
+        }
+        if (key in mutableState.value.queuedInterrupts) {
+            mutableState.update { state ->
+                if (state.pendingFollowUpChoice != pending) state else state.copy(
+                    pendingFollowUpChoice = null,
+                    errorMessage = "A follow-up is already queued for this conversation.",
+                )
+            }
+            return
+        }
+
+        val queued = QueuedInterrupt(runId = run.runId, text = pending.text, mode = mode)
+        mutableState.update { state ->
+            if (
+                state.pendingFollowUpChoice != pending ||
+                state.activeRuns[key]?.runId != run.runId ||
+                key in state.queuedInterrupts
+            ) {
+                state
+            } else {
+                state.clearDraftIfMatches(key, pending.text).copy(
+                    queuedInterrupts = state.queuedInterrupts + (key to queued),
+                    pendingFollowUpChoice = null,
+                    errorMessage = null,
+                )
+            }
+        }
+        val committed = mutableState.value.queuedInterrupts[key] == queued &&
+            mutableState.value.pendingFollowUpChoice == null
+        if (!committed) return
         persistPromptRecords()
-        if (!run.stopping) requestStop(run)
+        if (mode == FollowUpMode.Interrupt && !run.stopping) requestStop(run)
     }
 
     fun applySuggestion(suggestion: SlashSuggestion) {
@@ -1319,6 +1714,9 @@ class HermesViewModel(
             // skill named like a reserved command stays reachable.
             SlashKind.Skill -> mutableState.update { state ->
                 state.withDraft(state.activeSessionKey, "Use the ${suggestion.name} skill: ")
+            }
+            SlashKind.HostCommand -> mutableState.update { state ->
+                state.withDraft(state.activeSessionKey, "/${suggestion.name} ")
             }
             SlashKind.Command -> when (suggestion.name) {
                 "rename" -> mutableState.update { state -> state.withDraft(state.activeSessionKey, "/rename ") }
@@ -1378,7 +1776,7 @@ class HermesViewModel(
         val initialKey = snapshot.activeSessionKey
         mutableState.update { state ->
             if (initialKey == null) state.withNewSessionSending(host.id, true)
-                .copy(newSessionDrafts = state.newSessionDrafts - host.id, errorMessage = null)
+                .withDraft(null, "").copy(errorMessage = null)
             else state.withDraft(initialKey, "").withSending(initialKey, true).copy(errorMessage = null)
         }
 
@@ -1395,7 +1793,9 @@ class HermesViewModel(
                     }.also { created ->
                         mutableState.update { state ->
                             state.copy(
-                                sessions = listOf(created) + state.sessions.filterNot { it.id == created.id },
+                                sessionsResource = state.sessionsResource.withItems(
+                                    listOf(created) + state.sessions.filterNot { it.id == created.id },
+                                ),
                                 activeSessionId = created.id,
                             ).transferNewSessionSelections(host.id, created.id)
                         }
@@ -1428,29 +1828,67 @@ class HermesViewModel(
                         ?.let { renamed ->
                             session = renamed
                             mutableState.update { state ->
-                                state.copy(sessions = state.sessions.map { existing ->
-                                    if (existing.id == renamed.id) renamed else existing
-                                })
+                                state.copy(
+                                    sessionsResource = state.sessionsResource.withItems(
+                                        state.sessions.map { existing ->
+                                            if (existing.id == renamed.id) renamed else existing
+                                        },
+                                    ),
+                                )
                             }
                         }
                 }
 
                 val current = mutableState.value
-                val runId = try {
-                    gateway.submitRun(
+                val requestedPermissionMode = current.permissionSelections[runKey]
+                    ?.takeIf { it in PERMISSION_MODES }
+                val submittedPermissionMode = requestedPermissionMode
+                    ?.takeIf { capabilities.supportsPermissionMode }
+                if (requestedPermissionMode == FULL_ACCESS_MODE) {
+                    // Consume before the network call. A lost response may mean
+                    // the Host accepted the run, so unknown outcomes never
+                    // restore this one-shot capability.
+                    mutableState.update { state ->
+                        if (state.permissionSelections[runKey] != FULL_ACCESS_MODE) state
+                        else state.withPermissionSelection(runKey, null)
+                    }
+                }
+                val idempotencyKey = UUID.randomUUID().toString()
+                suspend fun submitOnce(): String = gateway.submitRun(
                         host,
                         page.sessionId,
                         text,
                         page.messages,
                         current.modelSelections[runKey],
                         current.reasoningSelections[runKey].takeIf { capabilities.supportsReasoningEffort },
-                        current.permissionSelections[runKey].takeIf { capabilities.supportsPermissionMode },
+                        submittedPermissionMode,
+                        idempotencyKey.takeIf { capabilities.supportsRunSubmissionIdempotency },
                     )
+                var submission = runCatching { submitOnce() }
+                if (
+                    submission.exceptionOrNull() !is HermesApiException &&
+                    submission.isFailure &&
+                    capabilities.supportsRunSubmissionIdempotency
+                ) {
+                    logRun("retrying idempotent submit session=${page.sessionId}")
+                    delay(RUN_SUBMIT_RETRY_DELAY_MS)
+                    submission = runCatching { submitOnce() }
+                }
+                val runId = try {
+                    submission.getOrThrow()
                 } catch (error: HermesApiException) {
                     // The host answered: the run was not accepted.
                     showFailure(error)
                     mutableState.update { state ->
-                        state.withSending(runKey, false)
+                        val restored = if (
+                            requestedPermissionMode == FULL_ACCESS_MODE &&
+                            state.permissionSelections[runKey] == null
+                        ) {
+                            state.withPermissionSelection(runKey, FULL_ACCESS_MODE)
+                        } else {
+                            state
+                        }
+                        restored.withSending(runKey, false)
                             .withNewSessionSending(host.id, false)
                             .restoreDraft(host.id, runKey, text)
                     }
@@ -1489,10 +1927,14 @@ class HermesViewModel(
                         ),
                     ),
                 )
+                mutableState.update { state ->
+                    state.withSending(runKey, false).withRun(runKey, run).copy(
+                        workspaceUpdates = state.workspaceUpdates - runKey,
+                    )
+                }
                 persistRunCoordinates(run)
                 updateRunStatus(run.runId, "Starting task…")
                 logRun("run started runId=$runId sessionId=${run.sessionId}")
-                mutableState.update { state -> state.withSending(runKey, false).withRun(runKey, run) }
                 driveRun(run)
             } catch (error: Throwable) {
                 showFailure(error)
@@ -1512,29 +1954,70 @@ class HermesViewModel(
 
     private suspend fun driveRun(run: ActiveRun) {
         val terminal = AtomicBoolean(false)
-        runCatching {
-            gateway.streamRunEvents(run.host, run.runId) { event ->
-                if (handleRunEvent(run, event)) terminal.set(true)
+        var replaySupport: Boolean? = true.takeIf { run.lastEventId != null }
+        var reconnectDelayMs = RUN_STREAM_RETRY_DELAY_MS
+        var streamAttempts = 0
+        while (mutableState.value.activeRuns[run.key()]?.runId == run.runId) {
+            if (replaySupport == null) {
+                runCatching { gateway.probe(run.host) }
+                    .onSuccess { replaySupport = it.supportsRunEventReplay }
             }
-        }.onFailure { logRun("run stream dropped runId=${run.runId}: ${it.javaClass.simpleName}") }
+            if (replaySupport == false && streamAttempts > 0) {
+                logRun("run host does not support event replay runId=${run.runId}; polling")
+                if (!pollUntilTerminal(run)) return
+                terminal.set(true)
+                break
+            }
+            val cursor = mutableState.value.activeRuns[run.key()]?.lastEventId ?: run.lastEventId
+            val streamResult = runCatching {
+                gateway.streamRunEvents(
+                    run.host,
+                    run.runId,
+                    onEvent = { event ->
+                        if (handleRunEvent(run, event)) terminal.set(true)
+                    },
+                    afterEventId = cursor.takeIf { replaySupport == true },
+                )
+            }
+            streamAttempts += 1
+            if (terminal.get()) break
+            streamResult.fold(
+                onSuccess = { logRun("run stream ended before terminal event runId=${run.runId}") },
+                onFailure = { logRun("run stream dropped runId=${run.runId}: ${it.javaClass.simpleName}") },
+            )
+            val statusResult = runCatching { gateway.getRunStatus(run.host, run.runId) }
+            val missing = (statusResult.exceptionOrNull() as? HermesApiException)?.statusCode in setOf(404, 410)
+            if (missing || statusResult.getOrNull()?.isTerminal == true) {
+                terminal.set(true)
+                break
+            }
+            delay(reconnectDelayMs)
+            reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(MAX_RUN_STREAM_RETRY_DELAY_MS)
+        }
 
-        if (!terminal.get()) {
+        if (!terminal.get() && mutableState.value.activeRuns[run.key()]?.runId == run.runId) {
             logRun("run stream ended without terminal event runId=${run.runId}; polling")
             if (!pollUntilTerminal(run)) return
+            terminal.set(true)
         }
-        finalizeRun(run)
+        if (terminal.get()) finalizeRun(run)
     }
 
     /** Returns true for terminal events. Ignores events for a Run that is no longer active. */
     private fun handleRunEvent(run: ActiveRun, event: HermesRunEvent): Boolean {
         var terminal = false
+        var applied = false
         val key = run.key()
+        val eventId = event.eventId
         val safeStatus = safeRunStatusText(event)
-        updateRunStatus(run.runId, safeStatus)
         mutableState.update { state ->
             val existing = state.activeRuns[key]
             if (existing == null || existing.runId != run.runId) return@update state
+            if (eventId != null && eventId <= (existing.lastEventId ?: 0L)) return@update state
+            applied = true
             val current = existing.copy(
+                lastEventId = maxOf(existing.lastEventId ?: 0L, eventId ?: 0L)
+                    .takeIf { it > 0L },
                 tail = existing.tail.map { item ->
                     if (item is ChatUiItem.Assistant && item.id == existing.assistantId) {
                         item.copy(
@@ -1576,6 +2059,10 @@ class HermesViewModel(
                     )
                     state.withRun(key, current.copy(subagents = current.subagents + (merged.id to merged)))
                 }
+                is HermesRunEvent.WorkspaceUpdated -> state.withRun(
+                    key,
+                    current.copy(workspaceUpdate = event.update),
+                ).copy(workspaceUpdates = state.workspaceUpdates + (key to event.update))
                 is HermesRunEvent.ApprovalRequested -> state.withRun(key,
                     // One actionable card per Run: a second request keeps the
                     // first card until it resolves (host queue is FIFO).
@@ -1612,6 +2099,13 @@ class HermesViewModel(
                     state.withRun(key, current)
                 }
             }
+        }
+        if (!applied) return false
+        updateRunStatus(run.runId, safeStatus)
+        if (eventId != null) {
+            mutableState.value.activeRuns[key]
+                ?.takeIf { it.runId == run.runId }
+                ?.let(::persistRunCoordinates)
         }
         return terminal
     }
@@ -1673,6 +2167,7 @@ class HermesViewModel(
         val key = run.key()
         val current = mutableState.value.activeRuns[key]
         if (current?.runId != run.runId || current.reconcilingTranscript) return
+        clearPendingFollowUpChoice(run)
         mutableState.update { state ->
             val active = state.activeRuns[key]
             if (active?.runId != run.runId) state else state.withRun(
@@ -1755,7 +2250,7 @@ class HermesViewModel(
             if (cleared.activeHostId == run.host.id && cleared.activeSessionId == page.sessionId) {
                 cleared.copy(
                     activeSessionId = page.sessionId,
-                    messages = reconciledMessages,
+                    transcriptResource = reconciledMessages.asResourceState(),
                     errorMessage = null,
                 )
             } else cleared
@@ -1850,6 +2345,7 @@ class HermesViewModel(
 
     private fun requestStop(run: ActiveRun) {
         val key = run.key()
+        clearPendingFollowUpChoice(run)
         val current = mutableState.value.activeRuns[key]
         if (current?.runId != run.runId || current.stopping) return
         if (current.terminalUnsynced || current.reconcilingTranscript) {
@@ -1875,6 +2371,14 @@ class HermesViewModel(
             if (mutableState.value.activeRuns[key]?.runId == run.runId && run.approvalDetailsLost) {
                 if (pollUntilTerminal(run)) finalizeRun(run)
             }
+        }
+    }
+
+    private fun clearPendingFollowUpChoice(run: ActiveRun) {
+        mutableState.update { state ->
+            val pending = state.pendingFollowUpChoice
+            if (pending?.runId != run.runId || pending.sessionKey != run.key()) state
+            else state.copy(pendingFollowUpChoice = null)
         }
     }
 
@@ -1966,7 +2470,9 @@ class HermesViewModel(
                 .onSuccess { updated ->
                     mutableState.update { state ->
                         state.copy(
-                            sessions = state.sessions.map { if (it.id == updated.id) updated else it },
+                            sessionsResource = state.sessionsResource.withItems(
+                                state.sessions.map { if (it.id == updated.id) updated else it },
+                            ),
                             activeRuns = state.activeRuns.mapValues { (_, run) ->
                                 if (run.host.id == host.id && run.sessionId == updated.id) run.copy(sessionTitle = updated.title) else run
                             },
@@ -1987,7 +2493,9 @@ class HermesViewModel(
                 .onSuccess { child ->
                     mutableState.update { state ->
                         state.copy(
-                            sessions = listOf(child) + state.sessions.filterNot { it.id == child.id },
+                            sessionsResource = state.sessionsResource.withItems(
+                                listOf(child) + state.sessions.filterNot { it.id == child.id },
+                            ),
                             errorMessage = null,
                         )
                     }
@@ -2026,9 +2534,11 @@ class HermesViewModel(
                     mutableState.update { state ->
                         val wasActive = state.activeSessionId == sessionId
                         state.copy(
-                            sessions = state.sessions.filterNot { it.id == sessionId },
+                            sessionsResource = state.sessionsResource.withItems(
+                                state.sessions.filterNot { it.id == sessionId },
+                            ),
                             activeSessionId = if (wasActive) null else state.activeSessionId,
-                            messages = if (wasActive) emptyList() else state.messages,
+                            transcriptResource = if (wasActive) ResourceState.Empty() else state.transcriptResource,
                             screen = if (wasActive) DeckScreen.Sessions else state.screen,
                             errorMessage = null,
                         )
@@ -2051,21 +2561,55 @@ class HermesViewModel(
     // Connection, recovery, shared plumbing
     // ------------------------------------------------------------------
 
+    private fun <T> listResource(
+        result: Result<List<T>>,
+        unsupportedEndpoint: Boolean,
+    ): ResourceState<List<T>> = result.fold(
+        onSuccess = { it.asResourceState() },
+        onFailure = { error ->
+            if (unsupportedEndpoint && error.isUnsupportedResourceEndpoint()) ResourceState.Unsupported
+            else ResourceState.Error(friendlyMessage(error))
+        },
+    )
+
     private fun connect(hostId: String) {
         val host = mutableState.value.hosts.firstOrNull { it.id == hostId } ?: return
-        mutableState.update { it.copy(connectionPhase = HostConnectionPhase.Connecting, errorMessage = null) }
+        mutableState.update { state ->
+            val preservePendingSession = state.pendingSessionTarget?.hostId == hostId && state.sessions.isNotEmpty()
+            state.copy(
+                connectionPhase = HostConnectionPhase.Connecting,
+                sessionsResource = if (preservePendingSession) state.sessionsResource else ResourceState.Loading,
+                sessionsHasMore = false,
+                sessionsLoadingMore = false,
+                sessionsLoadMoreError = null,
+                jobsResource = ResourceState.Loading,
+                skillsResource = ResourceState.Loading,
+                toolsetsResource = ResourceState.Loading,
+                modelsResource = ResourceState.Loading,
+                errorMessage = null,
+            )
+        }
         viewModelScope.launch {
             try {
                 val discoveredCapabilities = gateway.probe(host)
                 val loaded = coroutineScope {
                     val sessionsDeferred = async { gateway.listSessions(host) }
-                    val jobsDeferred = async { runCatching { gateway.listJobs(host) }.getOrDefault(emptyList()) }
-                    val skillsDeferred = async {
-                        if (discoveredCapabilities.supportsSkills) runCatching { gateway.listSkills(host) }.getOrDefault(emptyList())
-                        else emptyList()
+                    val jobsDeferred = async {
+                        listResource(runCatching { gateway.listJobs(host) }, unsupportedEndpoint = true)
                     }
-                    val toolsetsDeferred = async { runCatching { gateway.listToolsets(host) }.getOrDefault(emptyList()) }
-                    val modelsDeferred = async { runCatching { gateway.listModels(host) }.getOrDefault(emptyList()) }
+                    val skillsDeferred = async {
+                        if (discoveredCapabilities.supportsSkills) {
+                            listResource(runCatching { gateway.listSkills(host) }, unsupportedEndpoint = false)
+                        } else {
+                            ResourceState.Unsupported
+                        }
+                    }
+                    val toolsetsDeferred = async {
+                        listResource(runCatching { gateway.listToolsets(host) }, unsupportedEndpoint = true)
+                    }
+                    val modelsDeferred = async {
+                        listResource(runCatching { gateway.listModels(host) }, unsupportedEndpoint = true)
+                    }
                     val versionDeferred = async { runCatching { gateway.getHostVersion(host) }.getOrNull() }
                     val updateDeferred = async {
                         if (discoveredCapabilities.supportsHostUpdate) runCatching { gateway.getHostUpdate(host) }.getOrNull() else null
@@ -2090,38 +2634,59 @@ class HermesViewModel(
                     }
                     val connectedSessions = (loaded.sessions.sessions + listOfNotNull(pendingSession))
                         .distinctBy(HermesSession::id)
+                    val availableModels = loaded.models.loadedItemsOrNull()
+                    val connectedActiveSessionId = pendingTarget?.sessionId
+                        ?: state.activeSessionId?.takeIf { id -> connectedSessions.any { session -> session.id == id } }
                     state.withHostActivity(hostId, activeSessions).copy(
                         connectionPhase = HostConnectionPhase.Connected,
                         capabilities = capabilities,
                         hostUpdate = loaded.update,
                         hostUpdateChecking = false,
                         hostUpdateStarting = false,
-                        sessions = connectedSessions,
+                        sessionsResource = connectedSessions.asResourceState(),
                         sessionsHasMore = loaded.sessions.hasMore,
-                        jobs = loaded.jobs,
-                        skills = loaded.skills,
-                        toolsets = loaded.toolsets,
-                        models = loaded.models,
-                        modelSelections = state.modelSelections.filter { (key, model) -> key.hostId != hostId || model in loaded.models },
-                        newSessionModelSelections = state.newSessionModelSelections.filter { (pendingHostId, model) ->
-                            pendingHostId != hostId || model in loaded.models
+                        sessionsLoadingMore = false,
+                        sessionsLoadMoreError = null,
+                        jobsResource = loaded.jobs,
+                        skillsResource = loaded.skills,
+                        toolsetsResource = loaded.toolsets,
+                        modelsResource = loaded.models,
+                        modelSelections = availableModels?.let { models ->
+                            state.modelSelections.filter { (key, model) -> key.hostId != hostId || model in models }
+                        } ?: state.modelSelections,
+                        newSessionModelSelections = availableModels?.let { models ->
+                            state.newSessionModelSelections.filter { (pendingHostId, model) ->
+                                pendingHostId != hostId || model in models
+                            }
+                        } ?: state.newSessionModelSelections,
+                        activeSessionId = connectedActiveSessionId,
+                        transcriptResource = if (
+                            connectedActiveSessionId == null && state.activeSessionId != null
+                        ) {
+                            ResourceState.Empty()
+                        } else {
+                            state.transcriptResource
                         },
-                        activeSessionId = pendingTarget?.sessionId
-                            ?: state.activeSessionId?.takeIf { id -> connectedSessions.any { session -> session.id == id } },
                         pendingSessionTarget = state.pendingSessionTarget?.takeUnless { it == pendingTarget },
                         errorMessage = null,
                     )
                 }
             } catch (error: Throwable) {
                 if (mutableState.value.activeHostId == hostId) {
-                    mutableState.update {
-                        it.copy(
+                    mutableState.update { state ->
+                        val message = friendlyMessage(error)
+                        state.copy(
                             connectionPhase = HostConnectionPhase.Failed,
                             capabilities = null,
                             hostUpdate = null,
                             hostUpdateChecking = false,
                             hostUpdateStarting = false,
-                            errorMessage = friendlyMessage(error),
+                            sessionsResource = ResourceState.Error(message, state.sessionsResource.valueOrNull()),
+                            jobsResource = ResourceState.Error(message, state.jobsResource.valueOrNull()),
+                            skillsResource = ResourceState.Error(message, state.skillsResource.valueOrNull()),
+                            toolsetsResource = ResourceState.Error(message, state.toolsetsResource.valueOrNull()),
+                            modelsResource = ResourceState.Error(message, state.modelsResource.valueOrNull()),
+                            errorMessage = message,
                         )
                     }
                 }
@@ -2166,9 +2731,8 @@ class HermesViewModel(
                     ),
                 ),
                 recovered = true,
-                // The SSE queue died with the process; live output and approval
-                // payloads are unrecoverable. Status polling + Stop remain.
-                approvalDetailsLost = true,
+                lastEventId = checkpoint.lastEventId,
+                approvalDetailsLost = checkpoint.lastEventId == null,
             )
             val key = run.key()
             logRun("recovering run after process death runId=${run.runId}")
@@ -2181,16 +2745,18 @@ class HermesViewModel(
                     finalizeRun(run)
                     return@launch
                 }
-                if (pollUntilTerminal(run)) finalizeRun(run)
+                driveRun(run)
             }
         }
     }
 
     private fun persistRunCoordinates(run: ActiveRun) {
-        val checkpoints = (mutableState.value.activeRuns.values + run)
-            .map { active -> RunCheckpoint(active.host.id, active.sessionId, active.runId) }
-            .distinctBy(RunCheckpoint::runId)
-        settingsStore.saveRunCheckpoints(checkpoints)
+        synchronized(checkpointLock) {
+            val checkpoint = RunCheckpoint(run.host.id, run.sessionId, run.runId, run.lastEventId)
+            val checkpoints = settingsStore.loadRunCheckpoints()
+                .filterNot { it.runId == run.runId } + checkpoint
+            settingsStore.saveRunCheckpoints(checkpoints)
+        }
     }
 
     private fun clearRunCoordinates(run: ActiveRun) {
@@ -2198,9 +2764,11 @@ class HermesViewModel(
     }
 
     private fun clearRunCoordinates(checkpoint: RunCheckpoint) {
-        val remaining = settingsStore.loadRunCheckpoints().filterNot { it.runId == checkpoint.runId }
-        settingsStore.saveRunCheckpoints(remaining)
-        settingsStore.clearRunStatus(checkpoint.runId)
+        synchronized(checkpointLock) {
+            val remaining = settingsStore.loadRunCheckpoints().filterNot { it.runId == checkpoint.runId }
+            settingsStore.saveRunCheckpoints(remaining)
+            settingsStore.clearRunStatus(checkpoint.runId)
+        }
         if (savedState.get<String>(KEY_RUN_ID) == checkpoint.runId) {
             savedState.remove<String>(KEY_RUN_HOST)
             savedState.remove<String>(KEY_RUN_SESSION)
@@ -2235,7 +2803,7 @@ class HermesViewModel(
             if (rekeyed.activeHostId != hostId || rekeyed.activeSessionId != page.sessionId) rekeyed
             else rekeyed.copy(
                 activeSessionId = page.sessionId,
-                messages = page.messages.mapNotNull(::mapStoredMessage),
+                transcriptResource = page.messages.mapNotNull(::mapStoredMessage).asResourceState(),
                 pendingSessionTarget = rekeyed.pendingSessionTarget?.takeUnless { target ->
                     target == resolvedKey && rekeyed.connectionPhase == HostConnectionPhase.Connected
                 },
@@ -2246,15 +2814,24 @@ class HermesViewModel(
 
     private fun refreshSessionsAndJobs(host: HostProfile) {
         viewModelScope.launch {
-            val sessions = runCatching { gateway.listSessions(host) }.getOrNull()
-            val jobs = runCatching { gateway.listJobs(host) }.getOrNull()
+            val sessions = runCatching { gateway.listSessions(host) }
+            val refreshJobs = mutableState.value.jobsResource !is ResourceState.Unsupported
+            val jobs = if (refreshJobs) runCatching { gateway.listJobs(host) } else null
             val activeSessions = runCatching { gateway.listActiveSessions(host) }.getOrNull()
             if (mutableState.value.activeHostId == host.id) {
                 mutableState.update { state ->
+                    val sessionPage = sessions.getOrNull()
                     state.withHostActivity(host.id, activeSessions).copy(
-                        sessions = sessions?.sessions ?: state.sessions,
-                        sessionsHasMore = sessions?.hasMore ?: state.sessionsHasMore,
-                        jobs = jobs ?: state.jobs,
+                        sessionsResource = sessionPage?.sessions?.asResourceState()
+                            ?: state.sessionsResource.refreshError(friendlyMessage(checkNotNull(sessions.exceptionOrNull()))),
+                        sessionsHasMore = sessionPage?.hasMore ?: state.sessionsHasMore,
+                        jobsResource = jobs?.fold(
+                            onSuccess = { it.asResourceState() },
+                            onFailure = { error ->
+                                if (error.isUnsupportedResourceEndpoint()) ResourceState.Unsupported
+                                else state.jobsResource.refreshError(friendlyMessage(error))
+                            },
+                        ) ?: state.jobsResource,
                     )
                 }
             }
@@ -2300,6 +2877,9 @@ class HermesViewModel(
         else -> "Hermes connection failed: ${error.message ?: error.javaClass.simpleName}"
     }
 
+    private fun Throwable.isUnsupportedResourceEndpoint(): Boolean =
+        this is HermesApiException && statusCode in setOf(404, 405, 501)
+
     // Structured, id-only run lifecycle trail. android.util.Log is stubbed in
     // JVM unit tests; swallow the stub's exception.
     private fun logRun(message: String) {
@@ -2312,6 +2892,12 @@ class HermesViewModel(
         private const val MAX_COMPOSER_LENGTH = 8_000
         private const val SESSION_PAGE_SIZE = 50
         private const val MAX_DEEP_LINK_PAGES = 20
+        private const val RUN_STREAM_RETRY_DELAY_MS = 500L
+        private const val MAX_RUN_STREAM_RETRY_DELAY_MS = 30_000L
+        private const val RUN_SUBMIT_RETRY_DELAY_MS = 300L
+        private const val SAVED_SESSION_DRAFTS = "composer.sessionDrafts"
+        private const val SAVED_NEW_SESSION_DRAFTS = "composer.newSessionDrafts"
+        private const val DRAFT_KEY_SEPARATOR = '\u001F'
         private const val KEY_RUN_HOST = "run.hostId"
         private const val KEY_RUN_SESSION = "run.sessionId"
         private const val KEY_RUN_ID = "run.runId"
