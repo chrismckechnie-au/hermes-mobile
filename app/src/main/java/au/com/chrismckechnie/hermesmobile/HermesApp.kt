@@ -1,6 +1,7 @@
 package au.com.chrismckechnie.hermesmobile
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import android.speech.RecognizerIntent
@@ -130,9 +131,11 @@ import com.composables.icons.lucide.Play
 import com.composables.icons.lucide.Plus
 import com.composables.icons.lucide.RefreshCw
 import com.composables.icons.lucide.ScrollText
+import com.composables.icons.lucide.Search
 import com.composables.icons.lucide.Send
 import com.composables.icons.lucide.Server
 import com.composables.icons.lucide.Settings
+import com.composables.icons.lucide.Share2
 import com.composables.icons.lucide.ShieldCheck
 import com.composables.icons.lucide.Square
 import com.composables.icons.lucide.Terminal
@@ -336,11 +339,21 @@ private fun ConnectionNotice(
 private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val activeSession = state.activeSession
     val canRenameSession = activeSession != null && state.capabilities?.supportsSessionEdit == true
     var renameOpen by remember(activeSession?.id) { mutableStateOf(false) }
     var renameText by remember(activeSession?.id) { mutableStateOf(activeSession?.title.orEmpty()) }
     val displayedMessages = state.displayedMessages
+    val transcript = remember(activeSession?.id, displayedMessages) {
+        activeSession?.let { session ->
+            formatSessionTranscript(session.title, displayedMessages)
+                .takeIf { displayedMessages.any { item ->
+                    item is ChatUiItem.User && item.text.isNotBlank() ||
+                        item is ChatUiItem.Assistant && item.text.isNotBlank()
+                } }
+        }
+    }
     val timelineItems = remember(displayedMessages) { groupChatTimeline(displayedMessages) }
     val assistantAvatarIds = remember(displayedMessages) { firstAssistantIdsByTurn(displayedMessages) }
     val lastAssistantLength = (displayedMessages.lastOrNull { it is ChatUiItem.Assistant } as? ChatUiItem.Assistant)?.text?.length ?: 0
@@ -380,6 +393,13 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 )
             }
             ModelChip(state, viewModel)
+            if (transcript != null) {
+                Spacer(Modifier.width(4.dp))
+                IconButton(
+                    onClick = { shareTranscript(context, transcript) },
+                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.Cream.copy(alpha = 0.07f)),
+                ) { Icon(Lucide.Share2, "Share transcript", tint = T.Cream, modifier = Modifier.size(18.dp)) }
+            }
             Spacer(Modifier.width(8.dp))
             IconButton(
                 onClick = viewModel::createSession,
@@ -737,6 +757,34 @@ internal fun firstAssistantIdsByTurn(messages: List<ChatUiItem>): Set<String> = 
             assistantSeenInTurn = true
         }
     }
+}
+
+/** Conversation export intentionally excludes tool previews and progress summaries. */
+internal fun formatSessionTranscript(
+    sessionTitle: String?,
+    messages: List<ChatUiItem>,
+): String = buildString {
+    val title = sessionTitle?.trim().orEmpty().ifBlank { "Untitled session" }
+    appendLine("Hermes Mobile transcript")
+    appendLine("Session: $title")
+    messages.forEach { message ->
+        val (speaker, text) = when (message) {
+            is ChatUiItem.User -> "You" to message.text
+            is ChatUiItem.Assistant -> "Hermes" to message.text
+            else -> return@forEach
+        }
+        if (text.isBlank()) return@forEach
+        appendLine()
+        appendLine("$speaker:")
+        appendLine(text.trim())
+    }
+}
+
+private fun shareTranscript(context: Context, transcript: String) {
+    val shareIntent = Intent(Intent.ACTION_SEND)
+        .setType("text/plain")
+        .putExtra(Intent.EXTRA_TEXT, transcript)
+    context.startActivity(Intent.createChooser(shareIntent, "Share Hermes transcript"))
 }
 
 @Composable
@@ -1249,9 +1297,30 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
     var actionTarget by remember { mutableStateOf<HermesSession?>(null) }
     var renameTarget by remember { mutableStateOf<HermesSession?>(null) }
     var renameText by remember { mutableStateOf("") }
+    var query by remember(state.activeHostId) { mutableStateOf("") }
+    val orderedSessions = state.orderedSessions
+    val filteredSessions = remember(orderedSessions, query) { filterSessions(orderedSessions, query) }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 15.dp)) {
         ScreenHeading("Sessions", "${state.sessions.size} on ${state.activeHost?.name ?: "no host"}", Lucide.Plus, "New session", viewModel::createSession)
+        if (state.sessions.isNotEmpty()) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                placeholder = { Text("Search loaded sessions", style = T.BodyMuted) },
+                leadingIcon = { Icon(Lucide.Search, null, tint = T.Muted, modifier = Modifier.size(18.dp)) },
+                trailingIcon = if (query.isBlank()) null else {
+                    {
+                        IconButton(onClick = { query = "" }, modifier = Modifier.size(48.dp)) {
+                            Icon(Lucide.X, "Clear session search", tint = T.Muted, modifier = Modifier.size(17.dp))
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                textStyle = T.Body,
+            )
+        }
         PullToRefreshBox(
             isRefreshing = state.isRefreshing,
             onRefresh = viewModel::refresh,
@@ -1261,13 +1330,25 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
                     EmptyListState(Lucide.History, "No sessions yet", "Start a message and Hermes will create one here. Pull down to refresh.")
                 }
+            } else if (filteredSessions.isEmpty()) {
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+                    EmptyListState(Lucide.Search, "No matching sessions", "Searches titles, previews, source, and model across loaded sessions.")
+                    if (state.sessionsHasMore) {
+                        TextButton(
+                            onClick = viewModel::loadMoreSessions,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) {
+                            Text("Load older sessions to search more", style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp))
+                        }
+                    }
+                }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(bottom = 12.dp),
                 ) {
-                    items(state.orderedSessions, key = { it.id }) { session ->
+                    items(filteredSessions, key = { it.id }) { session ->
                         SessionCard(
                             session = session,
                             selected = state.activeSessionId == session.id,
@@ -1281,7 +1362,12 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                             TextButton(
                                 onClick = viewModel::loadMoreSessions,
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                            ) { Text("Load older sessions", style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp)) }
+                            ) {
+                                Text(
+                                    if (query.isBlank()) "Load older sessions" else "Load older sessions to search more",
+                                    style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp),
+                                )
+                            }
                         }
                     }
                 }

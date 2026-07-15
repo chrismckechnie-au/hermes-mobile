@@ -21,6 +21,8 @@ When a build includes Firebase and remote notifications are enabled, Google Fire
 
 Dictation is performed by the speech recognition provider installed or selected on the device. That provider may process audio remotely under its own privacy terms. Hermes Mobile receives only the recognition result.
 
+Choosing **Share transcript** sends the selected session's user and assistant messages to the Android share target chosen by the user. Tool previews and Hermes progress details are excluded from the exported text. The selected share target controls how it stores or transmits that content.
+
 ## Android permissions
 
 - **Internet:** connect to user-configured Hermes hosts and, when configured, Firebase Cloud Messaging.

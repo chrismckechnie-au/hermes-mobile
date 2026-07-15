@@ -155,6 +155,19 @@ internal fun sortSessionsByActivity(
         .thenBy { it.title.orEmpty().lowercase() },
 )
 
+/** Filters only the sessions already loaded from the selected host. */
+internal fun filterSessions(
+    sessions: List<HermesSession>,
+    query: String,
+): List<HermesSession> {
+    val needle = query.trim().lowercase()
+    if (needle.isBlank()) return sessions
+    return sessions.filter { session ->
+        listOf(session.title, session.preview, session.source, session.model)
+            .any { field -> field?.lowercase()?.contains(needle) == true }
+    }
+}
+
 internal fun sessionActivityMillis(value: String?): Long {
     val raw = value?.trim().orEmpty()
     if (raw.isBlank()) return Long.MIN_VALUE
