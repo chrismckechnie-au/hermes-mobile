@@ -151,6 +151,16 @@ data class PendingFollowUpChoice(
     val sessionKey: SessionKey get() = SessionKey(hostId, sessionId)
 }
 
+private val RUN_CHECKPOINTS_LOCK = Any()
+
+internal fun SettingsStore.updateRunCheckpoints(
+    transform: (List<RunCheckpoint>) -> List<RunCheckpoint>,
+) {
+    synchronized(RUN_CHECKPOINTS_LOCK) {
+        saveRunCheckpoints(transform(loadRunCheckpoints()))
+    }
+}
+
 data class FullAccessConfirmation(
     val hostId: String,
     val sessionId: String?,
@@ -692,7 +702,6 @@ class HermesViewModel(
     val state: StateFlow<HermesUiState> = mutableState.asStateFlow()
     private val runStatusChecks = mutableSetOf<String>()
     private val hostActivityChecks = mutableSetOf<String>()
-    private val checkpointLock = Any()
 
     private fun ActiveRun.key(): SessionKey = SessionKey(host.id, sessionId)
 
@@ -2751,11 +2760,9 @@ class HermesViewModel(
     }
 
     private fun persistRunCoordinates(run: ActiveRun) {
-        synchronized(checkpointLock) {
-            val checkpoint = RunCheckpoint(run.host.id, run.sessionId, run.runId, run.lastEventId)
-            val checkpoints = settingsStore.loadRunCheckpoints()
-                .filterNot { it.runId == run.runId } + checkpoint
-            settingsStore.saveRunCheckpoints(checkpoints)
+        val checkpoint = RunCheckpoint(run.host.id, run.sessionId, run.runId, run.lastEventId)
+        settingsStore.updateRunCheckpoints { checkpoints ->
+            checkpoints.filterNot { it.runId == run.runId } + checkpoint
         }
     }
 
@@ -2764,9 +2771,10 @@ class HermesViewModel(
     }
 
     private fun clearRunCoordinates(checkpoint: RunCheckpoint) {
-        synchronized(checkpointLock) {
-            val remaining = settingsStore.loadRunCheckpoints().filterNot { it.runId == checkpoint.runId }
-            settingsStore.saveRunCheckpoints(remaining)
+        synchronized(RUN_CHECKPOINTS_LOCK) {
+            settingsStore.updateRunCheckpoints { checkpoints ->
+                checkpoints.filterNot { it.runId == checkpoint.runId }
+            }
             settingsStore.clearRunStatus(checkpoint.runId)
         }
         if (savedState.get<String>(KEY_RUN_ID) == checkpoint.runId) {

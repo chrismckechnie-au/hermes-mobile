@@ -137,9 +137,9 @@ class HermesOverlayService : Service() {
                     localRunHints = localRunHints - it
                     settings.clearRunStatus(it)
                 }
-                settings.saveRunCheckpoints(
-                    settings.loadRunCheckpoints().filterNot { it.runId in staleRunIds },
-                )
+                settings.updateRunCheckpoints { checkpoints ->
+                    checkpoints.filterNot { it.runId in staleRunIds }
+                }
             }
             val active = (remote + local)
                 .distinctBy { it.host.id to it.session.sessionId }
