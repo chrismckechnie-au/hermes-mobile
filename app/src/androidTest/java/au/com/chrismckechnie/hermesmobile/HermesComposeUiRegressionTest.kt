@@ -6,6 +6,7 @@ import androidx.compose.ui.test.ForcedSize
 import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -13,6 +14,8 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.then
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -54,6 +57,44 @@ class HermesComposeUiRegressionTest {
         composeRule.onNodeWithContentDescription("Stop ${SESSION.title}")
             .assertIsDisplayed()
             .assertHasClickAction()
+    }
+
+    @Test
+    fun activeWorkItem_longPressShowsContextMenu() {
+        setAppContent(activeWorkState())
+
+        composeRule.onNodeWithContentDescription(ACTIVE_WORK_DESCRIPTION).performClick()
+        composeRule.onNodeWithContentDescription(ACTIVE_WORK_ITEM_DESCRIPTION)
+            .assertIsDisplayed()
+            .performTouchInput { longClick() }
+
+        composeRule.onNodeWithText("Open session").assertIsDisplayed()
+        composeRule.onNodeWithText("Stop work").assertIsDisplayed()
+    }
+
+    @Test
+    fun syncRequiredActiveWorkItem_longPressOffersRetryWithoutStop() {
+        val key = SessionKey(HOST.id, SESSION.id)
+        val state = activeWorkState().copy(
+            activeRuns = mapOf(
+                key to ActiveRun(
+                    host = HOST,
+                    sessionId = SESSION.id,
+                    sessionTitle = SESSION.title,
+                    runId = "run-1",
+                    terminalUnsynced = true,
+                ),
+            ),
+        )
+        setAppContent(state)
+
+        composeRule.onNodeWithContentDescription("1 needs attention · 1 active. Show active work.").performClick()
+        composeRule.onNodeWithContentDescription(
+            "Active work item ${SESSION.title}, ${HOST.name}, Transcript sync required",
+        ).performTouchInput { longClick() }
+
+        composeRule.onNodeWithText("Retry transcript sync").assertIsDisplayed()
+        composeRule.onNodeWithText("Stop work").assertIsNotDisplayed()
     }
 
     @Test
@@ -194,5 +235,7 @@ class HermesComposeUiRegressionTest {
         const val HOST_DESCRIPTION = "Hermes host Local Hermes, online. Opens host picker."
         const val ACTIVE_WORK_DESCRIPTION =
             "1 active run · Release verification. Show active work."
+        const val ACTIVE_WORK_ITEM_DESCRIPTION =
+            "Active work item Release verification, Local Hermes, Working"
     }
 }
