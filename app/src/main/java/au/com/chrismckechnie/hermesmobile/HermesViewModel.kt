@@ -1296,7 +1296,9 @@ class HermesViewModel(
     }
 
     fun hideHostPicker() {
-        mutableState.update { it.copy(showHostPicker = false, editingHostId = null, errorMessage = null) }
+        if (mutableState.value.hosts.isNotEmpty()) {
+            mutableState.update { it.copy(showHostPicker = false, editingHostId = null, errorMessage = null) }
+        }
     }
 
     fun dismissError() {

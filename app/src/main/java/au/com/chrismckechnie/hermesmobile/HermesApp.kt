@@ -4,10 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import android.os.SystemClock
 import android.speech.RecognizerIntent
 import android.widget.Toast
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -33,8 +31,6 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -52,7 +48,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -101,16 +96,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
@@ -119,9 +111,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
-import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -146,7 +136,6 @@ import androidx.compose.ui.window.Dialog
 import com.composables.icons.lucide.CalendarClock
 import com.composables.icons.lucide.Bell
 import com.composables.icons.lucide.ChevronDown
-import com.composables.icons.lucide.CircleX
 import com.composables.icons.lucide.CircleCheck
 import com.composables.icons.lucide.CloudOff
 import com.composables.icons.lucide.Copy
@@ -173,7 +162,6 @@ import com.composables.icons.lucide.Share2
 import com.composables.icons.lucide.ShieldCheck
 import com.composables.icons.lucide.Square
 import com.composables.icons.lucide.Terminal
-import com.composables.icons.lucide.TriangleAlert
 import com.composables.icons.lucide.Trash2
 import com.composables.icons.lucide.Wifi
 import com.composables.icons.lucide.X
@@ -240,14 +228,10 @@ fun HermesMobileApp(
     }
     CompositionLocalProvider(LocalHermes provides palette) {
         MaterialTheme(colorScheme = palette.ColorScheme) {
-            BackHandler(enabled = state.screen != DeckScreen.Chat) {
-                viewModel.selectScreen(DeckScreen.Chat)
-            }
             Surface(modifier = Modifier.fillMaxSize(), color = palette.Abyss) {
                 Box(Modifier.fillMaxSize()) {
                     Box(Modifier.fillMaxSize().hermesBackdrop(palette))
-                    val compact = LocalConfiguration.current.screenWidthDp <= 360 ||
-                        LocalDensity.current.fontScale >= 1.5f
+                    val compact = LocalConfiguration.current.screenWidthDp <= 360
                     Column(
                         Modifier.fillMaxHeight().fillMaxWidth().widthIn(max = 840.dp)
                             .align(Alignment.Center).statusBarsPadding(),
@@ -268,8 +252,13 @@ fun HermesMobileApp(
                             onDismissError = viewModel::dismissError,
                         )
                         ActiveWorkCentre(state, viewModel)
-                        Box(Modifier.weight(1f)) {
-                            when (state.screen) {
+                        AnimatedContent(
+                            targetState = state.screen,
+                            transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(110)) },
+                            label = "command-deck-screen",
+                            modifier = Modifier.weight(1f),
+                        ) { screen ->
+                            when (screen) {
                                 DeckScreen.Chat -> ChatScreen(state, viewModel)
                                 DeckScreen.Sessions -> SessionsScreen(state, viewModel)
                                 DeckScreen.Jobs -> JobsScreen(state, viewModel)
@@ -371,12 +360,10 @@ private fun CommandHeader(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             HermesAvatar(Modifier.size(34.dp))
-            if (!compact) {
-                Spacer(Modifier.width(10.dp))
-                Column {
-                    Text("HERMES", style = T.Label.copy(letterSpacing = 1.8.sp))
-                    Text("Mobile command deck", style = T.Micro.copy(letterSpacing = 0.sp))
-                }
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text("HERMES", style = T.Label.copy(letterSpacing = 1.8.sp))
+                if (!compact) Text("Mobile command deck", style = T.Micro.copy(letterSpacing = 0.sp))
             }
         }
 
@@ -416,26 +403,16 @@ private fun CommandHeader(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.size(8.dp).clip(CircleShape).background(phaseColor(state.connectionPhase)))
-            Spacer(Modifier.width(if (compact) 6.dp else 8.dp))
-            if (compact) {
+            Spacer(Modifier.width(8.dp))
+            Column {
                 Text(
                     hostName,
-                    style = T.MicroBold.copy(color = T.CreamSoft, letterSpacing = 0.sp),
+                    style = T.BodyMuted.copy(color = if (state.activeHost == null) T.TextSoft else T.CreamSoft, fontWeight = FontWeight.SemiBold),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 72.dp),
+                    modifier = Modifier.widthIn(max = 130.dp),
                 )
-            } else {
-                Column {
-                    Text(
-                        hostName,
-                        style = T.BodyMuted.copy(color = if (state.activeHost == null) T.TextSoft else T.CreamSoft, fontWeight = FontWeight.SemiBold),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.widthIn(max = 130.dp),
-                    )
-                    Text(statusText, style = T.Micro.copy(color = phaseColor(state.connectionPhase), letterSpacing = 0.8.sp))
-                }
+                if (!compact) Text(statusText, style = T.Micro.copy(color = phaseColor(state.connectionPhase), letterSpacing = 0.8.sp))
             }
             Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.size(18.dp))
             }
@@ -519,7 +496,6 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val timelineItems = remember(displayedMessages) { groupChatTimeline(displayedMessages) }
     val assistantAvatarIds = remember(displayedMessages) { firstAssistantIdsByTurn(displayedMessages) }
     val lastAssistantLength = (displayedMessages.lastOrNull { it is ChatUiItem.Assistant } as? ChatUiItem.Assistant)?.text?.length ?: 0
-    var lastAutoScrollAt by remember { mutableStateOf(0L) }
     val isNearLatest by remember {
         derivedStateOf {
             val layout = listState.layoutInfo
@@ -528,11 +504,8 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
         }
     }
     LaunchedEffect(displayedMessages.size, lastAssistantLength) {
-        val remainingThrottle = (80L - (SystemClock.uptimeMillis() - lastAutoScrollAt)).coerceAtLeast(0L)
-        if (remainingThrottle > 0L) delay(remainingThrottle)
         if (timelineItems.isNotEmpty() && isNearLatest && !listState.isScrollInProgress) {
             listState.scrollToItem(timelineItems.lastIndex, scrollOffset = 100_000)
-            lastAutoScrollAt = SystemClock.uptimeMillis()
         }
     }
     Column(Modifier.fillMaxSize()) {
@@ -694,7 +667,6 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun LiveWorkPills(
     tasks: List<HermesTask>,
@@ -705,12 +677,10 @@ private fun LiveWorkPills(
     onShowWorkspace: () -> Unit,
 ) {
     if (tasks.isEmpty() && subagents.isEmpty() && workspaceUpdate?.files.isNullOrEmpty()) return
-    FlowRow(
-        modifier = Modifier.fillMaxWidth()
-            .padding(start = 16.dp, end = 16.dp, bottom = 5.dp),
-        horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
-        maxItemsInEachRow = 3,
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 5.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (tasks.isNotEmpty()) {
             WorkPill(
@@ -754,7 +724,7 @@ private fun WorkPill(
             .clip(CircleShape)
             .background(T.Cream.copy(alpha = 0.09f))
             .border(1.dp, T.Cream.copy(alpha = 0.18f), CircleShape)
-            .clickable(onClickLabel = contentDescription, role = Role.Button, onClick = onClick)
+            .clickable(onClickLabel = contentDescription, onClick = onClick)
             .semantics(mergeDescendants = true) { this.contentDescription = contentDescription }
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1066,60 +1036,33 @@ private fun ActiveWorkCentre(state: HermesUiState, viewModel: HermesViewModel) {
     AnimatedVisibility(visible = bannerVisible) {
         val summary = activeWorkSummary(items)
         val attention = items.any(ActiveWorkItem::needsAttention)
-        val hasFailure = items.any { it.state in setOf("failed", "error") }
-        val attentionColor = if (hasFailure) T.Error else T.Warn
-        Box(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .then(if (attention) Modifier else Modifier.padding(horizontal = 14.dp, vertical = 3.dp)),
-            contentAlignment = Alignment.CenterEnd,
+                .heightIn(min = T.ControlMin)
+                .background(if (attention) T.Warn.copy(alpha = 0.09f) else T.AccentFill.copy(alpha = 0.07f))
+                .clickable(
+                    onClickLabel = "Show active work",
+                    role = Role.Button,
+                    onClick = { sheetOpen = true },
+                )
+                .semantics(mergeDescendants = true) {
+                    contentDescription = "$summary. Show active work."
+                    liveRegion = LiveRegionMode.Polite
+                }
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                modifier = Modifier
-                    .then(if (attention) Modifier.fillMaxWidth() else Modifier.widthIn(max = 286.dp))
-                    .heightIn(min = T.ControlMin)
-                    .clip(if (attention) RectangleShape else CircleShape)
-                    .background(if (attention) attentionColor.copy(alpha = 0.08f) else T.Cream.copy(alpha = 0.055f))
-                    .then(
-                        if (attention) Modifier else Modifier.border(
-                            1.dp,
-                            T.Cream.copy(alpha = 0.12f),
-                            CircleShape,
-                        ),
-                    )
-                    .clickable(
-                        onClickLabel = "Show active work",
-                        role = Role.Button,
-                        onClick = { sheetOpen = true },
-                    )
-                    .semantics(mergeDescendants = true) {
-                        contentDescription = "$summary. Show active work."
-                        liveRegion = LiveRegionMode.Polite
-                    }
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    when {
-                        hasFailure -> Lucide.CircleX
-                        attention -> Lucide.TriangleAlert
-                        else -> Lucide.RefreshCw
-                    },
-                    null,
-                    tint = if (attention) attentionColor else T.AccentText,
-                    modifier = Modifier.size(T.IconSm),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    summary,
-                    style = T.Status,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                Spacer(Modifier.width(7.dp))
-                Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.size(T.IconSm))
-            }
+            Icon(
+                if (attention) Lucide.ShieldCheck else Lucide.RefreshCw,
+                null,
+                tint = if (attention) T.Warn else T.AccentText,
+                modifier = Modifier.size(T.IconSm),
+            )
+            Spacer(Modifier.width(9.dp))
+            Text(summary, style = T.Status, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Spacer(Modifier.width(8.dp))
+            Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.size(T.IconSm))
         }
     }
 
@@ -1394,8 +1337,7 @@ private fun ComposerControlPill(
             .heightIn(min = 48.dp)
             .clip(CircleShape)
             .background(if (highlight) T.Cream.copy(alpha = 0.14f) else T.Cream.copy(alpha = 0.07f))
-            .clickable(onClickLabel = contentDescription, role = Role.Button, onClick = onClick)
-            .semantics(mergeDescendants = true) { this.contentDescription = contentDescription }
+            .clickable(onClickLabel = contentDescription, onClick = onClick)
             .padding(start = 11.dp, end = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1407,11 +1349,11 @@ private fun ComposerControlPill(
             modifier = Modifier.weight(1f, fill = false),
         )
         Spacer(Modifier.width(5.dp))
-        Icon(icon, null, tint = if (highlight) T.Cream else T.Muted, modifier = Modifier.size(15.dp))
+        Icon(icon, contentDescription, tint = if (highlight) T.Cream else T.Muted, modifier = Modifier.size(15.dp))
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ModelSettingsSheet(
     state: HermesUiState,
@@ -1425,10 +1367,6 @@ private fun ModelSettingsSheet(
         ?.takeIf { it.isNotBlank() }
         ?: displaySessionModel(state.capabilities?.model, null)
         ?: state.models.firstOrNull()
-    val hostDefaultLabel = hostDefaultModel
-        ?.takeUnless { it.equals("Host default", ignoreCase = true) }
-        ?.let { "$it (host default)" }
-        ?: "Host default"
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1444,14 +1382,8 @@ private fun ModelSettingsSheet(
             )
         },
     ) {
-        Column(
-            Modifier.fillMaxWidth()
-                .imePadding()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp)
-                .padding(bottom = 26.dp),
-        ) {
-            Text("Model settings", style = T.SheetTitle, modifier = Modifier.semantics { heading() })
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+            Text("Model settings", style = T.SheetTitle)
             Text(
                 "Applies to new runs on ${state.activeHost?.name ?: "this host"}.",
                 style = T.BodyMuted,
@@ -1469,66 +1401,33 @@ private fun ModelSettingsSheet(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 )
             }
-            val modelOptions = buildList {
-                add(null to hostDefaultLabel)
-                state.models.distinct()
-                    .filter { it.contains(modelQuery.trim(), ignoreCase = true) }
-                    .forEach { model -> add(model to model) }
-            }
-            Text("MODEL", style = T.Micro, modifier = Modifier.padding(bottom = 7.dp))
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = T.SurfaceOne,
-                border = BorderStroke(1.dp, T.Line),
-                shape = RoundedCornerShape(T.RadiusCard),
-            ) {
-                LazyColumn(
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 288.dp).selectableGroup(),
-                ) {
-                    itemsIndexed(
-                        modelOptions,
-                        key = { _, option -> option.first?.let { "model:$it" } ?: "default" },
-                    ) { index, (key, display) ->
-                        SelectionRow(
-                            label = display,
-                            selected = key == state.selectedModel,
-                            grouped = true,
-                            onClick = { viewModel.selectModel(key) },
-                        )
-                        if (index < modelOptions.lastIndex) {
-                            HorizontalDivider(color = T.Line, modifier = Modifier.padding(horizontal = 13.dp))
-                        }
-                    }
-                }
-            }
+            SelectorField(
+                label = "MODEL",
+                value = state.selectedModel ?: hostDefaultModel?.let { "$it (host default)" } ?: "—",
+                options = buildList {
+                    add(null to (hostDefaultModel?.let { "$it (host default)" } ?: "Host default"))
+                    state.models.filter { it.contains(modelQuery, ignoreCase = true) }
+                        .forEach { model -> add(model to model) }
+                },
+                selectedKey = state.selectedModel,
+                onSelect = viewModel::selectModel,
+            )
 
             if (supportsReasoning) {
                 Spacer(Modifier.height(12.dp))
-                Text("REASONING EFFORT", style = T.Micro, modifier = Modifier.padding(bottom = 7.dp))
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth().selectableGroup(),
-                    horizontalArrangement = Arrangement.spacedBy(7.dp),
-                    verticalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    (listOf<String?>(null) + REASONING_EFFORTS).forEach { effort ->
-                        FilterChip(
-                            selected = effort == state.selectedReasoningEffort,
-                            onClick = { viewModel.selectReasoningEffort(effort) },
-                            label = {
-                                Text(
-                                    effort ?: "host default",
-                                    style = T.MicroBold.copy(letterSpacing = 0.sp),
-                                )
-                            },
-                        )
-                    }
-                }
+                SelectorField(
+                    label = "REASONING EFFORT",
+                    value = state.selectedReasoningEffort ?: "host default",
+                    options = (listOf<String?>(null) + REASONING_EFFORTS).map { it to (it ?: "host default") },
+                    selectedKey = state.selectedReasoningEffort,
+                    onSelect = viewModel::selectReasoningEffort,
+                )
             }
         }
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PermissionSettingsSheet(
     state: HermesUiState,
@@ -1536,71 +1435,26 @@ private fun PermissionSettingsSheet(
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val dismissSheet = {
-        if (state.isFullAccessConfirmationPending) viewModel.cancelFullAccessConfirmation()
-        onDismiss()
-    }
     ModalBottomSheet(
-        onDismissRequest = dismissSheet,
+        onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = T.SurfaceLow,
         scrimColor = T.Scrim,
     ) {
-        Column(
-            Modifier.fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp)
-                .navigationBarsPadding()
-                .padding(bottom = 26.dp),
-        ) {
-            Text("Permissions", style = T.SheetTitle, modifier = Modifier.semantics { heading() })
+        Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
+            Text("Permissions", style = T.SheetTitle)
             Text(
                 "Choose how Hermes handles ordinary command approvals for runs in this session.",
                 style = T.BodyMuted,
                 modifier = Modifier.padding(top = 3.dp, bottom = 14.dp),
             )
-            Text("RUN PERMISSIONS", style = T.Micro, modifier = Modifier.padding(bottom = 7.dp))
-            Column(Modifier.fillMaxWidth().selectableGroup(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                SelectionRow(
-                    label = "Default permissions",
-                    selected = state.selectedPermissionMode == null && !state.isFullAccessConfirmationPending,
-                    onClick = { viewModel.selectPermissionMode(null) },
-                )
-                SelectionRow(
-                    label = "Full access · next run only",
-                    selected = state.selectedPermissionMode == "full-access" || state.isFullAccessConfirmationPending,
-                    onClick = { viewModel.selectPermissionMode("full-access") },
-                )
-            }
-            if (state.isFullAccessConfirmationPending) {
-                Card(
-                    modifier = Modifier.padding(top = 12.dp),
-                    colors = CardDefaults.cardColors(containerColor = T.Warn.copy(alpha = 0.08f)),
-                    border = BorderStroke(1.dp, T.Warn.copy(alpha = 0.28f)),
-                    shape = RoundedCornerShape(T.RadiusCard),
-                ) {
-                    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 11.dp, bottom = 6.dp)) {
-                        Text("Use Full Access once?", style = T.Label.copy(color = T.Warn))
-                        Text(
-                            "The next run can act without ordinary approval prompts. Host safety policy still applies.",
-                            style = T.BodyMuted,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                        FlowRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End,
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
-                        ) {
-                            TextButton(onClick = viewModel::cancelFullAccessConfirmation) {
-                                Text("Cancel", style = T.Action.copy(color = T.Muted))
-                            }
-                            TextButton(onClick = viewModel::confirmFullAccessForNextRun) {
-                                Text("Confirm next run", style = T.Action.copy(color = T.Warn))
-                            }
-                        }
-                    }
-                }
-            }
+            SelectorField(
+                label = "RUN PERMISSIONS",
+                value = if (state.selectedPermissionMode == "full-access") "Full access · next run" else "Default permissions",
+                options = listOf(null to "Default permissions", "full-access" to "Full access · next run only"),
+                selectedKey = state.selectedPermissionMode,
+                onSelect = viewModel::selectPermissionMode,
+            )
             if (state.selectedPermissionMode == "full-access") {
                 Text(
                     "Full access is armed for the next run only. It is consumed when you send; host safety blocks still apply.",
@@ -1610,56 +1464,76 @@ private fun PermissionSettingsSheet(
             }
         }
     }
+    if (state.pendingFullAccessConfirmation != null) {
+        AlertDialog(
+            onDismissRequest = viewModel::cancelFullAccessConfirmation,
+            containerColor = T.SurfaceLow,
+            title = { Text("Use Full Access once?", style = T.SheetTitle) },
+            text = {
+                Text(
+                    "The next run can act without ordinary approval prompts. This does not change the host policy and will not carry over to later runs.",
+                    style = T.BodyMuted.copy(color = T.Warn),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmFullAccessForNextRun) {
+                    Text("Confirm next run", style = T.Action.copy(color = T.Warn))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::cancelFullAccessConfirmation) {
+                    Text("Cancel", style = T.Action.copy(color = T.Muted))
+                }
+            },
+        )
+    }
 }
 
 @Composable
-private fun SelectionRow(
+private fun SelectorField(
     label: String,
-    selected: Boolean,
-    grouped: Boolean = false,
-    onClick: () -> Unit,
+    value: String,
+    options: List<Pair<String?, String>>,
+    selectedKey: String?,
+    onSelect: (String?) -> Unit,
 ) {
-    val shape = RoundedCornerShape(T.RadiusCard)
-    val containerModifier = Modifier
-        .fillMaxWidth()
-        .heightIn(min = T.ControlMin)
-        .then(if (grouped) Modifier else Modifier.clip(shape))
-        .background(
-            when {
-                selected -> T.Cream.copy(alpha = 0.09f)
-                grouped -> Color.Transparent
-                else -> T.SurfaceOne
-            },
-        )
-        .then(
-            if (grouped) Modifier else Modifier.border(
-                BorderStroke(1.dp, if (selected) T.FocusRing else T.Line),
-                shape,
-            ),
-        )
-    Row(
-        modifier = containerModifier
-            .selectable(
-                selected = selected,
-                role = Role.RadioButton,
-                onClick = onClick,
-            )
-            .padding(horizontal = 13.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            label,
-            style = T.Body.copy(
-                color = if (selected) T.TextPrimary else T.TextSoft,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            ),
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        if (selected) {
-            Spacer(Modifier.width(8.dp))
-            Icon(Lucide.CircleCheck, null, tint = T.Cream, modifier = Modifier.size(17.dp))
+    var expanded by remember { mutableStateOf(false) }
+    Text(label, style = T.Micro, modifier = Modifier.padding(bottom = 7.dp))
+    Box {
+        Row(
+            modifier = Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(T.RadiusCard))
+                .background(T.SurfaceOne)
+                .border(BorderStroke(1.dp, T.LineStrong), RoundedCornerShape(T.RadiusCard))
+                .clickable { expanded = true }
+                .padding(horizontal = 13.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(value, style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.size(17.dp))
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, containerColor = T.SurfaceOne) {
+            options.forEach { (key, display) ->
+                val selected = key == selectedKey
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            display,
+                            style = T.BodyMuted.copy(
+                                color = if (selected) T.Cream else T.TextSoft,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            ),
+                        )
+                    },
+                    trailingIcon = {
+                        if (selected) Icon(Lucide.CircleCheck, null, tint = T.Cream, modifier = Modifier.size(15.dp))
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(key)
+                    },
+                )
+            }
         }
     }
 }
@@ -1752,37 +1626,21 @@ private fun EmptyConversation(
         if (state.connectionPhase == HostConnectionPhase.Connected) {
             Spacer(Modifier.height(18.dp))
             Text("START WITH", style = T.Micro)
-            Surface(
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                color = T.SurfaceLow,
-                border = BorderStroke(1.dp, T.Line),
-                shape = RoundedCornerShape(T.RadiusCard),
+            Row(
+                modifier = Modifier.padding(top = 8.dp).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Column {
                 listOf(
                     "Summarise this project",
                     "Review recent changes",
                     "Help me plan a task",
-                ).forEachIndexed { index, prompt ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth().heightIn(min = T.ControlMin)
-                            .clickable(
-                                onClickLabel = "Use starter prompt: $prompt",
-                                onClick = { onStarterPrompt(prompt) },
-                            )
-                            .padding(horizontal = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(Lucide.Zap, null, tint = T.Tool, modifier = Modifier.size(15.dp))
-                        Spacer(Modifier.width(9.dp))
-                        Text(
-                            prompt,
-                            style = T.Body.copy(fontWeight = FontWeight.Medium),
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                    if (index < 2) HorizontalDivider(color = T.Line)
-                }
+                ).forEach { prompt ->
+                    WorkPill(
+                        icon = Lucide.Zap,
+                        label = prompt,
+                        contentDescription = "Use starter prompt: $prompt",
+                        onClick = { onStarterPrompt(prompt) },
+                    )
                 }
             }
         }
@@ -1903,18 +1761,15 @@ private fun shareTranscript(context: Context, transcript: String) {
 
 @Composable
 private fun ReasoningCard(item: ChatUiItem.Reasoning) {
+    // Live activity is useful while a run is in progress, so expose it immediately.
+    // The card stays collapsible once the user has reviewed it.
     var expanded by remember(item.id) { mutableStateOf(true) }
     val latest = item.updates.lastOrNull().orEmpty()
     val action = if (expanded) "Collapse Hermes activity" else "Expand Hermes activity"
     Card(
         modifier = Modifier
             .fillMaxWidth(0.86f)
-            .heightIn(min = 48.dp)
-            .semantics {
-                contentDescription = action
-                role = Role.Button
-                stateDescription = if (expanded) "Expanded" else "Collapsed"
-            }
+            .semantics { contentDescription = action }
             .clickable { expanded = !expanded },
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
@@ -1941,7 +1796,7 @@ private fun ReasoningCard(item: ChatUiItem.Reasoning) {
             Spacer(Modifier.width(5.dp))
             Icon(
                 Lucide.ChevronDown,
-                null,
+                action,
                 tint = T.Muted,
                 modifier = Modifier.size(15.dp).rotate(if (expanded) 180f else 0f),
             )
@@ -1965,8 +1820,8 @@ private fun ReasoningCard(item: ChatUiItem.Reasoning) {
 @Composable
 private fun ActivityHistoryCard(item: ChatUiItem.Activity) {
     val latest = item.turns.lastOrNull()
+    var expanded by remember(item.id) { mutableStateOf(latest?.terminal != true) }
     val activeCount = item.turns.count { !it.terminal }
-    var expanded by remember(item.id, activeCount > 0) { mutableStateOf(activeCount > 0) }
     val label = when {
         activeCount > 0 -> "$activeCount active work trace${if (activeCount == 1) "" else "s"}"
         item.turns.size == 1 -> "Hermes work trace"
@@ -1975,12 +1830,7 @@ private fun ActivityHistoryCard(item: ChatUiItem.Activity) {
     Card(
         modifier = Modifier
             .fillMaxWidth(0.9f)
-            .heightIn(min = 48.dp)
-            .semantics {
-                contentDescription = if (expanded) "Collapse Hermes work trace" else "Expand Hermes work trace"
-                role = Role.Button
-                stateDescription = if (expanded) "Expanded" else "Collapsed"
-            }
+            .semantics { contentDescription = if (expanded) "Collapse Hermes work trace" else "Expand Hermes work trace" }
             .clickable { expanded = !expanded },
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
@@ -2197,12 +2047,7 @@ private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>) {
     Card(
         modifier = Modifier
             .fillMaxWidth(0.86f)
-            .heightIn(min = 48.dp)
-            .semantics {
-                contentDescription = action
-                role = Role.Button
-                stateDescription = if (expanded) "Expanded" else "Collapsed"
-            }
+            .semantics { contentDescription = action }
             .clickable { expanded = !expanded },
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
@@ -2232,7 +2077,7 @@ private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>) {
                 Spacer(Modifier.width(5.dp))
                 if (latest.running) CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
                 else Text("$completed/${tools.size}", style = T.MicroBold.copy(color = if (latest.failed) T.Error else T.Tool))
-                Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.padding(start = 5.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
+                Icon(Lucide.ChevronDown, action, tint = T.Muted, modifier = Modifier.padding(start = 5.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
             }
             AnimatedVisibility(visible = expanded) {
                 Column(
@@ -2519,7 +2364,7 @@ private fun ComposerInput(
             enabled = state.enabled,
             textStyle = T.Body.copy(color = T.TextSoft),
             cursorBrush = SolidColor(T.Cream),
-            modifier = Modifier.weight(1f).semantics { contentDescription = "Message Hermes" },
+            modifier = Modifier.weight(1f),
             maxLines = 4,
             decorationBox = { inner ->
                 Box(Modifier.padding(vertical = 6.dp)) {
@@ -2719,7 +2564,7 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(bottom = 12.dp),
                 ) {
                     items(filteredSessions, key = { it.id }) { session ->
@@ -2730,7 +2575,6 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                             defaultModel = defaultModel,
                             onClick = { viewModel.selectSession(session.id) },
                             onLongClick = { actionTarget = session },
-                            onActions = { actionTarget = session },
                         )
                     }
                     if (state.sessionsHasMore) {
@@ -2762,13 +2606,14 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
         ModalBottomSheet(
             onDismissRequest = { actionTarget = null },
             containerColor = T.SurfaceLow,
+            dragHandle = null,
         ) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp).padding(bottom = 18.dp)) {
                 Text(sessionDisplayTitle(session), style = T.SheetTitle)
                 Text(
                     when {
-                        busy && !deleteBlocked -> "Rename and delete are available; other actions are unavailable."
-                        busy -> "Rename stays available while Hermes is working; other actions may be unavailable."
+                        busy && !deleteBlocked -> "This empty session can be deleted; other actions are unavailable."
+                        busy -> "Session actions are unavailable while Hermes is working."
                         else -> "Choose a session action."
                     },
                     style = T.BodyMuted.copy(color = if (busy) T.Warn else T.Muted),
@@ -2777,7 +2622,7 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 SessionActionRow(
                     icon = Lucide.Pencil,
                     label = "Rename",
-                    enabled = state.capabilities?.supportsSessionEdit == true,
+                    enabled = !busy && state.capabilities?.supportsSessionEdit == true,
                 ) {
                     renameText = session.title.orEmpty()
                     renameTarget = session
@@ -2825,17 +2670,13 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     onValueChange = { renameText = it },
                     singleLine = true,
                     textStyle = T.Body.copy(fontSize = 14.sp),
-                    label = { Text("Session name") },
                 )
             },
             confirmButton = {
-                TextButton(
-                    enabled = renameText.isNotBlank(),
-                    onClick = {
-                        viewModel.renameSession(session.id, renameText)
-                        renameTarget = null
-                    },
-                ) { Text("Save", style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp)) }
+                TextButton(onClick = {
+                    viewModel.renameSession(session.id, renameText)
+                    renameTarget = null
+                }) { Text("Save", style = T.BodyMuted.copy(color = T.Cream, fontSize = 13.sp)) }
             },
             dismissButton = {
                 TextButton(onClick = { renameTarget = null }) { Text("Cancel", style = T.BodyMuted.copy(fontSize = 13.sp)) }
@@ -2846,25 +2687,13 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
 
 @Composable
 private fun LiveWorkingBubble(status: String, updates: List<String>) {
-    var manuallyCollapsed by remember { mutableStateOf(false) }
-    var expanded by remember { mutableStateOf(updates.size > 1) }
-    LaunchedEffect(updates.size) {
-        if (!manuallyCollapsed && updates.size > 1) expanded = true
-    }
+    var expanded by remember { mutableStateOf(false) }
     val action = if (expanded) "Collapse live Hermes status" else "Expand live Hermes status"
     Card(
         modifier = Modifier
             .fillMaxWidth(0.9f)
-            .heightIn(min = 48.dp)
-            .semantics {
-                contentDescription = action
-                role = Role.Button
-                stateDescription = if (expanded) "Expanded" else "Collapsed"
-            }
-            .clickable {
-                expanded = !expanded
-                manuallyCollapsed = !expanded
-            },
+            .semantics { contentDescription = action }
+            .clickable { expanded = !expanded },
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow),
         border = BorderStroke(1.dp, T.Cream.copy(alpha = 0.16f)),
@@ -2884,7 +2713,7 @@ private fun LiveWorkingBubble(status: String, updates: List<String>) {
             )
             Icon(
                 Lucide.ChevronDown,
-                null,
+                action,
                 tint = T.Muted,
                 modifier = Modifier.size(15.dp).rotate(if (expanded) 180f else 0f),
             )
@@ -2971,7 +2800,6 @@ private fun SessionCard(
     defaultModel: String?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    onActions: () -> Unit,
 ) {
     val activityColor = activity?.let { sessionActivityColor(it.state) }
     val updatedAt = formatSessionUpdatedAt(session.lastActive)
@@ -2980,52 +2808,38 @@ private fun SessionCard(
         colors = CardDefaults.cardColors(
             containerColor = when {
                 selected -> T.Cream.copy(alpha = 0.075f)
+                activityColor != null -> activityColor.copy(alpha = 0.09f)
                 else -> T.SurfaceLow
             },
         ),
         border = BorderStroke(1.dp, when {
             selected -> T.FocusRing
+            activityColor != null -> activityColor.copy(alpha = 0.55f)
             else -> T.Line
         }),
         shape = RoundedCornerShape(T.RadiusCard),
     ) {
-        Column(Modifier.padding(start = 10.dp, top = 6.dp, bottom = 9.dp, end = 4.dp)) {
+        Column(Modifier.padding(13.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(8.dp).clip(CircleShape).background(activityColor ?: if (selected) T.Cream else T.Muted.copy(alpha = 0.4f)))
                 Spacer(Modifier.width(9.dp))
                 Text(sessionDisplayTitle(session), style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 activity?.let {
                     Text(sessionActivityLabel(it.state), style = T.MicroBold.copy(color = activityColor ?: T.Cream))
+                    Spacer(Modifier.width(7.dp))
                 }
-                IconButton(onClick = onActions, modifier = Modifier.size(T.ControlMin)) {
-                    Icon(
-                        Lucide.Ellipsis,
-                        "Session actions for ${sessionDisplayTitle(session)}",
-                        tint = T.Muted,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
+                Text("${session.messageCount ?: 0} MSG", style = T.Micro)
             }
-            Text(
-                session.preview?.takeIf { it.isNotBlank() } ?: "No preview available",
-                style = T.BodyMuted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 2.dp, start = 17.dp, end = 6.dp),
-            )
+            Text(session.preview?.takeIf { it.isNotBlank() } ?: "No preview available", style = T.BodyMuted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp, start = 17.dp))
             Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp, start = 17.dp, end = 6.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 9.dp, start = 17.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    listOfNotNull(
-                        sessionSourceLabel(session.source),
-                        displaySessionModel(session.model, defaultModel),
-                        "${session.messageCount ?: 0} msg",
-                    )
+                    listOfNotNull(sessionSourceLabel(session.source), displaySessionModel(session.model, defaultModel))
                         .filter(String::isNotBlank)
                         .joinToString(" · "),
-                    style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp),
+                    style = T.Micro.copy(color = T.Muted.copy(alpha = 0.72f), letterSpacing = 0.sp),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -3034,7 +2848,7 @@ private fun SessionCard(
                     Spacer(Modifier.width(8.dp))
                     Text(
                         timestamp,
-                        style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp),
+                        style = T.Micro.copy(color = T.Muted.copy(alpha = 0.72f), letterSpacing = 0.sp),
                         textAlign = TextAlign.End,
                     )
                 }
@@ -3131,20 +2945,10 @@ private fun JobCard(
     var expanded by remember(job.id) { mutableStateOf(false) }
     Card(colors = CardDefaults.cardColors(containerColor = T.SurfaceLow), border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
         Column {
-        Row(
-            Modifier.fillMaxWidth()
-                .semantics {
-                    contentDescription = "${if (expanded) "Collapse" else "Expand"} recent runs for ${job.name}"
-                    role = Role.Button
-                    stateDescription = if (expanded) "Expanded" else "Collapsed"
-                }
-                .clickable {
-                    expanded = !expanded
-                    if (expanded && runs == null) onLoadRuns()
-                }
-                .padding(13.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        Row(Modifier.fillMaxWidth().clickable {
+            expanded = !expanded
+            if (expanded && runs == null) onLoadRuns()
+        }.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(job.name, style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
@@ -3155,14 +2959,8 @@ private fun JobCard(
                     )
                 }
                 Text(job.schedule, style = T.MonoBody, modifier = Modifier.padding(top = 4.dp))
-                Text(job.deliver?.let { "Delivery · $it" } ?: "Local delivery", style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp), modifier = Modifier.padding(top = 6.dp))
+                Text(job.deliver?.let { "Delivery · $it" } ?: "Local delivery", style = T.Micro.copy(color = T.Muted.copy(alpha = 0.75f), letterSpacing = 0.sp), modifier = Modifier.padding(top = 6.dp))
             }
-            Icon(
-                Lucide.ChevronDown,
-                null,
-                tint = T.Muted,
-                modifier = Modifier.padding(horizontal = 4.dp).size(15.dp).rotate(if (expanded) 180f else 0f),
-            )
             IconButton(onClick = onRunNow, enabled = !running, modifier = Modifier.size(48.dp)) {
                 if (running) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Tool)
                 else Icon(Lucide.Play, "Run job now", tint = T.Tool, modifier = Modifier.size(20.dp))
@@ -3235,30 +3033,17 @@ private fun HostScreen(state: HermesUiState, viewModel: HermesViewModel) {
             }
         }
         Spacer(Modifier.height(10.dp))
-        Surface(
-            color = T.SurfaceLow,
-            border = BorderStroke(1.dp, T.Line),
-            shape = RoundedCornerShape(T.RadiusCard),
-        ) {
-            Column {
-                HostStatusRow(Lucide.Wifi, "Hermes API", state.capabilities?.platform ?: "Waiting for capabilities", if (state.connectionPhase == HostConnectionPhase.Connected) "READY" else "OFFLINE", if (state.connectionPhase == HostConnectionPhase.Connected) T.Cream else T.Error)
-                HorizontalDivider(color = T.Line)
-                HostStatusRow(
-                    Lucide.Server,
-                    "Hermes Agent",
-                    state.capabilities?.version?.let { "Version $it" } ?: "Version unavailable on this host",
-                    if (state.capabilities?.version != null) "VERSION" else "UNKNOWN",
-                    if (state.capabilities?.version != null) T.Cream else T.Muted,
-                )
-                HorizontalDivider(color = T.Line)
-                HostCompatibilityCard(state.capabilities)
-                HorizontalDivider(color = T.Line)
-                HostStatusRow(Lucide.ShieldCheck, "Authentication", "Bearer key stored with Android Keystore encryption", "SECURE", T.Cream)
-                HorizontalDivider(color = T.Line)
-                HostStatusRow(Lucide.Globe, "Transport", if (host.baseUrl.startsWith("https")) "HTTPS encrypted connection" else "Explicit private-network HTTP", if (host.baseUrl.startsWith("https")) "TLS" else "PRIVATE", if (host.baseUrl.startsWith("https")) T.Cream else T.Warn)
-            }
-        }
-        Spacer(Modifier.height(10.dp))
+        HostStatusRow(Lucide.Wifi, "Hermes API", state.capabilities?.platform ?: "Waiting for capabilities", if (state.connectionPhase == HostConnectionPhase.Connected) "READY" else "OFFLINE", if (state.connectionPhase == HostConnectionPhase.Connected) T.Cream else T.Error)
+        HostStatusRow(
+            Lucide.Server,
+            "Hermes Agent",
+            state.capabilities?.version?.let { "Version $it" } ?: "Version unavailable on this host",
+            if (state.capabilities?.version != null) "VERSION" else "UNKNOWN",
+            if (state.capabilities?.version != null) T.Cream else T.Muted,
+        )
+        HostCompatibilityCard(state.capabilities)
+        HostStatusRow(Lucide.ShieldCheck, "Authentication", "Bearer key stored with Android Keystore encryption", "SECURE", T.Cream)
+        HostStatusRow(Lucide.Globe, "Transport", if (host.baseUrl.startsWith("https")) "HTTPS encrypted connection" else "Explicit private-network HTTP", if (host.baseUrl.startsWith("https")) "TLS" else "PRIVATE", if (host.baseUrl.startsWith("https")) T.Cream else T.Warn)
         if (state.capabilities?.supportsHostUpdate == true) {
             HostUpdateCard(state, onCheck = viewModel::checkHostUpdate, onUpdate = { confirmHostUpdate = true })
         }
@@ -3514,13 +3299,7 @@ private fun ToolsetLibraryCard(toolset: HermesToolset) {
         else -> T.Muted
     }
     Card(
-        modifier = Modifier.fillMaxWidth()
-            .semantics {
-                contentDescription = "${if (expanded) "Collapse" else "Expand"} tools for ${toolset.label}"
-                role = Role.Button
-                stateDescription = if (expanded) "Expanded" else "Collapsed"
-            }
-            .clickable { expanded = !expanded },
+        modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded },
         colors = CardDefaults.cardColors(containerColor = T.SurfaceOne),
         border = BorderStroke(1.dp, if (toolset.enabled) T.Tool.copy(alpha = 0.2f) else T.Line),
         shape = RoundedCornerShape(T.RadiusCard),
@@ -3532,7 +3311,7 @@ private fun ToolsetLibraryCard(toolset: HermesToolset) {
                     Text(toolset.description ?: "Host toolset", style = T.BodyMuted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
                 }
                 Text(status, style = T.MicroBold.copy(color = statusColor))
-                Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.padding(start = 7.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
+                Icon(Lucide.ChevronDown, if (expanded) "Collapse tools" else "Expand tools", tint = T.Muted, modifier = Modifier.padding(start = 7.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
             }
             Text("${toolset.tools.size} exposed tool${if (toolset.tools.size == 1) "" else "s"}", style = T.Micro.copy(letterSpacing = 0.sp), modifier = Modifier.padding(top = 7.dp))
             AnimatedVisibility(visible = expanded) {
@@ -3709,7 +3488,6 @@ private fun SettingsScreen(
                         else -> "Remote push: Preparing registration…"
                     }
                     val registrationColor = when {
-                        !enabled -> T.Muted
                         registration?.pending == true -> T.Warn
                         !registration?.errorMessage.isNullOrBlank() -> T.Error
                         enabled && registration?.registered == true -> T.Ok
@@ -3719,7 +3497,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text(host.name, style = T.Label)
                             Text(registrationText, style = T.BodyMuted.copy(color = registrationColor))
-                            registration?.errorMessage?.takeIf { enabled && it.isNotBlank() }?.let { message ->
+                            registration?.errorMessage?.takeIf(String::isNotBlank)?.let { message ->
                                 val unsupported = message.contains("not support", ignoreCase = true) ||
                                     message.contains("unavailable", ignoreCase = true)
                                 Text(
@@ -3975,7 +3753,7 @@ private fun ScreenHeading(
 ) {
     Row(Modifier.fillMaxWidth().padding(top = 15.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(title, style = T.ScreenTitle, modifier = Modifier.semantics { heading() })
+            Text(title, style = T.ScreenTitle)
             Text(subtitle, style = T.Micro.copy(letterSpacing = 0.sp), modifier = Modifier.padding(top = 3.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (actionIcon != null && actionLabel != null && onAction != null) {
@@ -4005,14 +3783,16 @@ private fun Metric(value: String, label: String, modifier: Modifier = Modifier) 
 
 @Composable
 private fun HostStatusRow(icon: ImageVector, title: String, detail: String, state: String, stateColor: Color) {
-    Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(35.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.055f)), contentAlignment = Alignment.Center) { Icon(icon, null, tint = T.Cream, modifier = Modifier.size(18.dp)) }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = T.Label)
-            Text(detail, style = T.BodyMuted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
+    Card(modifier = Modifier.padding(bottom = 8.dp), colors = CardDefaults.cardColors(containerColor = T.SurfaceLow), border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
+        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(35.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Cream.copy(alpha = 0.055f)), contentAlignment = Alignment.Center) { Icon(icon, null, tint = T.Cream, modifier = Modifier.size(18.dp)) }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = T.Label)
+                Text(detail, style = T.BodyMuted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 3.dp))
+            }
+            Text(state, style = T.MicroBold.copy(color = stateColor))
         }
-        Text(state, style = T.MicroBold.copy(color = stateColor))
     }
 }
 
@@ -4035,8 +3815,6 @@ private fun PrimaryButton(label: String, icon: ImageVector, enabled: Boolean = t
 
 @Composable
 private fun BottomDock(selected: DeckScreen, onSelect: (DeckScreen) -> Unit) {
-    val compactLabels = LocalConfiguration.current.screenWidthDp <= 360 ||
-        LocalDensity.current.fontScale >= 1.5f
     HorizontalDivider(color = T.Line)
     Row(
         Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 5.dp, vertical = 6.dp)
@@ -4052,40 +3830,18 @@ private fun BottomDock(selected: DeckScreen, onSelect: (DeckScreen) -> Unit) {
         ).forEach { (screen, icon, label) ->
             val active = screen == selected
             Column(
-                modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp).clip(RoundedCornerShape(T.RadiusCard))
                     .selectable(
                         selected = active,
                         role = Role.Tab,
                         onClick = { onSelect(screen) },
                     )
-                    .padding(top = 4.dp, bottom = 3.dp),
+                    .padding(vertical = 7.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
             ) {
-                Box(
-                    Modifier.width(18.dp).height(2.dp).clip(CircleShape)
-                        .background(if (active) T.Cream else Color.Transparent),
-                )
-                Spacer(Modifier.height(2.dp))
-                Icon(
-                    icon,
-                    label,
-                    tint = if (active) T.Cream else T.Muted,
-                    modifier = Modifier.size(20.dp),
-                )
-                if (!compactLabels) {
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        label,
-                        style = T.Micro.copy(
-                            color = if (active) T.Cream else T.Muted,
-                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                            letterSpacing = 0.sp,
-                        ),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+                Icon(icon, label, tint = if (active) T.Cream else T.Muted, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.height(3.dp))
+                Text(label, style = T.Micro.copy(color = if (active) T.Cream else T.Muted, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal, letterSpacing = 0.sp))
             }
         }
     }
@@ -4103,42 +3859,29 @@ private fun HostPickerSheet(
 ) {
     val editing = state.editingHost
     var name by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(editing?.name.orEmpty()) }
-    var baseUrl by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(editing?.baseUrl.orEmpty()) }
+    var baseUrl by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(editing?.baseUrl ?: "https://") }
     var apiKey by remember(state.showHostPicker, state.editingHostId) { mutableStateOf("") }
     var allowHttp by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(editing?.allowInsecureHttp ?: false) }
-    var nameTouched by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(false) }
-    var urlTouched by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(false) }
-    var keyTouched by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(false) }
-    var submitAttempted by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<HostProfile?>(null) }
     var confirmDiscard by remember(state.showHostPicker, state.editingHostId) { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val nameFocus = remember { FocusRequester() }
     val urlFocus = remember { FocusRequester() }
     val keyFocus = remember { FocusRequester() }
-    val focusManager = LocalFocusManager.current
     val validation = remember(editing, name, baseUrl, apiKey, allowHttp) {
         validateHostDraft(editing, name, baseUrl, apiKey, allowHttp)
     }
     val dirty = name != editing?.name.orEmpty() ||
-        baseUrl != editing?.baseUrl.orEmpty() ||
+        baseUrl != (editing?.baseUrl ?: "https://") ||
         apiKey.isNotBlank() ||
         allowHttp != (editing?.allowInsecureHttp ?: false)
     val requestDismiss = {
-        if (dirty) confirmDiscard = true else onDismiss()
+        if (state.hosts.isNotEmpty()) {
+            if (dirty) confirmDiscard = true else onDismiss()
+        }
     }
     val submit = {
-        submitAttempted = true
-        if (validation.isValid) {
-            focusManager.clearFocus()
-            onSave(editing?.id, name, baseUrl, apiKey, allowHttp)
-        } else {
-            when {
-                validation.name != null -> nameFocus.requestFocus()
-                validation.baseUrl != null -> urlFocus.requestFocus()
-                validation.apiKey != null -> keyFocus.requestFocus()
-            }
-        }
+        if (validation.isValid) onSave(editing?.id, name, baseUrl, apiKey, allowHttp)
     }
 
     ModalBottomSheet(
@@ -4151,16 +3894,10 @@ private fun HostPickerSheet(
         Column(Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(bottom = 26.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        if (state.hosts.isEmpty()) "Connect Hermes" else "Choose a host",
-                        style = T.SheetTitle,
-                        modifier = Modifier.semantics { heading() },
-                    )
+                    Text(if (state.hosts.isEmpty()) "Connect Hermes" else "Choose a host", style = T.SheetTitle)
                     Text("Switch between desktop and server instances without reconfiguring the app.", style = T.BodyMuted, modifier = Modifier.padding(top = 5.dp))
                 }
-                IconButton(onClick = requestDismiss, modifier = Modifier.size(T.ControlMin)) {
-                    Icon(Lucide.X, "Close host picker", tint = T.Muted)
-                }
+                if (state.hosts.isNotEmpty()) IconButton(onClick = requestDismiss, modifier = Modifier.size(T.ControlMin)) { Icon(Lucide.X, "Close host picker", tint = T.Muted) }
             }
 
             if (state.hosts.isNotEmpty()) {
@@ -4188,9 +3925,8 @@ private fun HostPickerSheet(
                 label = "Host name",
                 placeholder = "Ubuntu Hermes",
                 icon = Lucide.Server,
-                error = validation.name.takeIf { nameTouched || submitAttempted },
+                error = validation.name,
                 focusRequester = nameFocus,
-                onFocusLost = { nameTouched = true },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                 keyboardActions = KeyboardActions(onNext = { urlFocus.requestFocus() }),
             )
@@ -4201,9 +3937,8 @@ private fun HostPickerSheet(
                 label = "Hermes server URL",
                 placeholder = "https://hermes.example.com",
                 icon = Lucide.Globe,
-                error = validation.baseUrl.takeIf { urlTouched || submitAttempted },
+                error = validation.baseUrl,
                 focusRequester = urlFocus,
-                onFocusLost = { urlTouched = true },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
                 keyboardActions = KeyboardActions(onNext = { keyFocus.requestFocus() }),
             )
@@ -4215,9 +3950,8 @@ private fun HostPickerSheet(
                 if (editing == null) "Required bearer token" else "Leave blank to keep the current key",
                 Lucide.KeyRound,
                 password = true,
-                error = validation.apiKey.takeIf { keyTouched || submitAttempted },
+                error = validation.apiKey,
                 focusRequester = keyFocus,
-                onFocusLost = { keyTouched = true },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { submit() }),
             )
@@ -4235,6 +3969,7 @@ private fun HostPickerSheet(
             PrimaryButton(
                 label = if (editing == null) "Save and connect" else "Save changes",
                 icon = Lucide.Wifi,
+                enabled = validation.isValid,
                 onClick = submit,
             )
             Text("Hermes Mobile probes /v1/capabilities before loading sessions. The API key is encrypted with Android Keystore and never shown again.", style = T.Micro.copy(letterSpacing = 0.sp), modifier = Modifier.padding(top = 11.dp))
@@ -4336,25 +4071,17 @@ private fun HostTextField(
     password: Boolean = false,
     error: String? = null,
     focusRequester: FocusRequester? = null,
-    onFocusLost: () -> Unit = {},
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     keyboardActions: KeyboardActions = KeyboardActions.Default,
 ) {
     var passwordVisible by remember { mutableStateOf(false) }
-    var wasFocused by remember { mutableStateOf(false) }
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
-            .onFocusChanged { focusState ->
-                if (wasFocused && !focusState.isFocused) onFocusLost()
-                wasFocused = focusState.isFocused
-            },
+        modifier = Modifier.fillMaxWidth().then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier),
         label = { Text(label, style = T.BodyMuted) },
         placeholder = { Text(placeholder, style = T.BodyMuted) },
-        leadingIcon = { Icon(icon, null, tint = T.Muted, modifier = Modifier.size(18.dp)) },
+        leadingIcon = { Icon(icon, null, tint = T.Cream, modifier = Modifier.size(18.dp)) },
         trailingIcon = if (password) {
             {
                 IconButton(onClick = { passwordVisible = !passwordVisible }, modifier = Modifier.size(T.ControlMin)) {
@@ -4377,7 +4104,7 @@ private fun HostTextField(
         textStyle = T.Body.copy(color = T.TextSoft),
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = T.Cream.copy(alpha = 0.6f),
-            unfocusedBorderColor = T.LineStrong,
+            unfocusedBorderColor = T.FocusRing,
             focusedLabelColor = T.Cream,
             unfocusedLabelColor = T.Muted,
             cursorColor = T.Cream,

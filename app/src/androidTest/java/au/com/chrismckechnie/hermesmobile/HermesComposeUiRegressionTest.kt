@@ -3,12 +3,9 @@ package au.com.chrismckechnie.hermesmobile
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
-import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.SemanticsNodeInteraction
-import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasText
@@ -17,16 +14,11 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.then
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.test.espresso.Espresso
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -145,20 +137,6 @@ class HermesComposeUiRegressionTest {
     }
 
     @Test
-    fun chatKeepsPrimaryNavigationAtTwoHundredPercentText() {
-        setAppContent(baseState(), width = 320, height = 720, fontScale = 2f)
-
-        val host = composeRule.onNodeWithContentDescription(HOST_DESCRIPTION).assertIsDisplayed()
-        val newSession = composeRule.onNodeWithContentDescription("New session").assertIsDisplayed()
-        val settings = composeRule.onNodeWithContentDescription("Settings").assertIsDisplayed()
-        composeRule.onNodeWithText(HOST.name, useUnmergedTree = true).assertIsDisplayed()
-
-        assertFullyInsideRoot(host, "host selector at 200% text")
-        assertFullyInsideRoot(newSession, "new-session action at 200% text")
-        assertFullyInsideRoot(settings, "settings navigation at 200% text")
-    }
-
-    @Test
     fun representativeProductionSurface_hasNonEmptyScreenshotSmokeCapture() {
         setAppContent(activeWorkState(), width = 360, height = 800)
 
@@ -184,242 +162,21 @@ class HermesComposeUiRegressionTest {
         composeRule.onNodeWithText("Release verification refresh").assertIsDisplayed()
     }
 
-    @Test
-    fun hostPicker_waitsForInteractionBeforeShowingErrors() {
-        setAppContent(
-            HermesUiState(
-                showHostPicker = true,
-                themeMode = ThemeMode.Light,
-            ),
-        )
-
-        composeRule.onNodeWithText("Give this host a name.").assertIsNotDisplayed()
-        composeRule.onNodeWithText("Hermes API key is required.").assertIsNotDisplayed()
-
-        composeRule.onNodeWithText("Save and connect").performClick()
-
-        composeRule.onNodeWithText("Give this host a name.").assertIsDisplayed()
-        composeRule.onNodeWithText("Hermes API key is required.").assertIsDisplayed()
-    }
-
-    @Test
-    fun modelSheet_filtersAcrossEveryHostModel() {
-        val models = (1..9).map { "model-$it" } + "gpt-5.6-terra"
-        setAppContent(
-            baseState().copy(
-                capabilities = HermesCapabilities(
-                    model = "hermes-agent",
-                    platform = "hermes-agent",
-                    features = setOf("run_reasoning_effort"),
-                    defaultModel = "model-1",
-                ),
-                modelsResource = ResourceState.Data(models),
-            ),
-        )
-
-        composeRule.onNodeWithContentDescription("Model and reasoning settings").performClick()
-        composeRule.onNodeWithText("Search models").performTextInput("terra")
-
-        composeRule.onNodeWithText("gpt-5.6-terra").assertIsDisplayed().assertHasClickAction()
-    }
-
-    @Test
-    fun liveReasoning_isExpandedWithoutExtraInteraction() {
-        setAppContent(
-            baseState().copy(
-                transcriptResource = ResourceState.Data(
-                    listOf(ChatUiItem.Reasoning("reasoning-1", listOf("Inspecting the latest host activity"))),
-                ),
-            ),
-        )
-
-        composeRule.onNodeWithText("Inspecting the latest host activity").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Collapse Hermes activity").performClick()
-        assertMinimumTouchTarget("Expand Hermes activity")
-    }
-
-    @Test
-    fun fallbackLiveStatus_expandsWhenProgressAccumulates() {
-        setAppContent(
-            baseState().copy(
-                transcriptResource = ResourceState.Data(
-                    listOf(
-                        ChatUiItem.Assistant(
-                            id = "assistant-1",
-                            text = "",
-                            streaming = true,
-                            safeStatus = "Running verification",
-                            safeStatusHistory = listOf("Inspecting the project", "Running focused tests"),
-                        ),
-                    ),
-                ),
-            ),
-        )
-
-        composeRule.onNodeWithText("Running focused tests").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Collapse live Hermes status").performClick()
-        assertMinimumTouchTarget("Expand live Hermes status")
-    }
-
-    @Test
-    fun bottomDock_retainsAccessibleTabsAtLargeText() {
-        setAppContent(
-            baseState(),
-            width = 320,
-            height = 520,
-            fontScale = 2f,
-        )
-
-        composeRule.onNodeWithContentDescription("Sessions")
-            .assertIsDisplayed()
-            .assertHasClickAction()
-    }
-
-    @Test
-    fun modelReasoning_remainsReachableAtLargeText() {
-        setAppContent(
-            baseState().copy(
-                capabilities = HermesCapabilities(
-                    model = "hermes-agent",
-                    platform = "hermes-agent",
-                    features = setOf("run_reasoning_effort"),
-                    defaultModel = "model-1",
-                ),
-                modelsResource = ResourceState.Data((1..10).map { "model-$it" }),
-            ),
-            width = 320,
-            height = 520,
-            fontScale = 2f,
-        )
-
-        composeRule.onNodeWithContentDescription("Model and reasoning settings")
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
-            .performClick()
-        composeRule.onNodeWithText("Search models").performTextInput("10")
-        composeRule.onNodeWithText("model-10").assertIsDisplayed()
-        composeRule.onNodeWithText("max").performScrollTo().assertIsDisplayed()
-    }
-
-    @Test
-    fun permissionConfirmation_remainsReachableAtLargeText() {
-        setAppContent(
-            baseState().copy(
-                capabilities = HermesCapabilities(
-                    model = "hermes-agent",
-                    platform = "hermes-agent",
-                    features = setOf("run_permission_mode"),
-                ),
-                pendingFullAccessConfirmation = FullAccessConfirmation(HOST.id, SESSION.id),
-            ),
-            width = 320,
-            height = 520,
-            fontScale = 2f,
-        )
-
-        composeRule.onNodeWithContentDescription("Permission settings").performClick()
-        composeRule.onNodeWithText("Confirm next run").performScrollTo().assertIsDisplayed().assertHasClickAction()
-    }
-
-    @Test
-    fun dismissingPermissionSheet_clearsPendingFullAccess() {
-        val permissionViewModel = HermesViewModel(
-            gateway = HermesHttpGateway(),
-            hostStore = object : HostStore {
-                override fun load() = HostLoadResult(HostSnapshot(listOf(HOST), HOST.id))
-                override fun save(snapshot: HostSnapshot) = Unit
-            },
-        )
-        permissionViewModel.selectPermissionMode("full-access")
-        assertTrue(permissionViewModel.state.value.pendingFullAccessConfirmation != null)
-        setAppContent(
-            baseState().copy(
-                activeSessionId = null,
-                capabilities = HermesCapabilities(
-                    model = "hermes-agent",
-                    platform = "hermes-agent",
-                    features = setOf("run_permission_mode"),
-                ),
-                pendingFullAccessConfirmation = FullAccessConfirmation(HOST.id, null),
-            ),
-            targetViewModel = permissionViewModel,
-        )
-
-        composeRule.onNodeWithContentDescription("Permission settings").performClick()
-        composeRule.onNodeWithText("Use Full Access once?").assertIsDisplayed()
-        Espresso.pressBack()
-
-        composeRule.waitUntil(timeoutMillis = 5_000) {
-            permissionViewModel.state.value.pendingFullAccessConfirmation == null
-        }
-    }
-
-    @Test
-    fun taskPlanPill_exposesButtonRole() {
-        val key = SessionKey(HOST.id, SESSION.id)
-        setAppContent(
-            baseState().copy(
-                activeRuns = mapOf(
-                    key to ActiveRun(
-                        host = HOST,
-                        sessionId = SESSION.id,
-                        sessionTitle = SESSION.title,
-                        runId = "run-1",
-                        tasks = listOf(HermesTask("task-1", "Verify the release", "in_progress")),
-                    ),
-                ),
-            ),
-        )
-
-        composeRule.onNodeWithContentDescription("Show task plan, 0 / 1 tasks")
-            .assertIsDisplayed()
-            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button))
-    }
-
-    @Test
-    fun runningSession_exposesVisibleRenameAction() {
-        val key = SessionKey(HOST.id, SESSION.id)
-        setAppContent(
-            baseState(DeckScreen.Sessions).copy(
-                capabilities = HermesCapabilities(
-                    model = "hermes-agent",
-                    platform = "hermes-agent",
-                    features = setOf("session_resources"),
-                ),
-                activeRuns = mapOf(
-                    key to ActiveRun(
-                        host = HOST,
-                        sessionId = SESSION.id,
-                        sessionTitle = SESSION.title,
-                        runId = "run-1",
-                    ),
-                ),
-            ),
-        )
-
-        composeRule.onNodeWithContentDescription("Session actions for Release verification")
-            .assertIsDisplayed()
-            .assertHasClickAction()
-            .performClick()
-
-        composeRule.onNodeWithText("Rename").assertIsDisplayed().assertIsEnabled()
-    }
-
     private fun setAppContent(
         state: HermesUiState,
         width: Int? = null,
         height: Int? = null,
         fontScale: Float = 1f,
-        targetViewModel: HermesViewModel = viewModel,
     ) {
         composeRule.setContent {
             if (width != null && height != null) {
                 val configuration = DeviceConfigurationOverride.ForcedSize(DpSize(width.dp, height.dp)) then
                     DeviceConfigurationOverride.FontScale(fontScale)
                 DeviceConfigurationOverride(configuration) {
-                    HermesMobileApp(state = state, viewModel = targetViewModel)
+                    HermesMobileApp(state = state, viewModel = viewModel)
                 }
             } else {
-                HermesMobileApp(state = state, viewModel = targetViewModel)
+                HermesMobileApp(state = state, viewModel = viewModel)
             }
         }
     }
