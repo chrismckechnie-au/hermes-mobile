@@ -3702,16 +3702,16 @@ private fun SettingsScreen(
                     val registration = registrationByHost[host.id]
                     val registrationText = when {
                         !enabled && registration?.pending == true -> "Removing remote push…"
-                        !enabled -> "Remote push disabled"
                         registration?.pending == true -> "Remote push: Pending"
                         !registration?.errorMessage.isNullOrBlank() -> "Remote push: Failed"
+                        !enabled -> "Remote push disabled"
                         registration?.registered == true -> "Remote push: Registered"
                         else -> "Remote push: Preparing registration…"
                     }
                     val registrationColor = when {
-                        !enabled -> T.Muted
                         registration?.pending == true -> T.Warn
                         !registration?.errorMessage.isNullOrBlank() -> T.Error
+                        !enabled -> T.Muted
                         enabled && registration?.registered == true -> T.Ok
                         else -> T.Muted
                     }
@@ -3719,7 +3719,7 @@ private fun SettingsScreen(
                         Column(Modifier.weight(1f)) {
                             Text(host.name, style = T.Label)
                             Text(registrationText, style = T.BodyMuted.copy(color = registrationColor))
-                            registration?.errorMessage?.takeIf { enabled && it.isNotBlank() }?.let { message ->
+                            registration?.errorMessage?.takeIf(String::isNotBlank)?.let { message ->
                                 val unsupported = message.contains("not support", ignoreCase = true) ||
                                     message.contains("unavailable", ignoreCase = true)
                                 Text(
