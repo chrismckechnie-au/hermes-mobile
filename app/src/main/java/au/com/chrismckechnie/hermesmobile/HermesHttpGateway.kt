@@ -481,7 +481,7 @@ class HermesHttpGateway(
         overlayEnabled: Boolean,
     ) = withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
-            put("fid", token)
+            put("token", token)
             put("host_profile_id", host.id)
             put("app_version", appVersion)
             put("capabilities", JSONObject().apply {

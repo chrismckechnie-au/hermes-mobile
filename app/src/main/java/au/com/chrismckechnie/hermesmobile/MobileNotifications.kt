@@ -328,7 +328,7 @@ object MobileRegistration {
         context = context,
         registeredToken = registeredToken,
         desiredHostIds = null,
-        // A rotated FID must supersede work carrying the previous identity.
+        // A rotated Firebase registration token must supersede work carrying the previous identity.
         policy = ExistingWorkPolicy.REPLACE,
     )
 
