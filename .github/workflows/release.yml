@@ -109,7 +109,7 @@ jobs:
           (cd dist && sha256sum *.apk *.aab > SHA256SUMS.txt)
 
       - name: Upload signed workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hermes-mobile-release-${{ github.run_number }}
           if-no-files-found: error
