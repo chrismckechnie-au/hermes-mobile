@@ -134,6 +134,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.compose.ui.window.Dialog
 import com.composables.icons.lucide.CalendarClock
+import com.composables.icons.lucide.Bell
 import com.composables.icons.lucide.ChevronDown
 import com.composables.icons.lucide.CircleCheck
 import com.composables.icons.lucide.CloudOff
@@ -209,6 +210,7 @@ fun HermesMobileApp(
     onOpenNotificationSettings: () -> Unit = {},
     onOpenOverlaySettings: () -> Unit = {},
 ) {
+    var activitySheetOpen by remember { mutableStateOf(false) }
     val dark = when (state.themeMode) {
         ThemeMode.Dark -> true
         ThemeMode.Light -> false
@@ -234,7 +236,15 @@ fun HermesMobileApp(
                         Modifier.fillMaxHeight().fillMaxWidth().widthIn(max = 840.dp)
                             .align(Alignment.Center).statusBarsPadding(),
                     ) {
-                        CommandHeader(state = state, compact = compact, onChooseHost = viewModel::showHostPicker)
+                        CommandHeader(
+                            state = state,
+                            compact = compact,
+                            onChooseHost = viewModel::showHostPicker,
+                            onOpenActivity = {
+                                viewModel.refreshActivityHistory()
+                                activitySheetOpen = true
+                            },
+                        )
                         ConnectionNotice(
                             state = state,
                             onRetry = viewModel::retryConnection,
@@ -277,11 +287,29 @@ fun HermesMobileApp(
                         )
                     }
 
+                    if (activitySheetOpen) {
+                        ActivityCenterSheet(
+                            state = state,
+                            onDismiss = { activitySheetOpen = false },
+                            onOpen = { entry ->
+                                viewModel.openSessionFromNotification(entry.hostId, entry.sessionId)
+                                activitySheetOpen = false
+                            },
+                        )
+                    }
+
                     state.confirmDeleteSessionId?.let { sessionId ->
                         DeleteSessionDialog(
                             session = state.sessions.firstOrNull { it.id == sessionId },
                             onConfirm = viewModel::confirmDeleteSession,
                             onDismiss = viewModel::dismissDeleteSession,
+                        )
+                    }
+                    state.pendingPairing?.let { pairing ->
+                        PairingConfirmationDialog(
+                            pairing = pairing,
+                            onConfirm = viewModel::confirmPairing,
+                            onDismiss = viewModel::dismissPairing,
                         )
                     }
                 }
@@ -291,7 +319,40 @@ fun HermesMobileApp(
 }
 
 @Composable
-private fun CommandHeader(state: HermesUiState, compact: Boolean, onChooseHost: () -> Unit) {
+private fun PairingConfirmationDialog(
+    pairing: MobilePairingRequest,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = T.SurfaceLow,
+        title = { Text("Pair with this Hermes host?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(pairing.baseUrl, style = T.MonoBody)
+                Text(
+                    if (pairing.baseUrl.startsWith("http://")) {
+                        "This is a private-network HTTP host. Continue only on a trusted LAN or VPN."
+                    } else {
+                        "The one-time grant will be exchanged for a revocable device credential."
+                    },
+                    style = T.BodyMuted,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Pair") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun CommandHeader(
+    state: HermesUiState,
+    compact: Boolean,
+    onChooseHost: () -> Unit,
+    onOpenActivity: () -> Unit,
+) {
     Row(
         modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 17.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -308,7 +369,28 @@ private fun CommandHeader(state: HermesUiState, compact: Boolean, onChooseHost: 
 
         val hostName = state.activeHost?.name ?: "Choose host"
         val statusText = phaseLabel(state.connectionPhase)
-        Row(
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box {
+                IconButton(
+                    onClick = onOpenActivity,
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Icon(Lucide.Bell, "Activity Center", tint = T.Cream, modifier = Modifier.size(20.dp))
+                }
+                if (state.unreadActivityCount > 0) {
+                    Box(
+                        Modifier.align(Alignment.TopEnd).size(19.dp).clip(CircleShape).background(T.Error),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            state.unreadActivityCount.coerceAtMost(99).toString(),
+                            style = T.Micro.copy(color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.width(3.dp))
+            Row(
             modifier = Modifier
                 .heightIn(min = 48.dp)
                 .clip(RoundedCornerShape(16.dp))
@@ -333,6 +415,7 @@ private fun CommandHeader(state: HermesUiState, compact: Boolean, onChooseHost: 
                 if (!compact) Text(statusText, style = T.Micro.copy(color = phaseColor(state.connectionPhase), letterSpacing = 0.8.sp))
             }
             Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.size(18.dp))
+            }
         }
     }
     HorizontalDivider(color = T.Line)
@@ -425,14 +508,6 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
             listState.scrollToItem(timelineItems.lastIndex, scrollOffset = 100_000)
         }
     }
-    LaunchedEffect(state.activeHostId, state.activeSessionId, state.activeRuns.keys) {
-        while (true) {
-            viewModel.refreshHostActivity()
-            viewModel.reconcileActiveRuns()
-            delay(5_000L)
-        }
-    }
-
     Column(Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -799,6 +874,144 @@ private fun SubagentSheet(subagents: List<HermesSubagent>, onDismiss: () -> Unit
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ActivityCenterSheet(
+    state: HermesUiState,
+    onDismiss: () -> Unit,
+    onOpen: (ActivityEntry) -> Unit,
+) {
+    var showActive by remember { mutableStateOf(true) }
+    val active = remember(
+        state.activeRuns,
+        state.activeHostSessions,
+        state.sessions,
+        state.hosts,
+        state.activeHostId,
+    ) { state.activeWorkItems() }
+    val updates = state.activityEntries
+        .filter { it.requiresAttention || it.isTerminal }
+        .sortedByDescending(ActivityEntry::updatedAtMillis)
+
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(Modifier.fillMaxWidth().heightIn(max = 680.dp).padding(horizontal = 17.dp)) {
+            Text("ACTIVITY CENTER", style = T.Micro)
+            Text("Hermes across every enabled host", style = T.ScreenTitle)
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = showActive,
+                    onClick = { showActive = true },
+                    label = { Text("Active ${active.size}") },
+                )
+                FilterChip(
+                    selected = !showActive,
+                    onClick = { showActive = false },
+                    label = { Text("Updates ${updates.size}") },
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            if (showActive) {
+                if (active.isEmpty()) {
+                    EmptyActivityCopy("No active Hermes work")
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(active, key = { "${it.key.hostId}:${it.key.sessionId}:${it.ref?.runId.orEmpty()}" }) { item ->
+                            ActivityCenterRow(
+                                title = item.title,
+                                host = item.hostName,
+                                status = item.latestUpdate ?: attentionLabel(item.state),
+                                unread = item.needsAttention,
+                                onClick = {
+                                    onOpen(
+                                        ActivityEntry(
+                                            item.key.hostId,
+                                            item.key.sessionId,
+                                            item.title,
+                                            item.state,
+                                            runId = item.ref?.runId,
+                                            latestStatus = item.latestUpdate,
+                                        ),
+                                    )
+                                },
+                            )
+                        }
+                    }
+                }
+            } else {
+                if (updates.isEmpty()) {
+                    EmptyActivityCopy("No recent updates")
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(updates, key = ActivityEntry::identity) { entry ->
+                            ActivityCenterRow(
+                                title = entry.title,
+                                host = state.hosts.firstOrNull { it.id == entry.hostId }?.name ?: "Unknown host",
+                                status = entry.latestStatus ?: attentionLabel(entry.state),
+                                unread = !entry.read,
+                                timestamp = activityTimeLabel(entry.updatedAtMillis),
+                                onClick = { onOpen(entry) },
+                            )
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
+private fun ActivityCenterRow(
+    title: String,
+    host: String,
+    status: String,
+    unread: Boolean,
+    timestamp: String? = null,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(T.RadiusCard)).clickable(onClick = onClick),
+        color = if (unread) T.Cream.copy(alpha = 0.08f) else T.SurfaceLow,
+        border = BorderStroke(1.dp, if (unread) T.Cream.copy(alpha = 0.22f) else T.Line),
+        shape = RoundedCornerShape(T.RadiusCard),
+    ) {
+        Row(Modifier.padding(13.dp), verticalAlignment = Alignment.Top) {
+            Box(
+                Modifier.padding(top = 5.dp).size(8.dp).clip(CircleShape)
+                    .background(if (unread) T.Warn else T.Muted),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = T.Body.copy(fontWeight = FontWeight.SemiBold), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(status, style = T.BodyMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(host, style = T.Micro)
+                    timestamp?.let { Text(it, style = T.Micro) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyActivityCopy(text: String) {
+    Box(Modifier.fillMaxWidth().height(130.dp), contentAlignment = Alignment.Center) {
+        Text(text, style = T.BodyMuted)
+    }
+}
+
+private fun activityTimeLabel(value: Long): String {
+    if (value <= 0L) return ""
+    val elapsed = (System.currentTimeMillis() - value).coerceAtLeast(0L)
+    return when {
+        elapsed < 60_000L -> "now"
+        elapsed < 3_600_000L -> "${elapsed / 60_000L}m"
+        elapsed < 86_400_000L -> "${elapsed / 3_600_000L}h"
+        else -> "${elapsed / 86_400_000L}d"
     }
 }
 
@@ -2282,13 +2495,6 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
             defaultModel = defaultModel,
         )
     }
-    LaunchedEffect(state.activeHostId) {
-        while (true) {
-            viewModel.refreshHostActivity()
-            delay(5_000L)
-        }
-    }
-
     Column(Modifier.fillMaxSize().padding(horizontal = 15.dp)) {
         ScreenHeading("Sessions", "${state.sessions.size} on ${state.activeHost?.name ?: "no host"}", Lucide.Plus, "New session", viewModel::createSession)
         if (state.sessions.isNotEmpty()) {
@@ -2712,10 +2918,12 @@ private fun JobsScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     items(state.jobs, key = { it.id }) { job ->
                         JobCard(
                             job = job,
+                            runs = state.jobRuns[job.id],
                             toggling = "${state.activeHostId}:toggle:${job.id}" in state.jobActionsInFlight,
                             running = "${state.activeHostId}:run:${job.id}" in state.jobActionsInFlight,
                             onToggle = { viewModel.toggleJob(job) },
                             onRunNow = { viewModel.runJobNow(job.id) },
+                            onLoadRuns = { viewModel.loadJobRuns(job.id) },
                         )
                     }
                 }
@@ -2727,13 +2935,20 @@ private fun JobsScreen(state: HermesUiState, viewModel: HermesViewModel) {
 @Composable
 private fun JobCard(
     job: HermesJob,
+    runs: ResourceState<List<HermesJobRun>>?,
     toggling: Boolean,
     running: Boolean,
     onToggle: () -> Unit,
     onRunNow: () -> Unit,
+    onLoadRuns: () -> Unit,
 ) {
+    var expanded by remember(job.id) { mutableStateOf(false) }
     Card(colors = CardDefaults.cardColors(containerColor = T.SurfaceLow), border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
-        Row(Modifier.fillMaxWidth().padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column {
+        Row(Modifier.fillMaxWidth().clickable {
+            expanded = !expanded
+            if (expanded && runs == null) onLoadRuns()
+        }.padding(13.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(job.name, style = T.Label, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
@@ -2757,6 +2972,27 @@ private fun JobCard(
                 modifier = Modifier.semantics { contentDescription = if (job.enabled) "Pause job ${job.name}" else "Resume job ${job.name}" },
                 colors = SwitchDefaults.colors(checkedThumbColor = T.OnAccent, checkedTrackColor = T.Cream, uncheckedThumbColor = T.Muted, uncheckedTrackColor = T.SurfaceTwo),
             )
+        }
+        if (expanded) {
+            HorizontalDivider(color = T.Line)
+            Column(Modifier.fillMaxWidth().padding(13.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("RECENT RUNS", style = T.Micro)
+                when (runs) {
+                    null, is ResourceState.Loading -> CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Tool)
+                    is ResourceState.Error -> Text(runs.message, style = T.BodyMuted.copy(color = T.Error))
+                    else -> {
+                        val items = runs.itemsOrEmpty()
+                        if (items.isEmpty()) Text("No recorded runs yet.", style = T.BodyMuted)
+                        items.take(5).forEach { run ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(run.status.replace('_', ' '), style = T.Label)
+                                Text("${run.messageCount} messages · ${run.toolCallCount} tools", style = T.Micro)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         }
     }
 }
@@ -3224,6 +3460,13 @@ private fun SettingsScreen(
             }
         }
         Text("NOTIFICATIONS", style = T.Micro, modifier = Modifier.padding(top = 14.dp, bottom = 8.dp))
+        state.notificationTestMessage?.let { message ->
+            Text(
+                message,
+                style = T.Status.copy(color = if (message.startsWith("Test failed")) T.Error else T.Ok),
+                modifier = Modifier.padding(bottom = 8.dp).semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
         if (!firebaseConfigured) {
             Text(
                 "Remote push and Android Bubbles require a Firebase-configured APK. Ongoing status and the active-session overlay work for runs started here.",
@@ -3277,6 +3520,19 @@ private fun SettingsScreen(
                             modifier = Modifier.padding(bottom = 5.dp),
                         ) {
                             Text("Retry remote push", style = T.BodyMuted.copy(color = T.Cream))
+                        }
+                    }
+                    if (enabled && registration?.registered == true) {
+                        TextButton(
+                            enabled = host.id !in state.notificationTestHostIds,
+                            onClick = { viewModel.testHostNotification(host.id) },
+                            modifier = Modifier.padding(bottom = 5.dp),
+                        ) {
+                            if (host.id in state.notificationTestHostIds) {
+                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp, color = T.Cream)
+                                Spacer(Modifier.width(8.dp))
+                            }
+                            Text("Send test notification", style = T.BodyMuted.copy(color = T.Cream))
                         }
                     }
                 }

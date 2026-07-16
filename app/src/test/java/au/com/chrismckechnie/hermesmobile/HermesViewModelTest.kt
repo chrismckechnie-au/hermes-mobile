@@ -880,7 +880,7 @@ class HermesViewModelTest {
     }
 
     @Test
-    fun `opening a session clears its durable attention marker`() = runVmTest {
+    fun `opening a session marks its durable activity as read`() = runVmTest {
         val settings = FakeSettingsStore(ThemeMode.System).apply {
             attentionItems = listOf(AttentionItem("h1", "s1", "Task complete", "completed"))
         }
@@ -888,7 +888,8 @@ class HermesViewModelTest {
 
         viewModel.selectSession("s1")
 
-        assertTrue(settings.attentionItems.isEmpty())
+        assertEquals(1, settings.attentionItems.size)
+        assertTrue(settings.attentionItems.single().read)
     }
 
     @Test

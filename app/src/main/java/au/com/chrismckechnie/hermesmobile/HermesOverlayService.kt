@@ -83,6 +83,10 @@ class HermesOverlayService : Service() {
             pollJob = scope.launch {
                 var consecutiveFailures = 0
                 while (true) {
+                    if (appInForeground) {
+                        delay(POLL_INTERVAL_MS)
+                        continue
+                    }
                     when (refreshSessionsSafely()) {
                         RefreshOutcome.Success -> {
                             consecutiveFailures = 0
@@ -117,7 +121,9 @@ class HermesOverlayService : Service() {
             val settings = PreferencesSettingsStore(applicationContext)
             val enabled = settings.loadMonitoredHostIds()
             val hosts = SecureHostStore(applicationContext).load().snapshot.hosts.filter { it.id in enabled }
-            val attention = settings.loadAttentionItems().filter { it.hostId in hosts.map(HostProfile::id) }
+            val attention = settings.loadAttentionItems().filter {
+                !it.read && it.hostId in hosts.map(HostProfile::id)
+            }
             val gateway = HermesHttpGateway()
             val hints = (localRunHints.values + settings.loadRunCheckpoints().map { checkpoint ->
                 LocalRunHint(checkpoint.hostId, checkpoint.sessionId, checkpoint.runId, "Hermes task")
@@ -229,7 +235,7 @@ class HermesOverlayService : Service() {
         diagnostics.recordPhase(DiagnosticPhase.OverlayPromote)
         ServiceCompat.startForeground(
             this,
-            HermesNotificationCoordinator.WORK_NOTIFICATION_ID,
+            HermesNotificationCoordinator.OVERLAY_SERVICE_NOTIFICATION_ID,
             foregroundNotification(active),
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
@@ -629,7 +635,7 @@ class HermesOverlayService : Service() {
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        return NotificationCompat.Builder(this, HermesNotificationCoordinator.WORK_CHANNEL)
+        return NotificationCompat.Builder(this, HermesNotificationCoordinator.OVERLAY_SERVICE_CHANNEL)
             .setSmallIcon(R.drawable.ic_hermes_notification)
             .setContentTitle(copy.title)
             .setContentText(copy.text)
@@ -652,7 +658,7 @@ class HermesOverlayService : Service() {
     private fun createForegroundChannel() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(
-                HermesNotificationCoordinator.WORK_CHANNEL,
+                HermesNotificationCoordinator.OVERLAY_SERVICE_CHANNEL,
                 "Hermes active work",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply { description = "Ongoing status while Hermes is actively working" }

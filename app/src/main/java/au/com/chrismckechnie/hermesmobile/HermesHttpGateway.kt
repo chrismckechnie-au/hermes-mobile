@@ -12,8 +12,12 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okio.BufferedSource
+import okio.Buffer
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.EOFException
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -22,6 +26,32 @@ class HermesHttpGateway(
     internal val ordinaryClient: OkHttpClient = defaultOrdinaryClient(),
     internal val eventStreamClient: OkHttpClient = defaultEventStreamClient(ordinaryClient),
 ) : HermesGateway {
+    override suspend fun exchangeMobilePairing(
+        request: MobilePairingRequest,
+        installationId: String,
+        deviceName: String,
+    ): MobilePairingResult = withContext(Dispatchers.IO) {
+        val url = request.baseUrl.toHttpUrlOrNull()
+            ?: throw HermesApiException(400, "The pairing link contains an invalid host URL.")
+        val body = JSONObject().apply {
+            put("grant", request.grant)
+            put("installation_id", installationId)
+            put("device_name", deviceName.take(120))
+        }.toString().toRequestBody(jsonMediaType)
+        val response = ordinaryClient.newCall(
+            Request.Builder()
+                .url(url.newBuilder().addPathSegments("v1/mobile/pairing/exchange").build())
+                .post(body)
+                .build(),
+        ).execute()
+        response.use {
+            ensureSuccessful(response)
+            val json = JSONObject(readBoundedBody(response))
+            val token = json.optString("token")
+            if (token.isBlank()) throw HermesApiException(502, "Hermes did not return a device token.")
+            MobilePairingResult(token, json.optString("device_id"))
+        }
+    }
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     override suspend fun probe(host: HostProfile): HermesCapabilities = withContext(Dispatchers.IO) {
@@ -246,7 +276,7 @@ class HermesHttpGateway(
                         }
 
                         while (continuation.isActive && !source.exhausted()) {
-                            val line = source.readUtf8Line() ?: break
+                            val line = source.readBoundedUtf8Line() ?: break
                             when {
                                 line.isBlank() -> dispatch()
                                 line.startsWith(":") -> Unit // keepalive / stream-closed comments
@@ -426,7 +456,7 @@ class HermesHttpGateway(
                             payload?.let(::parseSessionActivityEvent)?.let(onEvent)
                         }
                         while (continuation.isActive && !source.exhausted()) {
-                            val line = source.readUtf8Line() ?: break
+                            val line = source.readBoundedUtf8Line() ?: break
                             when {
                                 line.isBlank() -> dispatch()
                                 line.startsWith(":") -> Unit
@@ -543,7 +573,7 @@ class HermesHttpGateway(
     private fun executeJson(host: HostProfile, request: Request): JSONObject {
         ordinaryClient.newCall(request).execute().use { response ->
             ensureSuccessful(response)
-            val raw = response.body?.string().orEmpty()
+            val raw = readBoundedBody(response)
             if (raw.isBlank()) throw HermesApiException(response.code, "Hermes returned an empty response.")
             return runCatching { JSONObject(raw) }.getOrElse {
                 throw HermesApiException(response.code, "Hermes returned an unreadable response.")
@@ -557,7 +587,7 @@ class HermesHttpGateway(
 
     private fun ensureSuccessful(response: Response) {
         if (response.isSuccessful) return
-        val raw = response.body?.string().orEmpty()
+        val raw = runCatching { readBoundedBody(response) }.getOrDefault("")
         val message = runCatching {
             JSONObject(raw).optJSONObject("error")?.optString("message")
         }.getOrNull().takeUnless { it.isNullOrBlank() }
@@ -567,6 +597,53 @@ class HermesHttpGateway(
                 else -> "Hermes request failed with HTTP ${response.code}."
             }
         throw HermesApiException(response.code, message)
+    }
+
+    override suspend fun listJobRuns(host: HostProfile, jobId: String): List<HermesJobRun> = withContext(Dispatchers.IO) {
+        val data = executeJson(host, request(host, endpoint(host, "api", "jobs", jobId, "runs")))
+        data.requireListArray("data", "job run").toObjectList { json ->
+            HermesJobRun(
+                sessionId = json.optString("session_id"),
+                status = json.optString("status", "unknown"),
+                startedAt = json.optNullableString("started_at"),
+                endedAt = json.optNullableString("ended_at"),
+                messageCount = json.optInt("message_count").coerceAtLeast(0),
+                toolCallCount = json.optInt("tool_call_count").coerceAtLeast(0),
+            )
+        }
+    }
+
+    override suspend fun sendMobileNotificationTest(host: HostProfile, installationId: String) = withContext(Dispatchers.IO) {
+        executeIgnoringBody(
+            request(host, endpoint(host, "v1", "mobile", "devices", installationId, "test"), method = "POST"),
+        )
+    }
+
+    private fun readBoundedBody(response: Response): String {
+        val source = response.body?.source() ?: return ""
+        val sink = Buffer()
+        var total = 0L
+        while (total <= MAX_JSON_BYTES) {
+            val read = source.read(sink, minOf(8_192L, MAX_JSON_BYTES + 1L - total))
+            if (read == -1L) break
+            total += read
+        }
+        if (total > MAX_JSON_BYTES) {
+            throw HermesApiException(response.code, "Hermes returned a response that was too large.")
+        }
+        return sink.readUtf8()
+    }
+
+    private fun BufferedSource.readBoundedUtf8Line(): String? {
+        if (exhausted()) return null
+        return try {
+            readUtf8LineStrict(MAX_STREAM_LINE_BYTES.toLong())
+        } catch (error: EOFException) {
+            if (buffer.size > MAX_STREAM_LINE_BYTES) {
+                throw HermesApiException(502, "Hermes returned a stream event that was too large.")
+            }
+            readUtf8()
+        }
     }
 
     private fun parseSession(json: JSONObject) = HermesSession(
@@ -629,6 +706,8 @@ class HermesHttpGateway(
         const val MAX_WORKSPACE_PATH_LENGTH = 320
         const val MAX_WORKSPACE_STATUS_LENGTH = 32
         const val MAX_WORKSPACE_DIFF_LENGTH = 20_000
+        const val MAX_JSON_BYTES = 4 * 1024 * 1024
+        const val MAX_STREAM_LINE_BYTES = 256 * 1024
         val TASK_STATUSES = setOf("pending", "in_progress", "completed", "cancelled")
         val SUBAGENT_STATUSES = setOf(
             "running", "working", "thinking", "completed", "failed", "timeout", "interrupted", "error",

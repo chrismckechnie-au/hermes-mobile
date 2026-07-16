@@ -133,6 +133,15 @@ data class HermesJob(
     val deliver: String?,
 )
 
+data class HermesJobRun(
+    val sessionId: String,
+    val status: String,
+    val startedAt: String?,
+    val endedAt: String?,
+    val messageCount: Int,
+    val toolCallCount: Int,
+)
+
 data class HermesSkill(
     val name: String,
     val description: String?,
@@ -307,6 +316,11 @@ class HermesApiException(
 ) : Exception(message)
 
 interface HermesGateway {
+    suspend fun exchangeMobilePairing(
+        request: MobilePairingRequest,
+        installationId: String,
+        deviceName: String,
+    ): MobilePairingResult = throw UnsupportedOperationException("Mobile pairing is not supported by this host.")
     suspend fun probe(host: HostProfile): HermesCapabilities
     suspend fun getHostVersion(host: HostProfile): String? = null
     suspend fun getHostUpdate(host: HostProfile, force: Boolean = false): HermesHostUpdate? = null
@@ -317,6 +331,7 @@ interface HermesGateway {
     suspend fun listJobs(host: HostProfile): List<HermesJob>
     suspend fun setJobEnabled(host: HostProfile, jobId: String, enabled: Boolean)
     suspend fun runJob(host: HostProfile, jobId: String)
+    suspend fun listJobRuns(host: HostProfile, jobId: String): List<HermesJobRun> = emptyList()
     suspend fun listSkills(host: HostProfile): List<HermesSkill>
     suspend fun listToolsets(host: HostProfile): List<HermesToolset> = emptyList()
     suspend fun listModels(host: HostProfile): List<String>
@@ -369,4 +384,5 @@ interface HermesGateway {
         overlayEnabled: Boolean,
     ) = Unit
     suspend fun unregisterMobileDevice(host: HostProfile, installationId: String) = Unit
+    suspend fun sendMobileNotificationTest(host: HostProfile, installationId: String) = Unit
 }

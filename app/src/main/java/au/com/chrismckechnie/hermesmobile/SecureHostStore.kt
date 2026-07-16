@@ -365,46 +365,28 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
         preferences.edit().putBoolean("crash_reporting_enabled", enabled).commit()
     }
 
-    override fun loadAttentionItems(): List<AttentionItem> = preferences
-        .getString(ATTENTION_ITEMS_KEY, null)
-        ?.let { raw ->
-            runCatching {
-                val array = JSONArray(raw)
-                buildList {
-                    for (index in 0 until array.length()) {
-                        val item = array.optJSONObject(index) ?: continue
-                        val hostId = item.optString("hostId")
-                        val sessionId = item.optString("sessionId")
-                        if (hostId.isNotBlank() && sessionId.isNotBlank()) {
-                            add(
-                                AttentionItem(
-                                    hostId = hostId,
-                                    sessionId = sessionId,
-                                    title = item.optString("title").ifBlank { "Hermes session" },
-                                    state = item.optString("state").ifBlank { "updated" },
-                                ),
-                            )
-                        }
-                    }
-                }.distinctBy { it.hostId to it.sessionId }
-            }.getOrDefault(emptyList())
-        }
-        .orEmpty()
+    override fun loadAttentionItems(): List<AttentionItem> = synchronized(activityHistoryLock) {
+        preferences.getString(ATTENTION_ITEMS_KEY, null)
+            ?.let(ActivityEntryCodec::decode)
+            .orEmpty()
+    }
 
     override fun saveAttentionItems(items: List<AttentionItem>) {
-        preferences.edit().putString(
-            ATTENTION_ITEMS_KEY,
-            JSONArray().apply {
-                items.distinctBy { it.hostId to it.sessionId }.forEach { item ->
-                    put(JSONObject().apply {
-                        put("hostId", item.hostId)
-                        put("sessionId", item.sessionId)
-                        put("title", item.title.take(120))
-                        put("state", item.state.take(80))
-                    })
-                }
-            }.toString(),
-        ).apply()
+        synchronized(activityHistoryLock) {
+            preferences.edit().putString(ATTENTION_ITEMS_KEY, ActivityEntryCodec.encode(items)).apply()
+        }
+    }
+
+    override fun recordActivity(item: ActivityEntry, nowMillis: Long) {
+        synchronized(activityHistoryLock) {
+            saveAttentionItems(recordActivityEntry(loadAttentionItems(), item, nowMillis))
+        }
+    }
+
+    override fun markActivityRead(hostId: String, sessionId: String?, entryId: String?) {
+        synchronized(activityHistoryLock) {
+            saveAttentionItems(markActivityRead(loadAttentionItems(), hostId, sessionId, entryId))
+        }
     }
 
     override fun loadInstallationId(): String? = preferences.getString("installation_id", null)
@@ -431,6 +413,7 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
             .orEmpty()
 
     private companion object {
+        val activityHistoryLock = Any()
         const val RUN_CHECKPOINTS_KEY = "run_checkpoints_v2"
         const val ATTENTION_ITEMS_KEY = "attention_items_v1"
         const val UNKNOWN_OUTCOMES_KEY = "unknown_outcomes_v1"

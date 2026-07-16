@@ -151,6 +151,14 @@ Firebase is deliberately user-owned:
      project_id: your-firebase-project-id
    ```
 
+With a Hermes host that advertises `hermes.mobile` 1.2, run `hermes mobile
+pair` after enabling the block. Scan the printed QR code with the phone's
+camera and open the Hermes link. The app exchanges the five-minute, single-use
+grant for a revocable device credential; the host's master API key is never
+placed in the QR code. Use `hermes mobile pair --url https://host.example` when
+automatic LAN address discovery is not appropriate. Settings can send a
+targeted test notification after registration succeeds.
+
 Without `google-services.json`, remote device registration and push delivery
 remain inactive. Local working status still functions. Notification, Bubble,
 and overlay permissions remain user-controlled. The overlay only runs as a
@@ -164,7 +172,7 @@ HTTPS is required by default. Android's network policy permits cleartext so that
 
 ## Build
 
-Requirements: JDK 17 and Android SDK 35.
+Requirements: JDK 17 and Android SDK 36.
 
 ```bash
 ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug

@@ -54,11 +54,11 @@ class WorkSurfaceCopyTest {
     }
 
     @Test
-    fun `only session outcomes that need review create attention`() {
+    fun `session and job outcomes that need review create attention`() {
         assertTrue(event("approval.required").requiresAttention)
         assertTrue(event("session.completed").requiresAttention)
         assertFalse(event("session.started").requiresAttention)
-        assertFalse(event("job.failed").requiresAttention)
+        assertTrue(event("job.failed").requiresAttention)
     }
 
     @Test
