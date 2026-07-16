@@ -7,11 +7,13 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.IBinder
+import android.os.Build
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -23,7 +25,9 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,17 +59,21 @@ class HermesOverlayService : Service() {
     private val serviceStartedAt = System.currentTimeMillis()
     private val positionPreferences by lazy { getSharedPreferences("hermes_overlay_position", MODE_PRIVATE) }
     private val visibilityPreferences by lazy { getSharedPreferences(VISIBILITY_PREFERENCES, MODE_PRIVATE) }
+    private val diagnostics: AppDiagnostics get() = AppDiagnosticsRegistry.recorder
+    private var foregroundReady = false
 
     override fun onCreate() {
         super.onCreate()
-        serviceRunning = true
         windowManager = getSystemService(WindowManager::class.java)
         appInForeground = visibilityPreferences.getBoolean(APP_FOREGROUND_KEY, false)
         createForegroundChannel()
-        startForeground(HermesNotificationCoordinator.WORK_NOTIFICATION_ID, foregroundNotification(emptyList()))
+        foregroundReady = promoteToForeground(emptyList())
+        serviceRunning = foregroundReady
+        if (!foregroundReady) stopSelf()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!foregroundReady) return START_NOT_STICKY
         if (intent?.hasExtra(EXTRA_APP_FOREGROUND) == true) {
             appInForeground = intent.getBooleanExtra(EXTRA_APP_FOREGROUND, false)
             visibilityPreferences.edit().putBoolean(APP_FOREGROUND_KEY, appInForeground).apply()
@@ -73,19 +81,39 @@ class HermesOverlayService : Service() {
         intent?.localRunHint()?.let { hint -> localRunHints = localRunHints + (hint.runId to hint) }
         if (pollJob == null) {
             pollJob = scope.launch {
+                var consecutiveFailures = 0
                 while (true) {
-                    refreshSessions()
-                    delay(POLL_INTERVAL_MS)
+                    when (refreshSessionsSafely()) {
+                        RefreshOutcome.Success -> {
+                            consecutiveFailures = 0
+                            delay(POLL_INTERVAL_MS)
+                        }
+                        RefreshOutcome.Failed -> {
+                            consecutiveFailures += 1
+                            delay(overlayPollRetryDelayMillis(consecutiveFailures))
+                        }
+                        RefreshOutcome.Stopped -> break
+                    }
                 }
             }
         } else {
-            scope.launch { refreshSessions() }
+            scope.launch { refreshSessionsSafely() }
         }
         return START_STICKY
     }
 
-    private suspend fun refreshSessions() {
-        val next = withContext(Dispatchers.IO) {
+    private suspend fun refreshSessionsSafely(): RefreshOutcome = try {
+        refreshSessions()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        diagnostics.recordFailure(DiagnosticPhase.OverlayRefresh, error)
+        RefreshOutcome.Failed
+    }
+
+    private suspend fun refreshSessions(): RefreshOutcome {
+        diagnostics.recordPhase(DiagnosticPhase.OverlayRefresh)
+        val refresh = withContext(Dispatchers.IO) {
             val settings = PreferencesSettingsStore(applicationContext)
             val enabled = settings.loadMonitoredHostIds()
             val hosts = SecureHostStore(applicationContext).load().snapshot.hosts.filter { it.id in enabled }
@@ -94,15 +122,25 @@ class HermesOverlayService : Service() {
             val hints = (localRunHints.values + settings.loadRunCheckpoints().map { checkpoint ->
                 LocalRunHint(checkpoint.hostId, checkpoint.sessionId, checkpoint.runId, "Hermes task")
             }).distinctBy(LocalRunHint::runId)
+            var hadFailures = false
             val remote = hosts.flatMap { host ->
-                runCatching { gateway.listActiveSessions(host) }.getOrDefault(emptyList())
-                    .filter { session -> isOverlayActiveSession(session.state) }
-                    .map { session ->
-                        val hintedTitle = hints.firstOrNull {
-                            it.hostId == host.id && it.sessionId == session.sessionId
-                        }?.title
-                        OverlaySession(host, session.copy(title = overlaySessionTitle(session.title, hintedTitle)))
-                    }
+                val fetched = overlayFetchOrPrevious(
+                    fetch = runCatching {
+                        gateway.listActiveSessions(host)
+                            .filter { session -> isOverlayActiveSession(session.state) }
+                            .map { session ->
+                                val hintedTitle = hints.firstOrNull {
+                                    it.hostId == host.id && it.sessionId == session.sessionId
+                                }?.title
+                                OverlaySession(host, session.copy(title = overlaySessionTitle(session.title, hintedTitle)))
+                            }
+                    },
+                    previous = sessions.filter { it.host.id == host.id },
+                )
+                if (fetched.failed) {
+                    hadFailures = true
+                }
+                fetched.items
             }
             val staleRunIds = mutableSetOf<String>()
             val local = hints.mapNotNull { value ->
@@ -155,21 +193,23 @@ class HermesOverlayService : Service() {
                         },
                     )
                 }
-            active
+            OverlayRefreshSnapshot(active, hadFailures, hosts.isNotEmpty())
         }
 
-        val sessionsChanged = sessions != next
-        sessions = next
+        val sessionsChanged = sessions != refresh.sessions
+        sessions = refresh.sessions
         if (sessions.isEmpty()) {
+            if (refresh.hadFailures && refresh.hasMonitoredHosts) return RefreshOutcome.Failed
             removeWindows()
-            stopForeground(STOP_FOREGROUND_REMOVE)
+            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
             stopSelf()
-            return
+            foregroundReady = false
+            return RefreshOutcome.Stopped
         }
 
         // Re-promoting updates the required foreground notification and still
         // permits the overlay service when Android notification permission is denied.
-        startForeground(HermesNotificationCoordinator.WORK_NOTIFICATION_ID, foregroundNotification(sessions))
+        if (!promoteToForeground(sessions)) return RefreshOutcome.Stopped
         val settings = PreferencesSettingsStore(applicationContext)
         val sessionSignature = activeSessionSignature()
         val dismissedForCurrentSessions = positionPreferences.getString("dismissed_sessions", null) == sessionSignature
@@ -182,6 +222,28 @@ class HermesOverlayService : Service() {
         } else {
             removeWindows()
         }
+        return if (refresh.hadFailures) RefreshOutcome.Failed else RefreshOutcome.Success
+    }
+
+    private fun promoteToForeground(active: List<OverlaySession>): Boolean = try {
+        diagnostics.recordPhase(DiagnosticPhase.OverlayPromote)
+        ServiceCompat.startForeground(
+            this,
+            HermesNotificationCoordinator.WORK_NOTIFICATION_ID,
+            foregroundNotification(active),
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
+            },
+        )
+        true
+    } catch (error: RuntimeException) {
+        diagnostics.recordFailure(DiagnosticPhase.OverlayPromote, error)
+        foregroundReady = false
+        serviceRunning = false
+        stopSelf()
+        false
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -243,9 +305,11 @@ class HermesOverlayService : Service() {
                     if (moved && dismissTarget == null) showDismissTarget()
                     params.x = (startX + dx).coerceIn(OVERLAY_MARGIN_DP.dp, screenWidth - CHIP_SIZE_DP.dp - OVERLAY_MARGIN_DP.dp)
                     params.y = (startY + dy).coerceIn(OVERLAY_MARGIN_DP.dp, screenHeight - CHIP_SIZE_DP.dp - OVERLAY_MARGIN_DP.dp)
-                    windowManager.updateViewLayout(view, params)
-                    updateDismissTarget(params)
-                    updatePanelPosition()
+                    windowOperation {
+                        windowManager.updateViewLayout(view, params)
+                        updateDismissTarget(params)
+                        updatePanelPosition()
+                    }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
@@ -268,7 +332,7 @@ class HermesOverlayService : Service() {
                 else -> false
             }
         }
-        windowManager.addView(view, params)
+        if (!windowOperation { windowManager.addView(view, params) }) return
         chip = view
         chipParams = params
         updateChipBadge()
@@ -294,12 +358,18 @@ class HermesOverlayService : Service() {
             margin = OVERLAY_MARGIN_DP.dp,
         )
         params.y = params.y.coerceIn(OVERLAY_MARGIN_DP.dp, screenHeight - params.height - OVERLAY_MARGIN_DP.dp)
-        windowManager.updateViewLayout(view, params)
-        persistChipPosition(params)
-        updatePanelPosition()
+        windowOperation {
+            windowManager.updateViewLayout(view, params)
+            persistChipPosition(params)
+            updatePanelPosition()
+        }
     }
 
     private fun showPanel() {
+        if (!windowOperation(::showPanelUnsafe)) hidePanel()
+    }
+
+    private fun showPanelUnsafe() {
         hidePanel()
         val first = sessions.firstOrNull()
         val list = LinearLayout(this).apply {
@@ -428,7 +498,7 @@ class HermesOverlayService : Service() {
             x = (screenWidth - size) / 2
             y = screenHeight - size - DISMISS_TARGET_BOTTOM_MARGIN_DP.dp
         }
-        windowManager.addView(view, params)
+        if (!windowOperation { windowManager.addView(view, params) }) return
         dismissTarget = view
         dismissParams = params
         dismissArmed = false
@@ -476,6 +546,7 @@ class HermesOverlayService : Service() {
         removeWindows()
         scope.cancel()
         serviceRunning = false
+        foregroundReady = false
         super.onDestroy()
     }
 
@@ -522,8 +593,18 @@ class HermesOverlayService : Service() {
     private fun updatePanelPosition() {
         val view = panel ?: return
         val params = panelParams ?: return
-        positionPanelParams(params)
-        windowManager.updateViewLayout(view, params)
+        windowOperation {
+            positionPanelParams(params)
+            windowManager.updateViewLayout(view, params)
+        }
+    }
+
+    private inline fun windowOperation(operation: () -> Unit): Boolean = try {
+        operation()
+        true
+    } catch (error: RuntimeException) {
+        diagnostics.recordFailure(DiagnosticPhase.OverlayRefresh, error)
+        false
     }
 
     private fun foregroundNotification(active: List<OverlaySession>): android.app.Notification {
@@ -629,7 +710,7 @@ class HermesOverlayService : Service() {
                 putExtra(EXTRA_RUN_ID, run.runId)
                 putExtra(EXTRA_RUN_TITLE, run.sessionTitle ?: "Hermes task")
             }
-            runCatching { ContextCompat.startForegroundService(context, intent) }
+            startForegroundServiceSafely(context, intent)
         }
 
         fun startForRuns(context: Context, runs: Collection<ActiveRun>) {
@@ -641,25 +722,35 @@ class HermesOverlayService : Service() {
                 .edit()
                 .putBoolean(APP_FOREGROUND_KEY, foreground)
                 .apply()
-            if (serviceRunning) runCatching {
+            if (serviceRunning) try {
                 context.startService(Intent(context, HermesOverlayService::class.java).apply {
                     putExtra(EXTRA_APP_FOREGROUND, foreground)
                 })
+            } catch (error: RuntimeException) {
+                AppDiagnosticsRegistry.recorder.recordFailure(DiagnosticPhase.OverlayPromote, error)
             }
         }
 
         fun onPush(context: Context, event: MobilePushEvent) {
             if (event.activeCount == 0 && event.isTerminal && !event.requiresAttention) return
-            runCatching { ContextCompat.startForegroundService(context, Intent(context, HermesOverlayService::class.java)) }
+            startForegroundServiceSafely(context, Intent(context, HermesOverlayService::class.java))
         }
 
         fun startIfAllowed(context: Context) {
             if (!Settings.canDrawOverlays(context)) return
-            runCatching { ContextCompat.startForegroundService(context, Intent(context, HermesOverlayService::class.java)) }
+            startForegroundServiceSafely(context, Intent(context, HermesOverlayService::class.java))
         }
 
         fun stop(context: Context) {
             context.stopService(Intent(context, HermesOverlayService::class.java))
+        }
+
+        private fun startForegroundServiceSafely(context: Context, intent: Intent) {
+            try {
+                ContextCompat.startForegroundService(context, intent)
+            } catch (error: RuntimeException) {
+                AppDiagnosticsRegistry.recorder.recordFailure(DiagnosticPhase.OverlayPromote, error)
+            }
         }
 
         private fun Intent.localRunHint(): LocalRunHint? {
@@ -672,6 +763,14 @@ class HermesOverlayService : Service() {
     }
 }
 
+private enum class RefreshOutcome { Success, Failed, Stopped }
+
+private data class OverlayRefreshSnapshot(
+    val sessions: List<OverlaySession>,
+    val hadFailures: Boolean,
+    val hasMonitoredHosts: Boolean,
+)
+
 private data class OverlaySession(
     val host: HostProfile,
     val session: HermesActiveSession,
@@ -681,6 +780,19 @@ private data class OverlaySession(
 private data class LocalRunHint(val hostId: String, val sessionId: String, val runId: String, val title: String)
 
 internal data class OverlayPoint(val x: Int, val y: Int)
+
+internal data class OverlayFetchResult<T>(val items: List<T>, val failed: Boolean)
+
+internal fun <T> overlayFetchOrPrevious(fetch: Result<List<T>>, previous: List<T>): OverlayFetchResult<T> =
+    fetch.fold(
+        onSuccess = { OverlayFetchResult(it, failed = false) },
+        onFailure = { OverlayFetchResult(previous, failed = true) },
+    )
+
+internal fun overlayPollRetryDelayMillis(consecutiveFailures: Int): Long {
+    val shift = (consecutiveFailures.coerceAtLeast(1) - 1).coerceAtMost(3)
+    return (5_000L shl shift).coerceAtMost(30_000L)
+}
 
 internal fun snapOverlayX(currentX: Int, chipWidth: Int, screenWidth: Int, margin: Int): Int =
     if (currentX + chipWidth / 2 < screenWidth / 2) margin else screenWidth - chipWidth - margin

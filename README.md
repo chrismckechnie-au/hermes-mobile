@@ -180,6 +180,45 @@ Install it on an attached emulator/device:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+Debug builds are intended for development. Distributed builds use R8 code and
+resource shrinking plus a generated Baseline Profile for the launch and
+send-message journeys.
+
+### Crash diagnostics
+
+Crash reporting is off by default. When Firebase is configured, users can opt
+in under **Settings > Diagnostics**. Hermes Mobile reports only bounded process
+exit metadata, lifecycle phases, message-length buckets, and sanitized failure
+types through its custom diagnostics. Firebase Crashlytics also processes
+automatic crash and ANR reports, which can include uncaught exception, device,
+OS, and app-state metadata supplied by Android. Hermes Mobile does not
+intentionally add host URLs, API keys, session IDs, prompts, or transcript
+content to custom diagnostic keys or logs. The same settings section shows a
+copyable summary of the previous Android process exit to help investigate
+device-only failures.
+
+### Send-path performance checks
+
+With an emulator running and the local contract host listening on port `8766`,
+generate the Baseline Profile or run the frame-timing benchmark:
+
+```bash
+python3 scripts/mock_hermes_host.py
+./gradlew :app:generateBaselineProfile
+./gradlew :baselineprofile:connectedNonMinifiedReleaseAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.androidx.benchmark.enabledRules=Macrobenchmark
+python3 scripts/verify_benchmark_results.py \
+  baselineprofile/build/outputs/connected_android_test_additional_output \
+  --max-frame-ms 700
+```
+
+The benchmark configures `http://10.0.2.2:8766` with the test-only key when the
+app has no saved host, creates an isolated session for each iteration, sends a
+message, and measures frame timing through the first rendered host response.
+The verifier fails if any sampled CPU frame reaches 700 ms. The scheduled and
+manually runnable Android performance workflow executes the same gate on a
+hardware-accelerated emulator and retains its JSON results and Perfetto traces.
+
 ### Signed release builds
 
 Release packaging never falls back to the Android debug key. Provide all four values through environment variables:

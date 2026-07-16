@@ -9,6 +9,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 class HermesMobileApplication : Application(), DefaultLifecycleObserver {
     override fun onCreate() {
         super<Application>.onCreate()
+        AppDiagnosticsRegistry.initialize(this)
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
     }
 

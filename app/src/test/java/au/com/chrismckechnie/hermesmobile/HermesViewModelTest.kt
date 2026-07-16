@@ -250,6 +250,7 @@ private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsSt
     var attentionItems = emptyList<AttentionItem>()
     var unknownOutcomeRecords = emptyList<UnknownOutcomeRecord>()
     var queuedInterruptRecords = emptyList<QueuedInterruptRecord>()
+    var crashReportingEnabled = false
 
     override fun loadThemeMode(): ThemeMode = initialMode
     override fun saveThemeMode(mode: ThemeMode) {
@@ -273,6 +274,20 @@ private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsSt
     }
     override fun loadAttentionItems(): List<AttentionItem> = attentionItems
     override fun saveAttentionItems(items: List<AttentionItem>) { attentionItems = items }
+    override fun loadCrashReportingEnabled(): Boolean = crashReportingEnabled
+    override fun saveCrashReportingEnabled(enabled: Boolean) { crashReportingEnabled = enabled }
+}
+
+private class FakeAppDiagnostics : AppDiagnostics {
+    val collectionChanges = mutableListOf<Boolean>()
+    val phases = mutableListOf<Pair<DiagnosticPhase, DiagnosticContext>>()
+    val failures = mutableListOf<Pair<DiagnosticPhase, Throwable>>()
+
+    override fun initialize() = Unit
+    override fun setCollectionEnabled(enabled: Boolean) { collectionChanges += enabled }
+    override fun recordPhase(phase: DiagnosticPhase, context: DiagnosticContext) { phases += phase to context }
+    override fun recordFailure(phase: DiagnosticPhase, error: Throwable) { failures += phase to error }
+    override fun latestExit(): ProcessExitDiagnostic? = null
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -292,8 +307,9 @@ class HermesViewModelTest {
         savedState: SavedStateHandle = SavedStateHandle(),
         store: FakeHostStore = FakeHostStore(HostSnapshot(listOf(hostA, hostB), "h1")),
         settingsStore: SettingsStore = FakeSettingsStore(ThemeMode.System),
+        diagnostics: AppDiagnostics = NoOpAppDiagnostics,
     ): Pair<HermesViewModel, FakeGateway> {
-        val viewModel = HermesViewModel(gateway, store, savedState, settingsStore)
+        val viewModel = HermesViewModel(gateway, store, savedState, settingsStore, diagnostics)
         advanceUntilIdle()
         return viewModel to gateway
     }
@@ -309,6 +325,21 @@ class HermesViewModelTest {
 
         assertEquals(ThemeMode.Dark, viewModel.state.value.themeMode)
         assertEquals(ThemeMode.Dark, settings.savedMode)
+    }
+
+    @Test
+    fun `crash reporting consent loads from settings and updates diagnostics`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System).apply { crashReportingEnabled = true }
+        val diagnostics = FakeAppDiagnostics()
+        val (viewModel, _) = buildViewModel(settingsStore = settings, diagnostics = diagnostics)
+
+        assertTrue(viewModel.state.value.crashReportingEnabled)
+
+        viewModel.setCrashReportingEnabled(false)
+
+        assertFalse(viewModel.state.value.crashReportingEnabled)
+        assertFalse(settings.crashReportingEnabled)
+        assertEquals(listOf(false), diagnostics.collectionChanges)
     }
 
     @Test
@@ -666,7 +697,8 @@ class HermesViewModelTest {
 
     @Test
     fun `send drives a run to completion without duplicating the user message`() = runVmTest {
-        val (viewModel, gateway) = buildViewModel()
+        val diagnostics = FakeAppDiagnostics()
+        val (viewModel, gateway) = buildViewModel(diagnostics = diagnostics)
         viewModel.selectSession("s1")
         advanceUntilIdle()
 
@@ -680,6 +712,18 @@ class HermesViewModelTest {
         assertEquals("what next?", submit.input)
         assertEquals(listOf("m1", "m2"), submit.history.map { it.id })
         assertNull(submit.model)
+        assertEquals(
+            listOf(
+                DiagnosticPhase.SendValidate,
+                DiagnosticPhase.HistoryLoad,
+                DiagnosticPhase.RunSubmit,
+                DiagnosticPhase.RunAccepted,
+                DiagnosticPhase.RunStream,
+            ),
+            diagnostics.phases.map { it.first },
+        )
+        assertEquals(DiagnosticSendRoute.ExistingSession, diagnostics.phases.first().second.sendRoute)
+        assertEquals(10, diagnostics.phases.first().second.messageLength)
 
         // Optimistic tail is displayed while streaming.
         assertNotNull(viewModel.state.value.activeRun)
@@ -706,6 +750,7 @@ class HermesViewModelTest {
             HermesRunUsage(inputTokens = 120, outputTokens = 80, totalTokens = 200),
             (state.displayedMessages.last() as ChatUiItem.Assistant).usage,
         )
+        assertEquals(DiagnosticPhase.RunTerminal, diagnostics.phases.last().first)
     }
 
     @Test

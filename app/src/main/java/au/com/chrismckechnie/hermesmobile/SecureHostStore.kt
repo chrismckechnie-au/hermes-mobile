@@ -1,5 +1,6 @@
 package au.com.chrismckechnie.hermesmobile
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -352,6 +353,16 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
 
     override fun saveOverlayEnabled(enabled: Boolean) {
         preferences.edit().putBoolean("overlay_enabled", enabled).apply()
+    }
+
+    override fun loadCrashReportingEnabled(): Boolean =
+        preferences.getBoolean("crash_reporting_enabled", false)
+
+    @SuppressLint("ApplySharedPref")
+    override fun saveCrashReportingEnabled(enabled: Boolean) {
+        // Consent is read during Application startup, so persist it before
+        // enabling the in-process reporter and fail closed after a restart.
+        preferences.edit().putBoolean("crash_reporting_enabled", enabled).commit()
     }
 
     override fun loadAttentionItems(): List<AttentionItem> = preferences
