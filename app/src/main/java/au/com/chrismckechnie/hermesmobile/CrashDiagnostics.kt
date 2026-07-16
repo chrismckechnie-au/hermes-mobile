@@ -116,6 +116,8 @@ interface AppDiagnostics {
     fun recordFailure(phase: DiagnosticPhase, error: Throwable)
     fun latestExit(): ProcessExitDiagnostic?
     fun consumeSafeStartup(): Boolean = false
+    fun markProcessActive() = Unit
+    fun markProcessInactive() = Unit
 }
 
 internal object NoOpAppDiagnostics : AppDiagnostics {
@@ -144,9 +146,18 @@ private class AndroidAppDiagnostics(context: Context) : AppDiagnostics {
     private val settingsStore = PreferencesSettingsStore(appContext)
 
     override fun initialize() {
-        capturePreviousExit()
-        setCollectionEnabled(settingsStore.loadCrashReportingEnabled())
-        recordPhase(DiagnosticPhase.AppStart)
+        val previousStartupIncomplete = preferences.getBoolean(KEY_STARTUP_IN_PROGRESS, false)
+        val previousPhase = preferences.getString(KEY_LAST_PHASE, null)
+        val emergencyRecovery = !preferences.getBoolean(KEY_EMERGENCY_RECOVERY_SHOWN, false)
+        preferences.edit()
+            .putBoolean(KEY_SAFE_STARTUP_PENDING, previousStartupIncomplete || emergencyRecovery)
+            .putBoolean(KEY_EMERGENCY_RECOVERY_SHOWN, true)
+            .putString(KEY_LAST_PHASE, DiagnosticPhase.AppStart.value)
+            .commit()
+        Thread {
+            capturePreviousExit(previousPhase)
+            setCollectionEnabled(settingsStore.loadCrashReportingEnabled())
+        }.start()
     }
 
     override fun setCollectionEnabled(enabled: Boolean) {
@@ -157,7 +168,12 @@ private class AndroidAppDiagnostics(context: Context) : AppDiagnostics {
     }
 
     override fun recordPhase(phase: DiagnosticPhase, context: DiagnosticContext) {
-        preferences.edit().putString(KEY_LAST_PHASE, phase.value).apply()
+        preferences.edit()
+            .putString(KEY_LAST_PHASE, phase.value)
+            .apply {
+                if (phase == DiagnosticPhase.AppStart) putBoolean(KEY_STARTUP_IN_PROGRESS, true)
+            }
+            .apply()
         val reporter = crashlytics().takeIf { settingsStore.loadCrashReportingEnabled() } ?: return
         reporter.setCustomKey("phase", phase.value)
         context.sendRoute?.let { reporter.setCustomKey("send_route", it.value) }
@@ -182,13 +198,22 @@ private class AndroidAppDiagnostics(context: Context) : AppDiagnostics {
         ?.let(::decodeExitDiagnostic)
 
     override fun consumeSafeStartup(): Boolean {
-        val exit = latestExit()?.takeIf(::shouldUseSafeStartup) ?: return false
-        if (exit.timestampMillis <= preferences.getLong(KEY_SAFE_STARTUP_CONSUMED_TIMESTAMP, 0L)) return false
-        preferences.edit().putLong(KEY_SAFE_STARTUP_CONSUMED_TIMESTAMP, exit.timestampMillis).commit()
+        if (!preferences.getBoolean(KEY_SAFE_STARTUP_PENDING, false)) return false
+        preferences.edit()
+            .putBoolean(KEY_SAFE_STARTUP_PENDING, false)
+            .commit()
         return true
     }
 
-    private fun capturePreviousExit() {
+    override fun markProcessActive() {
+        preferences.edit().putBoolean(KEY_STARTUP_IN_PROGRESS, true).apply()
+    }
+
+    override fun markProcessInactive() {
+        preferences.edit().putBoolean(KEY_STARTUP_IN_PROGRESS, false).apply()
+    }
+
+    private fun capturePreviousExit(previousPhase: String?) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         val activityManager = appContext.getSystemService(ActivityManager::class.java) ?: return
         val exit = activityManager.getHistoricalProcessExitReasons(appContext.packageName, 0, 1).firstOrNull() ?: return
@@ -201,7 +226,7 @@ private class AndroidAppDiagnostics(context: Context) : AppDiagnostics {
             importance = exit.importance,
             pssKb = exit.pss,
             rssKb = exit.rss,
-            lastPhase = preferences.getString(KEY_LAST_PHASE, null),
+            lastPhase = previousPhase,
         )
         preferences.edit()
             .putLong(KEY_LAST_EXIT_TIMESTAMP, exit.timestamp)
@@ -221,7 +246,9 @@ private class AndroidAppDiagnostics(context: Context) : AppDiagnostics {
         const val KEY_LAST_FAILURE_CATEGORY = "last_failure_category"
         const val KEY_LAST_EXIT = "last_exit"
         const val KEY_LAST_EXIT_TIMESTAMP = "last_exit_timestamp"
-        const val KEY_SAFE_STARTUP_CONSUMED_TIMESTAMP = "safe_startup_consumed_timestamp"
+        const val KEY_STARTUP_IN_PROGRESS = "startup_in_progress"
+        const val KEY_SAFE_STARTUP_PENDING = "safe_startup_pending"
+        const val KEY_EMERGENCY_RECOVERY_SHOWN = "emergency_recovery_shown"
     }
 }
 

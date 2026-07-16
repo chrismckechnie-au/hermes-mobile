@@ -17,7 +17,18 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -65,6 +76,32 @@ class MainActivity : ComponentActivity() {
         }
         refreshPermissionHealth()
         setContent {
+            var recoveryAccepted by remember { mutableStateOf(!safeStartup) }
+            if (!recoveryAccepted) {
+                LaunchedEffect(Unit) {
+                    AppDiagnosticsRegistry.recorder.recordPhase(DiagnosticPhase.AppReady)
+                }
+                MaterialTheme {
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Text("Hermes Mobile recovery")
+                        Text(
+                            "The previous launch did not complete. Background state and overlays are paused.",
+                            modifier = Modifier.padding(vertical = 16.dp),
+                        )
+                        Button(onClick = {
+                            AppDiagnosticsRegistry.recorder.recordPhase(DiagnosticPhase.AppStart)
+                            recoveryAccepted = true
+                        }) {
+                            Text("Open Hermes safely")
+                        }
+                    }
+                }
+                return@setContent
+            }
             val state by viewModel.state.collectAsStateWithLifecycle()
             LaunchedEffect(Unit) {
                 AppDiagnosticsRegistry.recorder.recordPhase(DiagnosticPhase.AppReady)

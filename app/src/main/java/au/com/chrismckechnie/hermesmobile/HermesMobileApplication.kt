@@ -14,10 +14,12 @@ class HermesMobileApplication : Application(), DefaultLifecycleObserver {
     }
 
     override fun onStart(owner: LifecycleOwner) {
+        AppDiagnosticsRegistry.recorder.markProcessActive()
         HermesOverlayService.setAppForeground(this, true)
     }
 
     override fun onStop(owner: LifecycleOwner) {
+        AppDiagnosticsRegistry.recorder.markProcessInactive()
         HermesOverlayService.setAppForeground(this, false)
     }
 }
