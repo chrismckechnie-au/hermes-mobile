@@ -823,11 +823,17 @@ class HermesViewModel(
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(
         HermesUiState(
-            composerDrafts = savedState.get<HashMap<String, String>>(SAVED_SESSION_DRAFTS)
-                .orEmpty()
-                .mapNotNull { (encoded, draft) -> decodeDraftKey(encoded)?.let { it to draft } }
-                .toMap(),
-            newSessionDrafts = savedState.get<HashMap<String, String>>(SAVED_NEW_SESSION_DRAFTS).orEmpty(),
+            composerDrafts = if (safeStartup) emptyMap() else {
+                savedState.get<HashMap<String, String>>(SAVED_SESSION_DRAFTS)
+                    .orEmpty()
+                    .mapNotNull { (encoded, draft) -> decodeDraftKey(encoded)?.let { it to draft } }
+                    .toMap()
+            },
+            newSessionDrafts = if (safeStartup) {
+                emptyMap()
+            } else {
+                savedState.get<HashMap<String, String>>(SAVED_NEW_SESSION_DRAFTS).orEmpty()
+            },
         ),
     )
     val state: StateFlow<HermesUiState> = mutableState.asStateFlow()
@@ -1013,22 +1019,26 @@ class HermesViewModel(
         val loadResult = hostStore.load()
         val snapshot = loadResult.snapshot
         val selected = snapshot.selectedHostId?.takeIf { id -> snapshot.hosts.any { it.id == id } }
-        val recoveredUnknownOutcomes = settingsStore.loadUnknownOutcomeRecords().associate { record ->
-            SessionKey(record.hostId, record.sessionId) to UnknownOutcome(
-                sessionId = record.sessionId,
-                baselineCount = record.baselineCount,
-                text = record.text,
-                evidence = record.evidence,
-                timedOut = record.timedOut,
-            )
+        val recoveredUnknownOutcomes = if (safeStartup) emptyMap() else {
+            settingsStore.loadUnknownOutcomeRecords().associate { record ->
+                SessionKey(record.hostId, record.sessionId) to UnknownOutcome(
+                    sessionId = record.sessionId,
+                    baselineCount = record.baselineCount,
+                    text = record.text,
+                    evidence = record.evidence,
+                    timedOut = record.timedOut,
+                )
+            }
         }
-        val recoveredQueuedInterrupts = settingsStore.loadQueuedInterruptRecords().associate { record ->
-            SessionKey(record.hostId, record.sessionId) to QueuedInterrupt(
-                runId = record.runId,
-                text = record.text,
-                mode = record.mode,
-                requiresAcknowledgement = true,
-            )
+        val recoveredQueuedInterrupts = if (safeStartup) emptyMap() else {
+            settingsStore.loadQueuedInterruptRecords().associate { record ->
+                SessionKey(record.hostId, record.sessionId) to QueuedInterrupt(
+                    runId = record.runId,
+                    text = record.text,
+                    mode = record.mode,
+                    requiresAcknowledgement = true,
+                )
+            }
         }
         mutableState.value = HermesUiState(
             hosts = snapshot.hosts,
@@ -1049,7 +1059,7 @@ class HermesViewModel(
             monitoredHostIds = if (safeStartup) emptySet() else settingsStore.loadMonitoredHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
             overlayEnabled = !safeStartup && settingsStore.loadOverlayEnabled(),
             crashReportingEnabled = settingsStore.loadCrashReportingEnabled(),
-            activityEntries = settingsStore.loadAttentionItems(),
+            activityEntries = if (safeStartup) emptyList() else settingsStore.loadAttentionItems(),
             unknownOutcomes = recoveredUnknownOutcomes,
             queuedInterrupts = recoveredQueuedInterrupts,
             composerDrafts = restoredDrafts.composerDrafts,
@@ -1058,7 +1068,7 @@ class HermesViewModel(
                 loadResult.unlockFailed ->
                     "Saved hosts could not be unlocked on this device (Keystore key changed). Re-add your host and API key."
                 safeStartup ->
-                    "Startup recovery paused after the previous crash. Tap Retry to reconnect safely."
+                    "Recovered background state was skipped after the previous crash. Tap Retry to reconnect without it."
                 else -> null
             },
         )

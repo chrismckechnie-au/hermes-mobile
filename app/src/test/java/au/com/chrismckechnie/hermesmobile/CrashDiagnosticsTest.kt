@@ -8,11 +8,11 @@ import java.io.IOException
 
 class CrashDiagnosticsTest {
     @Test
-    fun `safe startup is used only after an early fatal exit`() {
+    fun `safe startup is used after any fatal exit`() {
         val crash = ProcessExitDiagnostic(1L, "crash", 0, 0, 0, 0, "app_start")
 
         assertTrue(shouldUseSafeStartup(crash))
-        assertFalse(shouldUseSafeStartup(crash.copy(lastPhase = "app_ready")))
+        assertTrue(shouldUseSafeStartup(crash.copy(lastPhase = "app_ready")))
         assertFalse(shouldUseSafeStartup(crash.copy(reason = "user_requested")))
         assertFalse(shouldUseSafeStartup(null))
     }

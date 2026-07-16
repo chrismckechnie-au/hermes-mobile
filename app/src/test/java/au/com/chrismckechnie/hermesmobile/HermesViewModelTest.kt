@@ -251,6 +251,7 @@ private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsSt
     var unknownOutcomeRecords = emptyList<UnknownOutcomeRecord>()
     var queuedInterruptRecords = emptyList<QueuedInterruptRecord>()
     var crashReportingEnabled = false
+    var failRecoveredStateLoads = false
 
     override fun loadThemeMode(): ThemeMode = initialMode
     override fun saveThemeMode(mode: ThemeMode) {
@@ -264,15 +265,24 @@ private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsSt
     override fun loadRunStatus(runId: String): String? = runStatuses[runId]
     override fun saveRunStatus(runId: String, status: String) { runStatuses[runId] = status }
     override fun clearRunStatus(runId: String) { runStatuses.remove(runId) }
-    override fun loadUnknownOutcomeRecords(): List<UnknownOutcomeRecord> = unknownOutcomeRecords
+    override fun loadUnknownOutcomeRecords(): List<UnknownOutcomeRecord> {
+        check(!failRecoveredStateLoads)
+        return unknownOutcomeRecords
+    }
     override fun saveUnknownOutcomeRecords(records: List<UnknownOutcomeRecord>) {
         unknownOutcomeRecords = records
     }
-    override fun loadQueuedInterruptRecords(): List<QueuedInterruptRecord> = queuedInterruptRecords
+    override fun loadQueuedInterruptRecords(): List<QueuedInterruptRecord> {
+        check(!failRecoveredStateLoads)
+        return queuedInterruptRecords
+    }
     override fun saveQueuedInterruptRecords(records: List<QueuedInterruptRecord>) {
         queuedInterruptRecords = records
     }
-    override fun loadAttentionItems(): List<AttentionItem> = attentionItems
+    override fun loadAttentionItems(): List<AttentionItem> {
+        check(!failRecoveredStateLoads)
+        return attentionItems
+    }
     override fun saveAttentionItems(items: List<AttentionItem>) { attentionItems = items }
     override fun loadCrashReportingEnabled(): Boolean = crashReportingEnabled
     override fun saveCrashReportingEnabled(enabled: Boolean) { crashReportingEnabled = enabled }
@@ -353,11 +363,16 @@ class HermesViewModelTest {
 
     @Test
     fun `safe startup pauses automatic recovery until retry`() = runVmTest {
-        val settings = FakeSettingsStore(ThemeMode.System)
-        val (viewModel, gateway) = buildViewModel(settingsStore = settings, safeStartup = true)
+        val settings = FakeSettingsStore(ThemeMode.System).apply { failRecoveredStateLoads = true }
+        val savedState = SavedStateHandle(mapOf("composer.sessionDrafts" to "invalid"))
+        val (viewModel, gateway) = buildViewModel(
+            savedState = savedState,
+            settingsStore = settings,
+            safeStartup = true,
+        )
 
         assertEquals(HostConnectionPhase.Failed, viewModel.state.value.connectionPhase)
-        assertTrue(viewModel.state.value.errorMessage.orEmpty().contains("recovery paused"))
+        assertTrue(viewModel.state.value.errorMessage.orEmpty().contains("background state was skipped"))
         assertEquals(0, gateway.jobsCalls)
 
         viewModel.retryConnection()
