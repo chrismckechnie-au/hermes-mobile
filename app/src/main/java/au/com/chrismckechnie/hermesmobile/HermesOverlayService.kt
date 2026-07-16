@@ -1,5 +1,8 @@
 package au.com.chrismckechnie.hermesmobile
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -16,9 +19,12 @@ import android.os.IBinder
 import android.os.Build
 import android.provider.Settings
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
 import android.widget.ImageView
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -49,9 +55,11 @@ class HermesOverlayService : Service() {
     private var chipParams: WindowManager.LayoutParams? = null
     private var panel: View? = null
     private var panelParams: WindowManager.LayoutParams? = null
+    private val panelRows = mutableMapOf<String, OverlayPanelRow>()
     private var dismissTarget: TextView? = null
     private var dismissParams: WindowManager.LayoutParams? = null
     private var dismissArmed = false
+    private var chipSettleAnimator: ValueAnimator? = null
     private var pollJob: Job? = null
     private var sessions = emptyList<OverlaySession>()
     private var localRunHints = emptyMap<String, LocalRunHint>()
@@ -222,6 +230,7 @@ class HermesOverlayService : Service() {
         }
 
         val sessionsChanged = sessions != refresh.sessions
+        val sessionStructureChanged = sessions.map(::panelSessionKey) != refresh.sessions.map(::panelSessionKey)
         sessions = refresh.sessions
         if (sessions.isEmpty()) {
             if (refresh.hadFailures && refresh.hasMonitoredHosts) return RefreshOutcome.Failed
@@ -243,7 +252,11 @@ class HermesOverlayService : Service() {
                 positionPreferences.edit().remove("dismissed_sessions").apply()
             }
             showOrUpdateChip()
-            if (panel != null && sessionsChanged) showPanel() else updatePanelPosition()
+            when {
+                panel != null && sessionStructureChanged -> showPanel()
+                panel != null && sessionsChanged && !windowOperation(::updatePanelContents) -> showPanel()
+                else -> updatePanelPosition()
+            }
         } else {
             removeWindows()
         }
@@ -284,15 +297,17 @@ class HermesOverlayService : Service() {
                 return true
             }
         }.apply {
-            clipToOutline = true
-            elevation = 8.dp.toFloat()
-            background = roundedBackground(Color.WHITE, 13.dp.toFloat())
+            clipChildren = false
+            clipToPadding = false
             contentDescription = activeSessionDescription(sessions.size)
             setOnClickListener { if (panel == null) showPanel() else hidePanel() }
             addView(ImageView(context).apply {
                 setImageResource(R.drawable.hermes_official)
                 scaleType = ImageView.ScaleType.CENTER_CROP
-            }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+                clipToOutline = true
+                elevation = 8.dp.toFloat()
+                background = roundedBackground(Color.WHITE, 13.dp.toFloat())
+            }, FrameLayout.LayoutParams(CHIP_VISUAL_SIZE_DP.dp, CHIP_VISUAL_SIZE_DP.dp, Gravity.CENTER))
             val badge = overlayText("", 9f, Color.WHITE, bold = true).apply {
                 gravity = Gravity.CENTER
                 minWidth = 16.dp
@@ -313,9 +328,11 @@ class HermesOverlayService : Service() {
         var startX = 0
         var startY = 0
         var moved = false
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
         view.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    chipSettleAnimator?.cancel()
                     downX = event.rawX
                     downY = event.rawY
                     startX = params.x
@@ -326,10 +343,10 @@ class HermesOverlayService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downX).toInt()
                     val dy = (event.rawY - downY).toInt()
-                    moved = moved || kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8
+                    moved = moved || kotlin.math.abs(dx) > touchSlop || kotlin.math.abs(dy) > touchSlop
                     if (moved && dismissTarget == null) showDismissTarget()
-                    params.x = (startX + dx).coerceIn(OVERLAY_MARGIN_DP.dp, screenWidth - CHIP_SIZE_DP.dp - OVERLAY_MARGIN_DP.dp)
-                    params.y = (startY + dy).coerceIn(OVERLAY_MARGIN_DP.dp, screenHeight - CHIP_SIZE_DP.dp - OVERLAY_MARGIN_DP.dp)
+                    params.x = (startX + dx).coerceIn(OVERLAY_MARGIN_DP.dp, screenWidth - params.width - OVERLAY_MARGIN_DP.dp)
+                    params.y = (startY + dy).coerceIn(OVERLAY_MARGIN_DP.dp, screenHeight - params.height - OVERLAY_MARGIN_DP.dp)
                     windowOperation {
                         windowManager.updateViewLayout(view, params)
                         updateDismissTarget(params)
@@ -383,17 +400,46 @@ class HermesOverlayService : Service() {
     }
 
     private fun settleChipPosition(view: View, params: WindowManager.LayoutParams) {
-        params.x = snapOverlayX(
+        val startX = params.x
+        val startY = params.y
+        val targetX = snapOverlayX(
             currentX = params.x,
             chipWidth = params.width,
             screenWidth = screenWidth,
             margin = OVERLAY_MARGIN_DP.dp,
         )
-        params.y = params.y.coerceIn(OVERLAY_MARGIN_DP.dp, screenHeight - params.height - OVERLAY_MARGIN_DP.dp)
-        windowOperation {
-            windowManager.updateViewLayout(view, params)
-            persistChipPosition(params)
-            updatePanelPosition()
+        val targetY = params.y.coerceIn(OVERLAY_MARGIN_DP.dp, screenHeight - params.height - OVERLAY_MARGIN_DP.dp)
+        chipSettleAnimator?.cancel()
+        chipSettleAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 180L
+            interpolator = DecelerateInterpolator(1.5f)
+            addUpdateListener { animator ->
+                val fraction = animator.animatedValue as Float
+                params.x = (startX + (targetX - startX) * fraction).toInt()
+                params.y = (startY + (targetY - startY) * fraction).toInt()
+                windowOperation {
+                    windowManager.updateViewLayout(view, params)
+                    updatePanelPosition()
+                }
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                private val commitGuard = OverlayAnimationCommitGuard()
+
+                override fun onAnimationEnd(animation: Animator) {
+                    commitGuard.commitIfActive {
+                        params.x = targetX
+                        params.y = targetY
+                        persistChipPosition(params)
+                    }
+                    chipSettleAnimator = null
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    commitGuard.cancel()
+                    chipSettleAnimator = null
+                }
+            })
+            start()
         }
     }
 
@@ -424,42 +470,30 @@ class HermesOverlayService : Service() {
                     gravity = Gravity.CENTER
                     contentDescription = "Collapse active work"
                     setOnClickListener { hidePanel() }
-                }, LinearLayout.LayoutParams(40.dp, 40.dp))
+                }, LinearLayout.LayoutParams(48.dp, 48.dp))
             })
             sessions.forEach { item ->
-                val stateLabel = when {
-                    item.attention != null -> attentionLabel(item.attention.state)
-                    else -> when (item.session.state.lowercase()) {
-                    "waiting_for_approval", "approval_required" -> "Needs approval"
-                    "unresponsive", "stalled" -> "No recent activity"
-                    "queued" -> "Queued"
-                    "stopping" -> "Stopping"
-                    else -> "Working"
-                    }
-                }
-                val stateColor = when (stateLabel) {
-                    "Needs approval" -> 0xFFFFC66D.toInt()
-                    "Failed" -> 0xFFC94747.toInt()
-                    else -> 0xFF9FD3B4.toInt()
-                }
                 addView(LinearLayout(context).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(13.dp, 11.dp, 13.dp, 11.dp)
                     background = roundedBackground(0xFF262626.toInt(), 16.dp.toFloat())
-                    addView(overlayText(item.session.title, 13f, Color.WHITE, bold = true).apply {
+                    val titleView = overlayText("", 13f, Color.WHITE, bold = true).apply {
                         maxLines = 2
                         ellipsize = android.text.TextUtils.TruncateAt.END
-                    })
-                    (item.latestStatus ?: item.attention?.state)?.takeIf { it.isNotBlank() }?.let { status ->
-                        addView(overlayText(status, 12f, 0xFFD1D1D1.toInt()).apply {
-                            maxLines = 3
-                            ellipsize = android.text.TextUtils.TruncateAt.END
-                            setPadding(0, 7.dp, 0, 0)
-                        })
                     }
-                    addView(overlayText("●  $stateLabel · ${item.host.name}", 11f, stateColor).apply {
+                    val statusView = overlayText("", 12f, 0xFFD1D1D1.toInt()).apply {
+                        maxLines = 3
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        setPadding(0, 7.dp, 0, 0)
+                    }
+                    val stateView = overlayText("", 11f, 0xFF9FD3B4.toInt()).apply {
                         setPadding(0, 4.dp, 0, 0)
-                    })
+                    }
+                    addView(titleView)
+                    addView(statusView)
+                    addView(stateView)
+                    panelRows[panelSessionKey(item)] = OverlayPanelRow(titleView, statusView, stateView)
+                    updatePanelRow(item, titleView, statusView, stateView)
                     setOnClickListener {
                         startActivity(HermesNotificationCoordinator.sessionIntent(context, item.host.id, item.session.sessionId))
                         hidePanel()
@@ -486,22 +520,70 @@ class HermesOverlayService : Service() {
             })
         }
         val scroll = ScrollView(this).apply { addView(list) }
+        val panelWidth = 320.dp.coerceAtMost(screenWidth - OVERLAY_MARGIN_DP.dp * 2)
+        val params = overlayParams(panelWidth, panelHeight()).also(::positionPanelParams)
+        windowManager.addView(scroll, params)
+        panel = scroll
+        panelParams = params
+    }
+
+    private fun updatePanelContents() {
+        sessions.forEach { item ->
+            val row = requireNotNull(panelRows[panelSessionKey(item)])
+            updatePanelRow(item, row.title, row.status, row.state)
+        }
+        val view = panel ?: return
+        val params = panelParams ?: return
+        params.height = panelHeight()
+        positionPanelParams(params)
+        windowManager.updateViewLayout(view, params)
+    }
+
+    private fun updatePanelRow(
+        item: OverlaySession,
+        titleView: TextView,
+        statusView: TextView,
+        stateView: TextView,
+    ) {
+        val status = (item.latestStatus ?: item.attention?.state).orEmpty()
+        val stateLabel = panelStateLabel(item)
+        titleView.text = item.session.title
+        statusView.text = status
+        statusView.visibility = if (status.isBlank()) View.GONE else View.VISIBLE
+        stateView.text = "●  $stateLabel · ${item.host.name}"
+        stateView.setTextColor(panelStateColor(stateLabel))
+    }
+
+    private fun panelHeight(): Int {
         val maxHeight = (resources.displayMetrics.heightPixels * 0.72f).toInt()
         val sessionContentHeight = sessions.fold(0) { height, item ->
             height + if ((item.latestStatus ?: item.attention?.state).isNullOrBlank()) 76 else 112
         }
-        val panelHeight = (170 + sessionContentHeight).dp.coerceAtMost(maxHeight)
-        val panelWidth = 320.dp.coerceAtMost(screenWidth - OVERLAY_MARGIN_DP.dp * 2)
-        val params = overlayParams(panelWidth, panelHeight).also(::positionPanelParams)
-        windowManager.addView(scroll, params)
-        panel = scroll
-        panelParams = params
+        return (170 + sessionContentHeight).dp.coerceAtMost(maxHeight)
     }
 
     private fun hidePanel() {
         panel?.let { runCatching { windowManager.removeView(it) } }
         panel = null
         panelParams = null
+        panelRows.clear()
+    }
+
+    private fun panelSessionKey(item: OverlaySession): String = "${item.host.id}:${item.session.sessionId}"
+
+    private fun panelStateLabel(item: OverlaySession): String = item.attention?.let { attentionLabel(it.state) }
+        ?: when (item.session.state.lowercase()) {
+            "waiting_for_approval", "approval_required" -> "Needs approval"
+            "unresponsive", "stalled" -> "No recent activity"
+            "queued" -> "Queued"
+            "stopping" -> "Stopping"
+            else -> "Working"
+        }
+
+    private fun panelStateColor(label: String): Int = when (label) {
+        "Needs approval" -> 0xFFFFC66D.toInt()
+        "Failed" -> 0xFFFF6B64.toInt()
+        else -> 0xFF9FD3B4.toInt()
     }
 
     private fun activeSessionSignature(): String = sessions
@@ -536,19 +618,20 @@ class HermesOverlayService : Service() {
         dismissArmed = false
     }
 
-    private fun updateDismissTarget(chip: WindowManager.LayoutParams) {
+    private fun updateDismissTarget(chipLayout: WindowManager.LayoutParams) {
         val target = dismissTarget ?: return
         val targetParams = dismissParams ?: return
         val armed = isOverlayDismissDrop(
-            chipX = chip.x,
-            chipY = chip.y,
-            chipSize = chip.width,
+            chipX = chipLayout.x,
+            chipY = chipLayout.y,
+            chipSize = chipLayout.width,
             targetX = targetParams.x,
             targetY = targetParams.y,
             targetSize = targetParams.width,
         )
         if (armed == dismissArmed) return
         dismissArmed = armed
+        if (armed) chip?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
         target.background = roundedBackground(
             if (armed) 0xF5C94747.toInt() else 0xE6222222.toInt(),
             targetParams.width / 2f,
@@ -565,6 +648,8 @@ class HermesOverlayService : Service() {
     }
 
     private fun removeWindows() {
+        chipSettleAnimator?.cancel()
+        chipSettleAnimator = null
         hideDismissTarget()
         hidePanel()
         chip?.let { runCatching { windowManager.removeView(it) } }
@@ -586,7 +671,7 @@ class HermesOverlayService : Service() {
 
     private fun initialChipParams(): WindowManager.LayoutParams {
         val margin = OVERLAY_MARGIN_DP.dp
-        val size = CHIP_SIZE_DP.dp
+        val size = CHIP_TOUCH_TARGET_SIZE_DP.dp
         val availableY = (screenHeight - size - margin * 2).coerceAtLeast(0)
         val savedY = positionPreferences.getFloat("y_fraction", 0.5f).coerceIn(0f, 1f)
         val right = positionPreferences.getBoolean("right_side", true)
@@ -709,7 +794,8 @@ class HermesOverlayService : Service() {
     private val Int.dp: Int get() = (this * resources.displayMetrics.density).toInt()
 
     companion object {
-        private const val CHIP_SIZE_DP = 44
+        private const val CHIP_VISUAL_SIZE_DP = 44
+        private const val CHIP_TOUCH_TARGET_SIZE_DP = 48
         private const val OVERLAY_MARGIN_DP = 12
         private const val PANEL_GAP_DP = 8
         private const val DISMISS_TARGET_SIZE_DP = 60
@@ -796,9 +882,30 @@ private data class OverlaySession(
     val latestStatus: String? = null,
     val attention: AttentionItem? = null,
 )
+
+private data class OverlayPanelRow(
+    val title: TextView,
+    val status: TextView,
+    val state: TextView,
+)
+
 private data class LocalRunHint(val hostId: String, val sessionId: String, val runId: String, val title: String)
 
 internal data class OverlayPoint(val x: Int, val y: Int)
+
+internal class OverlayAnimationCommitGuard {
+    private var cancelled = false
+
+    fun cancel() {
+        cancelled = true
+    }
+
+    fun commitIfActive(commit: () -> Unit): Boolean {
+        if (cancelled) return false
+        commit()
+        return true
+    }
+}
 
 internal data class OverlayFetchResult<T>(val items: List<T>, val failed: Boolean)
 
