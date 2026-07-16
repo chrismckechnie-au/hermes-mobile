@@ -351,13 +351,11 @@ class HermesViewModelTest {
     }
 
     @Test
-    fun `first run host picker can be dismissed`() = runVmTest {
+    fun `host picker can close without saved hosts`() = runVmTest {
         val (viewModel, _) = buildViewModel(store = FakeHostStore(HostSnapshot()))
 
         assertTrue(viewModel.state.value.showHostPicker)
-
         viewModel.hideHostPicker()
-
         assertFalse(viewModel.state.value.showHostPicker)
     }
 
