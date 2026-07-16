@@ -75,12 +75,12 @@ class HermesPalette(
     val Body = TextStyle(fontSize = 13.sp, lineHeight = 19.sp, color = TextSoft)
     val BodyMuted = TextStyle(fontSize = 12.sp, lineHeight = 18.sp, color = Muted)
     val Label = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
-    val Micro = TextStyle(fontSize = 9.sp, letterSpacing = 1.2.sp, color = Muted)
-    val MicroBold = TextStyle(fontSize = 9.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp, color = AccentText)
+    val Micro = TextStyle(fontSize = 10.sp, lineHeight = 14.sp, letterSpacing = 1.05.sp, color = Muted)
+    val MicroBold = TextStyle(fontSize = 10.sp, lineHeight = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.7.sp, color = AccentText)
     val Action = TextStyle(fontSize = 12.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold, color = AccentText)
     val Status = TextStyle(fontSize = 11.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold, color = TextSoft)
     val MonoBody = TextStyle(fontFamily = Mono, fontSize = 11.sp, color = Muted)
-    val MonoSmall = TextStyle(fontFamily = Mono, fontSize = 9.sp, color = Muted)
+    val MonoSmall = TextStyle(fontFamily = Mono, fontSize = 10.sp, lineHeight = 14.sp, color = Muted)
 
     // Shapes — iOS-like continuous rounding
     val RadiusSmall = 8.dp
@@ -182,7 +182,7 @@ val HermesLight = HermesPalette(
     CreamSoft = Color(0xFF0057B8),
     CreamDim = Color(0xFF2F7CD6),
     OnAccent = Color(0xFFFFFFFF),
-    Ok = Color(0xFF248A3D),
+    Ok = Color(0xFF217C37),
     TextPrimary = Color(0xFF000000),
     TextSoft = Color(0xFF1C1C1E),
     Muted = Color(0xFF6D6D72),
@@ -192,7 +192,7 @@ val HermesLight = HermesPalette(
     Warn = Color(0xFFC93400), // darkened system orange for text contrast on white
     Error = Color(0xFFC62828),
     ErrorSoft = Color(0xFF99271D),
-    Tool = Color(0xFF248A3D), // darkened system green for text contrast
+    Tool = Color(0xFF217C37),
     WarmGlow = Color(0x00000000),
     GrainAlpha = 0f,
     Scrim = Color(0x66000000),
@@ -206,7 +206,7 @@ val HermesLight = HermesPalette(
         onSecondary = Color(0xFFFFFFFF),
         secondaryContainer = Color(0xFFE5E5EA),
         onSecondaryContainer = Color(0xFF1C1C1E),
-        tertiary = Color(0xFF248A3D),
+        tertiary = Color(0xFF217C37),
         onTertiary = Color(0xFFFFFFFF),
         tertiaryContainer = Color(0xFFD3F2DC),
         onTertiaryContainer = Color(0xFF0E3D1D),

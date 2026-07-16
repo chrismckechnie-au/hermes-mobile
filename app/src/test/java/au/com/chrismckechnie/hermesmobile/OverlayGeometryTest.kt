@@ -81,6 +81,26 @@ class OverlayGeometryTest {
     }
 
     @Test
+    fun `cancelled overlay settle cannot commit its stale target`() {
+        val guard = OverlayAnimationCommitGuard()
+        var committed = false
+
+        guard.cancel()
+
+        assertFalse(guard.commitIfActive { committed = true })
+        assertFalse(committed)
+    }
+
+    @Test
+    fun `active overlay settle commits its target`() {
+        val guard = OverlayAnimationCommitGuard()
+        var committed = false
+
+        assertTrue(guard.commitIfActive { committed = true })
+        assertTrue(committed)
+    }
+
+    @Test
     fun `panel anchors below the icon and follows it`() {
         val first = anchoredPanelPosition(
             chipX = 12,
