@@ -61,7 +61,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Validate Gradle wrapper
-        uses: gradle/actions/wrapper-validation@v4
+        uses: gradle/actions/wrapper-validation@v6
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -70,7 +70,7 @@ jobs:
           java-version: "17"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Materialize release configuration
         shell: bash
