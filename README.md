@@ -123,13 +123,12 @@ Push delivery is opt-in per saved host under **Settings → Notifications**. The
 same section enables the optional Android draw-over-other-apps session overlay.
 Notifications contain status and the session title only; prompts, responses,
 tool output, commands, and credentials are never included in FCM payloads.
-Runs started in Hermes Mobile also show an ongoing local work notification;
-this does not require Firebase. The overlay is seeded from the local run and
+Hermes Mobile posts notifications when work needs attention or reaches an
+outcome instead of keeping a separate ongoing work notification. The overlay
+is seeded from the local run and
 then reconciled against `/v1/active-sessions`, avoiding first-poll races. The
-overlay contains responsive active work only, so completed, stalled, and
-unresponsive sessions cannot linger there; terminal outcomes remain available
-through Android notifications. Approval requests remain visible while their
-session is active.
+overlay contains active work plus unread approval, completion, and failure
+flags. Opening the related session clears its unread state.
 
 Dictation uses the Android device's installed speech recognizer. Its privacy
 and network behavior are controlled by that provider; some recognizers send
@@ -163,6 +162,8 @@ Without `google-services.json`, remote device registration and push delivery
 remain inactive. Local working status still functions. Notification, Bubble,
 and overlay permissions remain user-controlled. The overlay only runs as a
 visible foreground service while opted-in hosts report active sessions.
+Android requires a quiet foreground-service notification while the optional
+floating overlay is active; disabling the overlay removes that system entry.
 
 ## Permissions and transport security
 

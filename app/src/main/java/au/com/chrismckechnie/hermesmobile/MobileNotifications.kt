@@ -524,7 +524,6 @@ class HermesNotificationCoordinator(private val context: Context) {
             )
         }
         if (notificationLane(event) == NotificationLane.Active) {
-            postPhoneInitiatedActive(event)
             return
         }
 
@@ -625,47 +624,6 @@ class HermesNotificationCoordinator(private val context: Context) {
         }
     }
 
-    private fun postPhoneInitiatedActive(event: MobilePushEvent) {
-        if (Build.VERSION.SDK_INT >= 33 && ActivityCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) != PackageManager.PERMISSION_GRANTED
-        ) return
-        val runId = event.runId ?: return
-        if (settings.loadRunCheckpoints().none { it.runId == runId && it.hostId == event.hostProfileId }) return
-        val open = sessionIntent(context, event.hostProfileId, event.sessionId).apply {
-            data = notificationUri("active", event.hostProfileId, event.sessionId, runId)
-        }
-        val content = PendingIntent.getActivity(
-            context,
-            mobileNotificationId(event.hostProfileId, event.sessionId, runId),
-            open,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val copy = mobileNotificationCopy(event)
-        val builder = NotificationCompat.Builder(context, ACTIVE_CHANNEL)
-            .setSmallIcon(R.drawable.ic_hermes_working)
-            .setContentTitle(event.title)
-            .setContentText(copy.text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(copy.text))
-            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setSilent(true)
-            .setProgress(event.tasksTotal.coerceAtLeast(0), event.tasksCompleted.coerceAtLeast(0), event.tasksTotal <= 0)
-            .setContentIntent(content)
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-            .setPublicVersion(publicNotification("Hermes is working"))
-            .addAction(0, "Stop", activityActionPendingIntent(ACTION_STOP, event))
-        if (Build.VERSION.SDK_INT >= 36) builder.setRequestPromotedOngoing(true)
-        notificationManager.notify(
-            mobileNotificationTag(event, NotificationLane.Active),
-            mobileNotificationId(event.hostProfileId, event.sessionId, runId),
-            builder.build(),
-        )
-    }
-
     private fun record(event: MobilePushEvent): ActivityEntry {
         if (event.isTerminal) {
             settings.saveAttentionItems(
@@ -703,26 +661,18 @@ class HermesNotificationCoordinator(private val context: Context) {
             ) != PackageManager.PERMISSION_GRANTED
         ) return
         val all = settings.loadAttentionItems()
-        val latestByRun = all.groupBy { Triple(it.hostId, it.sessionId, it.runId) }
-            .values.mapNotNull { entries -> entries.maxByOrNull(ActivityEntry::updatedAtMillis) }
-        val active = latestByRun.filter(ActivityEntry::isActive)
         val unread = all.filter { it.requiresAttention && !it.read }
-        if (active.isEmpty() && unread.isEmpty()) {
+        if (unread.isEmpty()) {
             notificationManager.cancel(GROUP_SUMMARY_ID)
             return
         }
         val lines = buildList {
-            active.take(5).forEach { add("${it.title} · ${it.latestStatus ?: "Working"}") }
-            unread.take((5 - size).coerceAtLeast(0)).forEach { add("${it.title} · ${attentionLabel(it.state)}") }
+            unread.take(5).forEach { add("${it.title} · ${attentionLabel(it.state)}") }
         }
-        val title = when {
-            unread.isNotEmpty() -> "${unread.size} Hermes update${if (unread.size == 1) "" else "s"} to review"
-            active.size == 1 -> "Hermes is working"
-            else -> "Hermes is working on ${active.size} sessions"
-        }
+        val title = "${unread.size} Hermes update${if (unread.size == 1) "" else "s"} to review"
         val style = NotificationCompat.InboxStyle().setBigContentTitle(title)
         lines.forEach(style::addLine)
-        val target = active.firstOrNull() ?: unread.first()
+        val target = unread.first()
         val openIntent = sessionIntent(context, target.hostId, target.sessionId).apply {
             data = notificationUri("summary", target.hostId, target.sessionId, target.runId)
         }
@@ -732,36 +682,23 @@ class HermesNotificationCoordinator(private val context: Context) {
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val builder = NotificationCompat.Builder(context, ACTIVE_CHANNEL)
+        val builder = NotificationCompat.Builder(context, RESULTS_CHANNEL)
             .setSmallIcon(R.drawable.ic_hermes_working)
             .setContentTitle(title)
             .setContentText(lines.firstOrNull() ?: "Open Hermes Mobile")
             .setStyle(style)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setOngoing(active.isNotEmpty())
+            .setOngoing(false)
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setGroup(NOTIFICATION_GROUP)
             .setGroupSummary(true)
             .setContentIntent(pending)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-            .setPublicVersion(publicNotification(if (active.isNotEmpty()) "Hermes is working" else "Hermes has an update"))
-        active.singleOrNull()?.takeIf { it.runId != null }?.let { item ->
-            builder.addAction(0, "Stop", activityActionPendingIntent(ACTION_STOP, item.asPushEvent(active.size)))
-        }
+            .setPublicVersion(publicNotification("Hermes has an update"))
         notificationManager.notify(GROUP_SUMMARY_ID, builder.build())
     }
-
-    private fun ActivityEntry.asPushEvent(activeCount: Int) = MobilePushEvent(
-        event = event,
-        hostProfileId = hostId,
-        sessionId = sessionId,
-        runId = runId,
-        title = title,
-        state = state,
-        activeCount = activeCount,
-    )
 
     private fun publicNotification(title: String) = NotificationCompat.Builder(context, ACTIVE_CHANNEL)
         .setSmallIcon(R.drawable.ic_hermes_notification)
@@ -862,7 +799,7 @@ class HermesNotificationCoordinator(private val context: Context) {
         const val ACTIVE_CHANNEL = "hermes_active_work_v2"
         const val ACTION_CHANNEL = "hermes_action_needed_v2"
         const val RESULTS_CHANNEL = "hermes_results_v2"
-        const val OVERLAY_SERVICE_CHANNEL = "hermes_overlay_service_v2"
+        const val OVERLAY_SERVICE_CHANNEL = "hermes_overlay_service_v3"
         const val GROUP_SUMMARY_ID = 9043
         const val OVERLAY_SERVICE_NOTIFICATION_ID = 9044
         const val NOTIFICATION_GROUP = "hermes_session_updates"
@@ -1012,6 +949,7 @@ internal enum class NotificationLane { Active, Action, Result }
 internal fun notificationLane(event: MobilePushEvent): NotificationLane = when (event.event) {
     "approval.required", "session.failed", "job.failed" -> NotificationLane.Action
     "session.completed", "session.cancelled", "job.completed" -> NotificationLane.Result
+    "notification.test" -> NotificationLane.Result
     else -> NotificationLane.Active
 }
 
@@ -1021,6 +959,7 @@ internal fun mobileNotificationCopy(event: MobilePushEvent): MobileNotificationC
         "session.failed", "job.failed" -> "Hermes hit an issue"
         "session.cancelled" -> "Hermes stopped"
         "session.completed", "job.completed" -> "Hermes finished"
+        "notification.test" -> "Hermes notifications are working"
         else -> "Hermes is working"
     },
     text = buildList {
@@ -1031,9 +970,9 @@ internal fun mobileNotificationCopy(event: MobilePushEvent): MobileNotificationC
     }.joinToString(" · "),
     category = when {
         event.event == "approval.required" -> NotificationCompat.CATEGORY_MESSAGE
-        event.isTerminal -> NotificationCompat.CATEGORY_STATUS
+        event.isTerminal || event.event == "notification.test" -> NotificationCompat.CATEGORY_STATUS
         else -> NotificationCompat.CATEGORY_PROGRESS
     },
-    ongoing = !event.isTerminal,
+    ongoing = !event.isTerminal && event.event != "notification.test",
     silent = notificationLane(event) == NotificationLane.Active,
 )

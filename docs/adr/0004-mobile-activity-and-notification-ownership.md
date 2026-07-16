@@ -14,8 +14,10 @@ of detailed live events.
 
 Push events are stored in one bounded activity history (100 entries, seven
 days), deduplicated by host/session/run/event identity, and separated into
-active, action-needed, and result notification channels. Notification and
-PendingIntent identifiers include the host, session, and run to prevent
+active, action-needed, and result lanes. Active updates remain in Activity
+Center and the optional overlay without posting a separate persistent work
+notification; approvals and terminal outcomes create notifications.
+Notification and PendingIntent identifiers include the host, session, and run to prevent
 cross-host collisions. Payload text is bounded and never contains prompts,
 tool arguments/output, credentials, file paths, or private reasoning.
 
