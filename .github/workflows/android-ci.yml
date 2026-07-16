@@ -38,7 +38,7 @@ jobs:
 
       - name: Upload debug APK and lint report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hermes-mobile-debug-${{ github.run_number }}
           if-no-files-found: warn
