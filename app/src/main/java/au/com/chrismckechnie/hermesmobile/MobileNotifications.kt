@@ -29,6 +29,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkRequest
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.google.android.gms.tasks.Task
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
@@ -416,16 +417,7 @@ object MobileRegistration {
     private suspend fun awaitMessagingToken(): String = suspendCancellableCoroutine { continuation ->
         FirebaseMessaging.getInstance().token.addOnCompleteListener { installation ->
             if (!continuation.isActive) return@addOnCompleteListener
-            val token = installation.result?.trim().orEmpty()
-            if (installation.isSuccessful && token.isNotEmpty()) {
-                continuation.resume(token)
-            } else {
-                continuation.resumeWith(
-                    Result.failure(
-                        installation.exception ?: IllegalStateException("Firebase did not return a messaging token."),
-                    ),
-                )
-            }
+            continuation.resumeWith(installation.messagingTokenResult())
         }
     }
 
@@ -433,6 +425,14 @@ object MobileRegistration {
     private const val WORK_NAME = "hermes-mobile-registration"
     private const val WORK_TAG = "mobile-registration"
     private const val TAG = "MobileRegistration"
+}
+
+internal fun Task<String>.messagingTokenResult(): Result<String> {
+    if (!isSuccessful) {
+        return Result.failure(exception ?: IllegalStateException("Firebase messaging token request failed."))
+    }
+    return result?.trim()?.takeIf(String::isNotEmpty)?.let(Result.Companion::success)
+        ?: Result.failure(IllegalStateException("Firebase did not return a messaging token."))
 }
 
 class MobileRegistrationWorker(
