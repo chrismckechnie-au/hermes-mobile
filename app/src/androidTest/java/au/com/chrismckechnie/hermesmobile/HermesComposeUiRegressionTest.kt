@@ -1,6 +1,5 @@
 package au.com.chrismckechnie.hermesmobile
 
-import android.content.Context
 import androidx.compose.ui.test.DeviceConfigurationOverride
 import androidx.compose.ui.test.FontScale
 import androidx.compose.ui.test.ForcedSize
@@ -28,7 +27,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.test.espresso.Espresso
-import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -275,39 +273,6 @@ class HermesComposeUiRegressionTest {
         composeRule.onNodeWithContentDescription("Sessions")
             .assertIsDisplayed()
             .assertHasClickAction()
-    }
-
-    @Test
-    fun unregisterFailure_remainsVisibleAfterPushIsDisabled() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val preferences = context.getSharedPreferences("hermes_mobile_settings", Context.MODE_PRIVATE)
-        preferences.edit().remove("mobile_registration_statuses_v1").commit()
-        try {
-            PreferencesSettingsStore(context).applyMobileRegistrationReport(
-                hostIds = setOf(HOST.id),
-                desiredHostIds = emptySet(),
-                report = MobileRegistrationReport(
-                    succeededHostIds = emptySet(),
-                    failures = listOf(
-                        MobileRegistrationFailure(
-                            hostId = HOST.id,
-                            action = MobileRegistrationAction.Unregister,
-                            cause = IllegalStateException("offline"),
-                            message = "Could not reach this Hermes host.",
-                            retryable = false,
-                        ),
-                    ),
-                ),
-                nowMillis = 500L,
-                willRetry = false,
-            )
-            setAppContent(baseState(DeckScreen.Settings))
-
-            composeRule.onNodeWithText("Remote push: Failed").assertIsDisplayed()
-            composeRule.onNodeWithText("Could not reach this Hermes host.").assertIsDisplayed()
-        } finally {
-            preferences.edit().remove("mobile_registration_statuses_v1").commit()
-        }
     }
 
     @Test

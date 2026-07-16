@@ -202,7 +202,6 @@ internal fun markMobileRegistrationsPending(
         previous.copy(
             desired = hostId in desiredHostIds,
             pending = true,
-            errorMessage = null,
         )
     }
 }

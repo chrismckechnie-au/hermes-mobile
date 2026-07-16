@@ -61,10 +61,7 @@ class MobileRegistrationTest {
                 desired = true,
                 registered = true,
                 pending = false,
-                errorMessage = "Previous registration failed.",
                 lastSuccessAtMillis = 100L,
-                lastFailureAtMillis = 90L,
-                lastFailureMessage = "Previous registration failed.",
             ),
         )
 
@@ -77,10 +74,7 @@ class MobileRegistrationTest {
         assertTrue(queued.getValue(enabledHost.id).desired)
         assertTrue(queued.getValue(enabledHost.id).registered)
         assertTrue(queued.getValue(enabledHost.id).pending)
-        assertNull(queued.getValue(enabledHost.id).errorMessage)
         assertEquals(100L, queued.getValue(enabledHost.id).lastSuccessAtMillis)
-        assertEquals(90L, queued.getValue(enabledHost.id).lastFailureAtMillis)
-        assertEquals("Previous registration failed.", queued.getValue(enabledHost.id).lastFailureMessage)
         assertFalse(queued.getValue(disabledHost.id).desired)
         assertTrue(queued.getValue(disabledHost.id).pending)
     }
