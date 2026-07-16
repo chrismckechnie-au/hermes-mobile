@@ -809,6 +809,11 @@ class HermesOverlayService : Service() {
         @Volatile private var serviceRunning = false
 
         fun startForRun(context: Context, run: ActiveRun) {
+            if (!shouldStartOverlayService(
+                    PreferencesSettingsStore(context).loadOverlayEnabled(),
+                    Settings.canDrawOverlays(context),
+                )
+            ) return
             val intent = Intent(context, HermesOverlayService::class.java).apply {
                 putExtra(HermesNotificationCoordinator.EXTRA_HOST_ID, run.host.id)
                 putExtra(HermesNotificationCoordinator.EXTRA_SESSION_ID, run.sessionId)
@@ -838,11 +843,15 @@ class HermesOverlayService : Service() {
 
         fun onPush(context: Context, event: MobilePushEvent) {
             if (event.activeCount == 0 && event.isTerminal && !event.requiresAttention) return
-            startForegroundServiceSafely(context, Intent(context, HermesOverlayService::class.java))
+            startIfAllowed(context)
         }
 
         fun startIfAllowed(context: Context) {
-            if (!Settings.canDrawOverlays(context)) return
+            if (!shouldStartOverlayService(
+                    PreferencesSettingsStore(context).loadOverlayEnabled(),
+                    Settings.canDrawOverlays(context),
+                )
+            ) return
             startForegroundServiceSafely(context, Intent(context, HermesOverlayService::class.java))
         }
 

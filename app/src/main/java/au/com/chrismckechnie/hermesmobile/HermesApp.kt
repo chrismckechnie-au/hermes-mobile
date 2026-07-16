@@ -50,6 +50,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -702,10 +703,11 @@ private fun LiveWorkPills(
     onShowTasks: () -> Unit,
     onShowSubagents: () -> Unit,
     onShowWorkspace: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     if (tasks.isEmpty() && subagents.isEmpty() && workspaceUpdate?.files.isNullOrEmpty()) return
     FlowRow(
-        modifier = Modifier.fillMaxWidth()
+        modifier = modifier.wrapContentWidth()
             .padding(start = 16.dp, end = 16.dp, bottom = 5.dp),
         horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally),
         verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -795,18 +797,24 @@ private fun WorkspaceDiffSheet(update: HermesWorkspaceUpdate, onDismiss: () -> U
                         .padding(12.dp),
                 ) {
                     Text(file.path, style = T.Label)
-                    val totals = listOfNotNull(
-                        file.additions?.let { "+$it" },
-                        file.deletions?.let { "-$it" },
-                    ).joinToString(" · ")
                     Text(
-                        file.status.replace('_', ' ') + totals.takeIf(String::isNotBlank)?.let { " · $it" }.orEmpty(),
+                        buildAnnotatedString {
+                            append(file.status.replace('_', ' '))
+                            file.additions?.let {
+                                append(" · ")
+                                withStyle(SpanStyle(color = T.Ok)) { append("+$it") }
+                            }
+                            file.deletions?.let {
+                                append(" · ")
+                                withStyle(SpanStyle(color = T.Error)) { append("-$it") }
+                            }
+                        },
                         style = T.Micro.copy(color = T.Muted),
                         modifier = Modifier.padding(top = 3.dp),
                     )
                     file.diff?.takeIf(String::isNotBlank)?.let { diff ->
                         Text(
-                            diff,
+                            colorWorkspaceDiff(diff, T.Ok, T.Error, T.TextSoft),
                             style = T.BodyMuted.copy(fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp),
                             modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
                                 .horizontalScroll(rememberScrollState()),
@@ -815,6 +823,24 @@ private fun WorkspaceDiffSheet(update: HermesWorkspaceUpdate, onDismiss: () -> U
                 }
             }
         }
+    }
+}
+
+internal fun colorWorkspaceDiff(
+    diff: String,
+    additionColor: Color,
+    deletionColor: Color,
+    contextColor: Color,
+): AnnotatedString = buildAnnotatedString {
+    val lines = diff.lines()
+    lines.forEachIndexed { index, line ->
+        val color = when {
+            line.startsWith("+") && !line.startsWith("+++") -> additionColor
+            line.startsWith("-") && !line.startsWith("---") -> deletionColor
+            else -> contextColor
+        }
+        withStyle(SpanStyle(color = color)) { append(line) }
+        if (index < lines.lastIndex) append('\n')
     }
 }
 
@@ -2350,6 +2376,7 @@ private fun Composer(
             onShowTasks = onShowTasks,
             onShowSubagents = onShowSubagents,
             onShowWorkspace = onShowWorkspace,
+            modifier = Modifier.align(Alignment.CenterHorizontally),
         )
         state.queuedInterrupt?.takeIf(QueuedInterrupt::requiresAcknowledgement)?.let { queued ->
             Column(
