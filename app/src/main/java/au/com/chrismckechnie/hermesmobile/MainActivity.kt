@@ -111,9 +111,9 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(state.monitoredHostIds, state.overlayEnabled, state.activeRuns.keys) {
                 configureMobileBackground(state)
             }
-            LaunchedEffect(state.notificationHostIds, state.monitoredHostIds, permissionHealth.notifications) {
+            LaunchedEffect(state.notificationHostIds, permissionHealth.notifications) {
                 maybeAutomaticallyRequestNotificationPermission(
-                    hasNotificationSubscriptions = state.notificationHostIds.isNotEmpty() || state.monitoredHostIds.isNotEmpty()
+                    hasNotificationSubscriptions = state.notificationHostIds.isNotEmpty()
                 )
             }
             LaunchedEffect(state.hosts.map(HostProfile::id), state.notificationHostIds, state.overlayEnabled) {
@@ -165,12 +165,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun configureMobileBackground(state: HermesUiState) {
-        val monitoredRuns = state.activeRuns.values.filter { it.host.id in state.monitoredHostIds }
-        when {
-            monitoredRuns.isNotEmpty() -> HermesOverlayService.startForRuns(applicationContext, monitoredRuns)
-            state.overlayEnabled -> HermesOverlayService.startIfAllowed(applicationContext)
-            else -> HermesOverlayService.stop(applicationContext)
+        if (!shouldStartOverlayService(state.overlayEnabled, Settings.canDrawOverlays(this))) {
+            HermesOverlayService.stop(applicationContext)
+            return
         }
+        val monitoredRuns = state.activeRuns.values.filter { it.host.id in state.monitoredHostIds }
+        if (monitoredRuns.isNotEmpty()) HermesOverlayService.startForRuns(applicationContext, monitoredRuns)
+        else HermesOverlayService.startIfAllowed(applicationContext)
     }
 
     private fun refreshPermissionHealth() {
@@ -263,6 +264,9 @@ class MainActivity : ComponentActivity() {
         const val KEY_NOTIFICATION_AUTO_REQUESTED = "notification_auto_requested"
     }
 }
+
+internal fun shouldStartOverlayService(overlayEnabled: Boolean, canDrawOverlays: Boolean): Boolean =
+    overlayEnabled && canDrawOverlays
 
 internal fun Context.clearCrashProneRuntimeState() {
     HermesOverlayService.stop(this)

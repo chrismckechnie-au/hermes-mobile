@@ -1,12 +1,35 @@
 package au.com.chrismckechnie.hermesmobile
 
 import androidx.core.app.NotificationCompat
+import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WorkSurfaceCopyTest {
+    @Test
+    fun `active work monitoring does not start the foreground service without the overlay`() {
+        assertFalse(shouldStartOverlayService(overlayEnabled = false, canDrawOverlays = true))
+        assertFalse(shouldStartOverlayService(overlayEnabled = true, canDrawOverlays = false))
+        assertTrue(shouldStartOverlayService(overlayEnabled = true, canDrawOverlays = true))
+    }
+
+    @Test
+    fun `workspace diff colours additions and deletions without colouring headers`() {
+        val diff = colorWorkspaceDiff(
+            "--- a/File.kt\n+++ b/File.kt\n-old\n+new\n unchanged",
+            Color.Green,
+            Color.Red,
+            Color.Gray,
+        )
+
+        assertEquals(
+            listOf(Color.Gray, Color.Gray, Color.Red, Color.Green, Color.Gray),
+            diff.spanStyles.map { it.item.color },
+        )
+    }
+
     @Test
     fun `active work copy stays compact and summarizes additional sessions`() {
         val sessions = listOf(
