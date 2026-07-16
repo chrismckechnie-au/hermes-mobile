@@ -558,14 +558,39 @@ class HermesNotificationCoordinator(private val context: Context) {
 
     private fun publishShortcut(event: MobilePushEvent) {
         if (Build.VERSION.SDK_INT < 29) return
-        val shortcut = ShortcutInfo.Builder(context, shortcutId(event))
-            .setShortLabel(event.title.take(40))
-            .setLongLived(true)
-            .setPerson(Person.Builder().setName("Hermes").setKey("hermes-agent").build())
-            .setIcon(Icon.createWithResource(context, R.drawable.hermes_official))
-            .setIntent(sessionIntent(context, event.hostProfileId, event.sessionId))
-            .build()
-        context.getSystemService(ShortcutManager::class.java).addDynamicShortcuts(listOf(shortcut))
+        publishShortcutSafely(
+            update = {
+                val shortcut = ShortcutInfo.Builder(context, shortcutId(event))
+                    .setShortLabel(event.title.take(40))
+                    .setLongLived(true)
+                    .setPerson(Person.Builder().setName("Hermes").setKey("hermes-agent").build())
+                    .setIcon(Icon.createWithResource(context, R.drawable.hermes_official))
+                    .setIntent(sessionIntent(context, event.hostProfileId, event.sessionId))
+                    .build()
+                val shortcutManager = context.getSystemService(ShortcutManager::class.java)
+                publishDynamicShortcut(
+                    sdkInt = Build.VERSION.SDK_INT,
+                    incomingId = shortcut.id,
+                    maxCount = shortcutManager.maxShortcutCountPerActivity,
+                    existing = shortcutManager.dynamicShortcuts.map {
+                        DynamicShortcutSlot(it.id, it.lastChangedTimestamp)
+                    },
+                    rateLimitingActive = shortcutManager.isRateLimitingActive,
+                    push = if (Build.VERSION.SDK_INT >= 30) {
+                        { shortcutManager.pushDynamicShortcut(shortcut) }
+                    } else {
+                        {}
+                    },
+                    remove = shortcutManager::removeDynamicShortcuts,
+                    add = { shortcutManager.addDynamicShortcuts(listOf(shortcut)) },
+                )
+            },
+            onFailure = { error ->
+                runCatching {
+                    AppDiagnosticsRegistry.recorder.recordFailure(DiagnosticPhase.NotificationShortcut, error)
+                }
+            },
+        )
     }
 
     private fun shortcutId(event: MobilePushEvent) = "hermes-${event.hostProfileId}-${event.sessionId}".take(120)
@@ -594,6 +619,52 @@ class HermesNotificationCoordinator(private val context: Context) {
             putExtra(EXTRA_SCREEN, "jobs")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
+    }
+}
+
+internal data class DynamicShortcutSlot(
+    val id: String,
+    val lastChangedAt: Long,
+)
+
+internal fun shortcutIdsToRemoveForCapacity(
+    existing: List<DynamicShortcutSlot>,
+    incomingId: String,
+    maxCount: Int,
+): List<String> {
+    if (maxCount <= 0 || existing.any { it.id == incomingId }) return emptyList()
+    val required = (existing.size - maxCount + 1).coerceAtLeast(0)
+    return existing.sortedBy(DynamicShortcutSlot::lastChangedAt).take(required).map(DynamicShortcutSlot::id)
+}
+
+internal fun publishDynamicShortcut(
+    sdkInt: Int,
+    incomingId: String,
+    maxCount: Int,
+    existing: List<DynamicShortcutSlot>,
+    rateLimitingActive: Boolean,
+    push: () -> Unit,
+    remove: (List<String>) -> Unit,
+    add: () -> Boolean,
+) {
+    if (sdkInt >= 30) {
+        push()
+        return
+    }
+    if (maxCount <= 0 || rateLimitingActive) return
+    val removals = shortcutIdsToRemoveForCapacity(existing, incomingId, maxCount)
+    if (removals.isNotEmpty()) remove(removals)
+    add()
+}
+
+internal fun publishShortcutSafely(
+    update: () -> Unit,
+    onFailure: (RuntimeException) -> Unit,
+) {
+    try {
+        update()
+    } catch (error: RuntimeException) {
+        onFailure(error)
     }
 }
 

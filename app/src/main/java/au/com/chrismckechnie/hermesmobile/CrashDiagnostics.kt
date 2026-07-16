@@ -19,6 +19,7 @@ enum class DiagnosticPhase(val value: String) {
     RunAccepted("run_accepted"),
     RunStream("run_stream"),
     RunTerminal("run_terminal"),
+    NotificationShortcut("notification_shortcut"),
     OverlayPromote("overlay_promote"),
     OverlayRefresh("overlay_refresh"),
 }
