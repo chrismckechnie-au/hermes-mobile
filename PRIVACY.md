@@ -10,6 +10,7 @@ Hermes Mobile is an independent Android client for connecting to a Hermes Agent 
 - **Hermes content:** prompts, responses, session titles, tool activity, approval requests, job information, and run status returned by the selected host.
 - **App state:** settings, notification and overlay choices, installation identifier, active-run recovery coordinates, and UI state needed to restore the app.
 - **Push data, when enabled:** a Firebase Cloud Messaging registration token is registered directly with opted-in Hermes hosts. Notification payloads are limited to session identity/title and status metadata; prompts, responses, tool output, commands, and API credentials are not included.
+- **Crash diagnostics, when enabled:** automatic Firebase Crashlytics crash and ANR reports, plus app-provided lifecycle phases, message-length buckets, active-run counts, and sanitized failure categories. Automatic reports can include uncaught exception, stack trace, device, operating-system, memory, and app-state metadata supplied by Android. Hermes Mobile does not intentionally add host URLs, API keys, session IDs, prompts, responses, or transcript content to its custom Crashlytics keys and logs.
 
 API keys are encrypted on the device with Android Keystore-backed AES-GCM. Other app settings are stored in Android app-private storage. Android backup is disabled. Hermes content remains on the configured host unless it is temporarily held in memory or app-private state for display and recovery.
 
@@ -17,7 +18,7 @@ API keys are encrypted on the device with Android Keystore-backed AES-GCM. Other
 
 Hermes Mobile sends authenticated requests only to hosts the user configures. The operator of each host controls its storage, logging, model providers, tools, plugins, and retention policies.
 
-When a build includes Firebase and remote notifications are enabled, Google Firebase processes the app installation and messaging token and may receive standard service metadata such as device, app, and delivery information. The configured Hermes host receives the token so it can address notifications. See [Google's Firebase privacy and security information](https://firebase.google.com/support/privacy).
+When a build includes Firebase and remote notifications are enabled, Google Firebase processes the app installation and messaging token and may receive standard service metadata such as device, app, and delivery information. The configured Hermes host receives the token so it can address notifications. Crash reporting is separately off by default; when the user enables it under **Settings > Diagnostics**, Google Firebase processes the crash and ANR diagnostics described above. Disabling crash reporting stops collection and requests deletion of unsent reports on the device. See [Google's Firebase privacy and security information](https://firebase.google.com/support/privacy).
 
 Dictation is performed by the speech recognition provider installed or selected on the device. That provider may process audio remotely under its own privacy terms. Hermes Mobile receives only the recognition result.
 

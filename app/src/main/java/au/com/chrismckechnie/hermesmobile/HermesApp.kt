@@ -3,6 +3,7 @@ package au.com.chrismckechnie.hermesmobile
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -165,8 +166,10 @@ import com.composables.icons.lucide.Wifi
 import com.composables.icons.lucide.X
 import com.composables.icons.lucide.Zap
 import com.google.firebase.FirebaseApp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val T: HermesPalette
     @Composable get() = LocalHermes.current
@@ -401,13 +404,10 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
     val workspaceUpdate = state.activeSessionKey?.let(state.workspaceUpdates::get)
         ?: state.activeRun?.workspaceUpdate
         ?: durableTurn?.workspaceUpdate
-    val transcript = remember(activeSession?.id, displayedMessages) {
-        activeSession?.let { session ->
-            formatSessionTranscript(session.title, displayedMessages)
-                .takeIf { displayedMessages.any { item ->
-                    item is ChatUiItem.User && item.text.isNotBlank() ||
-                        item is ChatUiItem.Assistant && item.text.isNotBlank()
-                } }
+    val canShareTranscript = remember(displayedMessages) {
+        displayedMessages.any { item ->
+            item is ChatUiItem.User && item.text.isNotBlank() ||
+                item is ChatUiItem.Assistant && item.text.isNotBlank()
         }
     }
     val timelineItems = remember(displayedMessages) { groupChatTimeline(displayedMessages) }
@@ -455,10 +455,19 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     } else Modifier,
                 )
             }
-            if (transcript != null) {
+            if (canShareTranscript && activeSession != null) {
                 Spacer(Modifier.width(4.dp))
                 IconButton(
-                    onClick = { shareTranscript(context, transcript) },
+                    onClick = {
+                        val title = activeSession.title
+                        val messages = displayedMessages
+                        scope.launch {
+                            val transcript = withContext(Dispatchers.Default) {
+                                formatSessionTranscript(title, messages)
+                            }
+                            shareTranscript(context, transcript)
+                        }
+                    },
                     modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard)).background(T.Cream.copy(alpha = 0.07f)),
                 ) { Icon(Lucide.Share2, "Share transcript", tint = T.Cream, modifier = Modifier.size(18.dp)) }
             }
@@ -1960,22 +1969,11 @@ private fun Composer(
     onShowSubagents: () -> Unit,
     onShowWorkspace: () -> Unit,
 ) {
-    val enabled = state.connectionPhase == HostConnectionPhase.Connected &&
-        !state.isSending && state.unknownOutcome == null &&
-        state.queuedInterrupt?.requiresAcknowledgement != true
-    val focusManager = LocalFocusManager.current
-    val context = LocalContext.current
-    val dictationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
-        val dictated = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-            ?.firstOrNull()
-            ?.trim()
-            .orEmpty()
-        if (dictated.isNotBlank()) {
-            viewModel.setComposerText(listOf(state.composerText.trim(), dictated).filter(String::isNotBlank).joinToString(" "))
-        }
-    }
     val suggestions = state.slashSuggestions()
+    val inputState = composerInputState(state)
+    val onTextChanged = remember(viewModel) { viewModel::setComposerText }
+    val onSend = remember(viewModel) { viewModel::sendMessage }
+    val onStop = remember(viewModel) { viewModel::stopActiveRun }
 
     Column(Modifier.fillMaxWidth()) {
         LiveWorkPills(
@@ -2087,100 +2085,7 @@ private fun Composer(
             }
         }
 
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 8.dp)
-                .clip(RoundedCornerShape(T.RadiusSheet)).background(T.SurfaceOne)
-                .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            BasicTextField(
-                value = state.composerText,
-                onValueChange = viewModel::setComposerText,
-                enabled = enabled,
-                textStyle = T.Body.copy(color = T.TextSoft),
-                cursorBrush = SolidColor(T.Cream),
-                modifier = Modifier.weight(1f),
-                maxLines = 4,
-                decorationBox = { inner ->
-                    Box(Modifier.padding(vertical = 6.dp)) {
-                        if (state.composerText.isBlank()) Text(
-                            when {
-                                state.activeHost == null -> "Choose a host to begin"
-                                state.connectionPhase != HostConnectionPhase.Connected -> "Waiting for host…"
-                                state.activeRun != null -> "Type a follow-up…"
-                                else -> "Message Hermes, or / for commands"
-                            },
-                            style = T.Body.copy(color = T.Muted),
-                        )
-                        inner()
-                    }
-                },
-            )
-            Spacer(Modifier.width(7.dp))
-            val activeRun = state.activeRun
-            if (activeRun != null) {
-                val canInterrupt = enabled && state.composerText.isNotBlank()
-                Box(
-                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard))
-                        .background(
-                            when {
-                                activeRun.stopping -> T.Warn.copy(alpha = 0.12f)
-                                canInterrupt -> T.Cream
-                                else -> T.Error.copy(alpha = 0.12f)
-                            },
-                        )
-                        .clickable(enabled = !activeRun.stopping || canInterrupt) {
-                            if (canInterrupt) {
-                                focusManager.clearFocus()
-                                viewModel.sendMessage()
-                            } else {
-                                viewModel.stopActiveRun()
-                            }
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    when {
-                        activeRun.stopping -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Warn)
-                        canInterrupt -> Icon(Lucide.Send, "Choose follow-up action", tint = T.OnAccent, modifier = Modifier.size(19.dp))
-                        else -> Icon(Lucide.Square, "Stop run", tint = T.Error, modifier = Modifier.size(18.dp))
-                    }
-                }
-            } else if (state.isSending) {
-                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Cream)
-                }
-            } else {
-                val dictationIntent = remember(context) {
-                    Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Dictate a message for Hermes")
-                        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                    }
-                }
-                val canDictate = enabled && dictationIntent.resolveActivity(context.packageManager) != null
-                IconButton(onClick = { dictationLauncher.launch(dictationIntent) }, enabled = canDictate) {
-                    Icon(Lucide.Mic, "Dictate message", tint = if (canDictate) T.Muted else T.Muted.copy(alpha = 0.35f), modifier = Modifier.size(19.dp))
-                }
-                val canSend = enabled && state.composerText.isNotBlank()
-                Box(
-                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard))
-                        .background(if (canSend) T.Cream else T.Muted.copy(alpha = 0.12f))
-                        .clickable(enabled = canSend) {
-                            focusManager.clearFocus()
-                            viewModel.sendMessage()
-                        },
-                    contentAlignment = Alignment.Center,
-                ) { Icon(Lucide.Send, "Send", tint = if (canSend) T.OnAccent else T.Muted, modifier = Modifier.size(19.dp)) }
-            }
-        }
-        if (state.composerText.length >= 7_000) {
-            Text(
-                "${state.composerText.length.coerceAtMost(8_000)} / 8,000",
-                style = T.Micro.copy(color = if (state.composerText.length >= 8_000) T.Warn else T.Muted),
-                modifier = Modifier.fillMaxWidth().padding(end = 18.dp, bottom = 4.dp),
-                textAlign = TextAlign.End,
-            )
-        }
+        ComposerInput(inputState, onTextChanged, onSend, onStop)
     }
     state.pendingFollowUpChoice?.let { pending ->
         AlertDialog(
@@ -2211,6 +2116,121 @@ private fun Composer(
                     }
                 }
             },
+        )
+    }
+}
+
+@Composable
+private fun ComposerInput(
+    state: ComposerInputState,
+    onTextChanged: (String) -> Unit,
+    onSend: () -> Unit,
+    onStop: () -> Unit,
+) {
+    val focusManager = LocalFocusManager.current
+    val context = LocalContext.current
+    val dictationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode != Activity.RESULT_OK) return@rememberLauncherForActivityResult
+        val dictated = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            ?.firstOrNull()
+            ?.trim()
+            .orEmpty()
+        if (dictated.isNotBlank()) {
+            onTextChanged(listOf(state.composerText.trim(), dictated).filter(String::isNotBlank).joinToString(" "))
+        }
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 11.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(T.RadiusSheet)).background(T.SurfaceOne)
+            .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BasicTextField(
+            value = state.composerText,
+            onValueChange = onTextChanged,
+            enabled = state.enabled,
+            textStyle = T.Body.copy(color = T.TextSoft),
+            cursorBrush = SolidColor(T.Cream),
+            modifier = Modifier.weight(1f),
+            maxLines = 4,
+            decorationBox = { inner ->
+                Box(Modifier.padding(vertical = 6.dp)) {
+                    if (state.composerText.isBlank()) Text(
+                        when {
+                            !state.hasActiveHost -> "Choose a host to begin"
+                            state.connectionPhase != HostConnectionPhase.Connected -> "Waiting for host…"
+                            state.activeRun != null -> "Type a follow-up…"
+                            else -> "Message Hermes, or / for commands"
+                        },
+                        style = T.Body.copy(color = T.Muted),
+                    )
+                    inner()
+                }
+            },
+        )
+        Spacer(Modifier.width(7.dp))
+        val activeRun = state.activeRun
+        if (activeRun != null) {
+            val canInterrupt = state.enabled && state.composerText.isNotBlank()
+            Box(
+                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard))
+                    .background(
+                        when {
+                            activeRun.stopping -> T.Warn.copy(alpha = 0.12f)
+                            canInterrupt -> T.Cream
+                            else -> T.Error.copy(alpha = 0.12f)
+                        },
+                    )
+                    .clickable(enabled = !activeRun.stopping || canInterrupt) {
+                        if (canInterrupt) {
+                            focusManager.clearFocus()
+                            onSend()
+                        } else {
+                            onStop()
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                when {
+                    activeRun.stopping -> CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Warn)
+                    canInterrupt -> Icon(Lucide.Send, "Choose follow-up action", tint = T.OnAccent, modifier = Modifier.size(19.dp))
+                    else -> Icon(Lucide.Square, "Stop run", tint = T.Error, modifier = Modifier.size(18.dp))
+                }
+            }
+        } else if (state.isSending) {
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp, color = T.Cream)
+            }
+        } else {
+            val dictationIntent = remember(context) {
+                Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Dictate a message for Hermes")
+                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                }
+            }
+            val canDictate = state.enabled && dictationIntent.resolveActivity(context.packageManager) != null
+            IconButton(onClick = { dictationLauncher.launch(dictationIntent) }, enabled = canDictate) {
+                Icon(Lucide.Mic, "Dictate message", tint = if (canDictate) T.Muted else T.Muted.copy(alpha = 0.35f), modifier = Modifier.size(19.dp))
+            }
+            val canSend = state.enabled && state.composerText.isNotBlank()
+            Box(
+                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(T.RadiusCard))
+                    .background(if (canSend) T.Cream else T.Muted.copy(alpha = 0.12f))
+                    .clickable(enabled = canSend) {
+                        focusManager.clearFocus()
+                        onSend()
+                    },
+                contentAlignment = Alignment.Center,
+            ) { Icon(Lucide.Send, "Send", tint = if (canSend) T.OnAccent else T.Muted, modifier = Modifier.size(19.dp)) }
+        }
+    }
+    if (state.composerText.length >= 7_000) {
+        Text(
+            "${state.composerText.length.coerceAtMost(8_000)} / 8,000",
+            style = T.Micro.copy(color = if (state.composerText.length >= 8_000) T.Warn else T.Muted),
+            modifier = Modifier.fillMaxWidth().padding(end = 18.dp, bottom = 4.dp),
+            textAlign = TextAlign.End,
         )
     }
 }
@@ -3079,7 +3099,12 @@ private fun SettingsScreen(
 ) {
     var showLicenses by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
     val firebaseConfigured = remember(context) { FirebaseApp.getApps(context).isNotEmpty() }
+    val previousExit = remember { AppDiagnosticsRegistry.recorder.latestExit() }
+    val appVersion = remember(context) {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty().ifBlank { "Unknown" }
+    }
     val overlayPermissionGranted = permissionHealth.overlay == PermissionStatus.Granted
     // The worker persists these safe registration states independently of the
     // ViewModel. Poll only while this Settings composable is visible so a
@@ -3281,6 +3306,61 @@ private fun SettingsScreen(
                 if (state.overlayEnabled && !overlayPermissionGranted) {
                     TextButton(onClick = onOpenOverlaySettings, modifier = Modifier.heightIn(min = T.ControlMin)) {
                         Text("Grant overlay access", style = T.Action.copy(color = T.Warn))
+                    }
+                }
+            }
+        }
+        Text("DIAGNOSTICS", style = T.Micro, modifier = Modifier.padding(top = 14.dp, bottom = 8.dp))
+        Surface(color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 13.dp, vertical = 5.dp)) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 64.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Share crash diagnostics", style = T.Label)
+                        Text(
+                            when {
+                                !firebaseConfigured -> "Unavailable in this APK because Firebase is not configured"
+                                state.crashReportingEnabled -> "Enabled — Firebase collects crash and Android ANR reports"
+                                else -> "Off by default — custom diagnostics exclude host and chat content"
+                            },
+                            style = T.BodyMuted,
+                        )
+                    }
+                    Switch(
+                        checked = state.crashReportingEnabled,
+                        enabled = firebaseConfigured,
+                        onCheckedChange = viewModel::setCrashReportingEnabled,
+                        colors = SwitchDefaults.colors(checkedThumbColor = T.OnAccent, checkedTrackColor = T.Cream),
+                    )
+                }
+                previousExit?.let { diagnostic ->
+                    HorizontalDivider(color = T.Line)
+                    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Previous process exit", style = T.Label)
+                            Text(
+                                "${diagnostic.reason.replace('_', ' ')} · last phase ${diagnostic.lastPhase ?: "unknown"}",
+                                style = T.BodyMuted,
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                clipboard.setText(
+                                    AnnotatedString(
+                                        formatProcessExitDiagnostic(
+                                            diagnostic = diagnostic,
+                                            appVersion = appVersion,
+                                            sdkInt = Build.VERSION.SDK_INT,
+                                            device = listOf(Build.MANUFACTURER, Build.MODEL)
+                                                .filter(String::isNotBlank)
+                                                .joinToString(" "),
+                                        ),
+                                    ),
+                                )
+                                Toast.makeText(context, "Diagnostics copied", Toast.LENGTH_SHORT).show()
+                            },
+                        ) {
+                            Text("Copy", style = T.Action)
+                        }
                     }
                 }
             }

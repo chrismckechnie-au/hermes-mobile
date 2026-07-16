@@ -56,6 +56,8 @@ interface SettingsStore {
     fun saveMonitoredHostIds(hostIds: Set<String>) = Unit
     fun loadOverlayEnabled(): Boolean = false
     fun saveOverlayEnabled(enabled: Boolean) = Unit
+    fun loadCrashReportingEnabled(): Boolean = false
+    fun saveCrashReportingEnabled(enabled: Boolean) = Unit
     fun loadAttentionItems(): List<AttentionItem> = emptyList()
     fun saveAttentionItems(items: List<AttentionItem>) = Unit
     fun markAttention(item: AttentionItem) {
@@ -81,6 +83,7 @@ private class InMemorySettingsStore : SettingsStore {
     private var notificationHosts = emptySet<String>()
     private var monitoredHosts: Set<String>? = null
     private var overlay = false
+    private var crashReporting = false
     private var attentionItems = emptyList<AttentionItem>()
     override fun loadThemeMode(): ThemeMode = mode
     override fun saveThemeMode(mode: ThemeMode) {
@@ -108,6 +111,8 @@ private class InMemorySettingsStore : SettingsStore {
     override fun saveMonitoredHostIds(hostIds: Set<String>) { monitoredHosts = hostIds }
     override fun loadOverlayEnabled(): Boolean = overlay
     override fun saveOverlayEnabled(enabled: Boolean) { overlay = enabled }
+    override fun loadCrashReportingEnabled(): Boolean = crashReporting
+    override fun saveCrashReportingEnabled(enabled: Boolean) { crashReporting = enabled }
     override fun loadAttentionItems(): List<AttentionItem> = attentionItems
     override fun saveAttentionItems(items: List<AttentionItem>) { attentionItems = items.distinctBy { it.hostId to it.sessionId } }
 }
@@ -610,6 +615,7 @@ data class HermesUiState(
     val notificationHostIds: Set<String> = emptySet(),
     val monitoredHostIds: Set<String> = emptySet(),
     val overlayEnabled: Boolean = false,
+    val crashReportingEnabled: Boolean = false,
 ) {
     val sessions: List<HermesSession> get() = sessionsResource.itemsOrEmpty()
     val messages: List<ChatUiItem> get() = transcriptResource.itemsOrEmpty()
@@ -796,6 +802,7 @@ class HermesViewModel(
     private val hostStore: HostStore,
     private val savedState: SavedStateHandle = SavedStateHandle(),
     private val settingsStore: SettingsStore = InMemorySettingsStore(),
+    private val diagnostics: AppDiagnostics = NoOpAppDiagnostics,
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(
         HermesUiState(
@@ -1018,6 +1025,7 @@ class HermesViewModel(
             notificationHostIds = settingsStore.loadNotificationHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
             monitoredHostIds = settingsStore.loadMonitoredHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
             overlayEnabled = settingsStore.loadOverlayEnabled(),
+            crashReportingEnabled = settingsStore.loadCrashReportingEnabled(),
             unknownOutcomes = recoveredUnknownOutcomes,
             queuedInterrupts = recoveredQueuedInterrupts,
             composerDrafts = restoredDrafts.composerDrafts,
@@ -1065,6 +1073,12 @@ class HermesViewModel(
     fun setOverlayEnabled(enabled: Boolean) {
         settingsStore.saveOverlayEnabled(enabled)
         mutableState.update { it.copy(overlayEnabled = enabled) }
+    }
+
+    fun setCrashReportingEnabled(enabled: Boolean) {
+        settingsStore.saveCrashReportingEnabled(enabled)
+        diagnostics.setCollectionEnabled(enabled)
+        mutableState.update { it.copy(crashReportingEnabled = enabled) }
     }
 
     fun selectScreen(screen: DeckScreen) {
@@ -1778,6 +1792,19 @@ class HermesViewModel(
         if (text.isBlank()) return
         if (text.startsWith("/") && dispatchLocalCommand(text)) return
         val snapshot = mutableState.value
+        diagnostics.recordPhase(
+            DiagnosticPhase.SendValidate,
+            DiagnosticContext(
+                sendRoute = when {
+                    snapshot.activeRun != null -> DiagnosticSendRoute.FollowUp
+                    snapshot.activeSessionId == null -> DiagnosticSendRoute.NewSession
+                    else -> DiagnosticSendRoute.ExistingSession
+                },
+                messageLength = text.length,
+                activeRunCount = snapshot.activeRuns.size,
+                overlayEnabled = snapshot.overlayEnabled,
+            ),
+        )
         if (snapshot.pendingFullAccessConfirmation != null) {
             mutableState.update { it.copy(errorMessage = "Confirm or cancel Full Access before sending.") }
             return
@@ -1960,10 +1987,13 @@ class HermesViewModel(
 
         viewModelScope.launch {
             var draftKey = initialKey
+            var currentPhase = DiagnosticPhase.SendValidate
             try {
                 val automaticTitle = uniqueAutomaticSessionTitle(text, snapshot.sessions)
                 var session = snapshot.activeSessionId?.let { id -> snapshot.sessions.firstOrNull { it.id == id } }
                     ?: try {
+                        currentPhase = DiagnosticPhase.SessionCreate
+                        diagnostics.recordPhase(currentPhase)
                         gateway.createSession(host, automaticTitle)
                     } catch (error: HermesApiException) {
                         if (error.statusCode != 400 || !error.message.contains("already in use", ignoreCase = true)) throw error
@@ -1987,6 +2017,8 @@ class HermesViewModel(
 
                 // Pre-submit refresh: narrows multi-writer staleness, resolves a
                 // rotated session, and is the exact history the run executes on.
+                currentPhase = DiagnosticPhase.HistoryLoad
+                diagnostics.recordPhase(currentPhase)
                 val page = gateway.loadMessages(host, session.id)
                 applyLoadedMessages(host.id, requestedId = session.id, page = page)
                 val resolvedKey = SessionKey(host.id, page.sessionId)
@@ -2032,6 +2064,8 @@ class HermesViewModel(
                     }
                 }
                 val idempotencyKey = UUID.randomUUID().toString()
+                currentPhase = DiagnosticPhase.RunSubmit
+                diagnostics.recordPhase(currentPhase)
                 suspend fun submitOnce(): String = gateway.submitRun(
                         host,
                         page.sessionId,
@@ -2056,6 +2090,7 @@ class HermesViewModel(
                     submission.getOrThrow()
                 } catch (error: HermesApiException) {
                     // The host answered: the run was not accepted.
+                    diagnostics.recordFailure(DiagnosticPhase.RunSubmit, error)
                     showFailure(error)
                     mutableState.update { state ->
                         val restored = if (
@@ -2073,6 +2108,7 @@ class HermesViewModel(
                     return@launch
                 } catch (error: Throwable) {
                     // Response lost — the host may be executing the turn.
+                    diagnostics.recordFailure(DiagnosticPhase.RunSubmit, error)
                     logRun("submit outcome unknown session=${page.sessionId}")
                     mutableState.update { state ->
                         state.withSending(runKey, false)
@@ -2085,6 +2121,8 @@ class HermesViewModel(
                 }
 
                 val assistantId = UUID.randomUUID().toString()
+                currentPhase = DiagnosticPhase.RunAccepted
+                diagnostics.recordPhase(currentPhase)
                 val run = ActiveRun(
                     host = host,
                     sessionId = page.sessionId,
@@ -2115,6 +2153,7 @@ class HermesViewModel(
                 logRun("run started runId=$runId sessionId=${run.sessionId}")
                 driveRun(run)
             } catch (error: Throwable) {
+                diagnostics.recordFailure(currentPhase, error)
                 showFailure(error)
                 mutableState.update { state ->
                     val notSending = draftKey?.let { state.withSending(it, false) }
@@ -2131,6 +2170,7 @@ class HermesViewModel(
     // ------------------------------------------------------------------
 
     private suspend fun driveRun(run: ActiveRun) {
+        diagnostics.recordPhase(DiagnosticPhase.RunStream)
         val terminal = AtomicBoolean(false)
         var replaySupport: Boolean? = true.takeIf { run.lastEventId != null }
         var reconnectDelayMs = RUN_STREAM_RETRY_DELAY_MS
@@ -2161,7 +2201,10 @@ class HermesViewModel(
             if (terminal.get()) break
             streamResult.fold(
                 onSuccess = { logRun("run stream ended before terminal event runId=${run.runId}") },
-                onFailure = { logRun("run stream dropped runId=${run.runId}: ${it.javaClass.simpleName}") },
+                onFailure = {
+                    logRun("run stream dropped runId=${run.runId}: ${it.javaClass.simpleName}")
+                    if (streamAttempts == 1) diagnostics.recordFailure(DiagnosticPhase.RunStream, it)
+                },
             )
             val statusResult = runCatching { gateway.getRunStatus(run.host, run.runId) }
             val missing = (statusResult.exceptionOrNull() as? HermesApiException)?.statusCode in setOf(404, 410)
@@ -2345,6 +2388,7 @@ class HermesViewModel(
         val key = run.key()
         val current = mutableState.value.activeRuns[key]
         if (current?.runId != run.runId || current.reconcilingTranscript) return
+        diagnostics.recordPhase(DiagnosticPhase.RunTerminal)
         clearPendingFollowUpChoice(run)
         mutableState.update { state ->
             val active = state.activeRuns[key]
@@ -3087,6 +3131,7 @@ class HermesViewModel(
                     hostStore = SecureHostStore(application),
                     savedState = createSavedStateHandle(),
                     settingsStore = PreferencesSettingsStore(application),
+                    diagnostics = AppDiagnosticsRegistry.recorder,
                 )
             }
         }

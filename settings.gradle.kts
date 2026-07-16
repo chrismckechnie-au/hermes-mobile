@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "HermesMobile"
 include(":app")
+include(":baselineprofile")

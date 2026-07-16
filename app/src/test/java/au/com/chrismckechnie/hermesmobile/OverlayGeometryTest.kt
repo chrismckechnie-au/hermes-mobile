@@ -40,6 +40,15 @@ class OverlayGeometryTest {
     }
 
     @Test
+    fun `overlay polling backs off after failures and remains bounded`() {
+        assertEquals(5_000L, overlayPollRetryDelayMillis(1))
+        assertEquals(10_000L, overlayPollRetryDelayMillis(2))
+        assertEquals(20_000L, overlayPollRetryDelayMillis(3))
+        assertEquals(30_000L, overlayPollRetryDelayMillis(4))
+        assertEquals(30_000L, overlayPollRetryDelayMillis(20))
+    }
+
+    @Test
     fun `icon snaps to the nearest screen edge`() {
         assertEquals(12, snapOverlayX(currentX = 30, chipWidth = 56, screenWidth = 400, margin = 12))
         assertEquals(332, snapOverlayX(currentX = 300, chipWidth = 56, screenWidth = 400, margin = 12))
@@ -116,5 +125,18 @@ class OverlayGeometryTest {
         )
 
         assertEquals(OverlayPoint(68, 452), point)
+    }
+
+    @Test
+    fun `failed overlay fetch retains the last known sessions for retry`() {
+        val previous = listOf("session-1", "session-2")
+
+        val result = overlayFetchOrPrevious(
+            fetch = Result.failure(IllegalStateException("offline")),
+            previous = previous,
+        )
+
+        assertEquals(previous, result.items)
+        assertEquals(true, result.failed)
     }
 }
