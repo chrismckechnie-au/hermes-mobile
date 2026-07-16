@@ -5,12 +5,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Person
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ShortcutInfo
 import android.content.pm.ShortcutManager
 import android.graphics.drawable.Icon
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.app.ActivityCompat
@@ -28,7 +30,6 @@ import androidx.work.WorkRequest
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.google.firebase.FirebaseApp
-import com.google.firebase.installations.FirebaseInstallations
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
@@ -38,8 +39,26 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.nio.ByteBuffer
+import java.security.MessageDigest
+import java.time.Instant
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
+
+enum class MobileErrorCategory(val wireValue: String) {
+    HostOffline("host_offline"),
+    ApprovalTimeout("approval_timeout"),
+    ToolFailure("tool_failure"),
+    ModelApi("model_api"),
+    Cancelled("cancelled"),
+    Unknown("unknown");
+
+    companion object {
+        fun from(value: String?): MobileErrorCategory = entries.firstOrNull {
+            it.wireValue == value?.trim()?.lowercase()
+        } ?: Unknown
+    }
+}
 
 data class MobilePushEvent(
     val event: String,
@@ -49,13 +68,21 @@ data class MobilePushEvent(
     val title: String,
     val state: String,
     val activeCount: Int,
+    val eventId: String? = null,
+    val latestStatus: String? = null,
+    val updatedAtMillis: Long? = null,
+    val tasksCompleted: Int = 0,
+    val tasksTotal: Int = 0,
+    val activeSubagents: Int = 0,
+    val errorCategory: MobileErrorCategory = MobileErrorCategory.Unknown,
 ) {
     val isTerminal: Boolean get() = event in setOf(
         "session.completed", "session.failed", "session.cancelled", "job.completed", "job.failed",
     )
     val requiresAttention: Boolean get() = event in setOf(
-        "approval.required", "session.completed", "session.failed", "session.cancelled",
+        "approval.required", "session.completed", "session.failed", "session.cancelled", "job.completed", "job.failed",
     )
+    val isActive: Boolean get() = !isTerminal && event != "approval.required"
 
     companion object {
         fun from(data: Map<String, String>): MobilePushEvent? {
@@ -70,9 +97,36 @@ data class MobilePushEvent(
                 title = data["title"].orEmpty().ifBlank { "Hermes session" }.take(120),
                 state = data["state"].orEmpty().ifBlank { "active" },
                 activeCount = data["active_count"]?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+                eventId = data["event_id"]?.trim()?.take(128)?.takeIf(String::isNotBlank),
+                latestStatus = data["latest_status"]
+                    ?.replace(Regex("\\s+"), " ")
+                    ?.trim()
+                    ?.take(180)
+                    ?.takeIf(String::isNotBlank),
+                updatedAtMillis = parsePushTimestamp(data["updated_at"]),
+                tasksCompleted = data["tasks_completed"].boundedCount(),
+                tasksTotal = data["tasks_total"].boundedCount(),
+                activeSubagents = data["active_subagents"].boundedCount(),
+                errorCategory = MobileErrorCategory.from(data["error_category"]),
             )
         }
+
+        private fun String?.boundedCount(): Int = this?.toIntOrNull()?.coerceIn(0, 999) ?: 0
+
+        private fun parsePushTimestamp(value: String?): Long? {
+            val raw = value?.trim()?.takeIf(String::isNotBlank) ?: return null
+            raw.toLongOrNull()?.let { epoch ->
+                return if (epoch in 1..9_999_999_999L) epoch * 1_000L else epoch.takeIf { it > 0L }
+            }
+            return runCatching { Instant.parse(raw).toEpochMilli() }.getOrNull()
+        }
     }
+}
+
+internal fun mobileNotificationId(hostId: String, sessionId: String, runId: String?): Int {
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest("$hostId\u0000$sessionId\u0000${runId.orEmpty()}".toByteArray(Charsets.UTF_8))
+    return (ByteBuffer.wrap(digest).int and Int.MAX_VALUE).coerceAtLeast(1)
 }
 
 data class MobileRegistrationStatus(
@@ -248,21 +302,21 @@ object MobileRegistration {
         desiredHostIds: Set<String>? = null,
     ) = enqueueInternal(
         context = context,
-        registeredFid = null,
+        registeredToken = null,
         desiredHostIds = desiredHostIds,
         policy = ExistingWorkPolicy.REPLACE,
     )
 
     fun enqueueRetry(context: Context) = enqueueInternal(
         context = context,
-        registeredFid = null,
+        registeredToken = null,
         desiredHostIds = null,
         policy = ExistingWorkPolicy.REPLACE,
     )
 
-    internal fun enqueueRegisteredFid(context: Context, registeredFid: String) = enqueueInternal(
+    internal fun enqueueRegisteredToken(context: Context, registeredToken: String) = enqueueInternal(
         context = context,
-        registeredFid = registeredFid,
+        registeredToken = registeredToken,
         desiredHostIds = null,
         // A rotated FID must supersede work carrying the previous identity.
         policy = ExistingWorkPolicy.REPLACE,
@@ -270,7 +324,7 @@ object MobileRegistration {
 
     private fun enqueueInternal(
         context: Context,
-        registeredFid: String?,
+        registeredToken: String?,
         desiredHostIds: Set<String>?,
         policy: ExistingWorkPolicy,
     ) {
@@ -281,7 +335,7 @@ object MobileRegistration {
         settings.markMobileRegistrationPending(hostIds, desired)
 
         val request = OneTimeWorkRequestBuilder<MobileRegistrationWorker>()
-            .setInputData(workDataOf(FID_INPUT_KEY to registeredFid.orEmpty()))
+            .setInputData(workDataOf(TOKEN_INPUT_KEY to registeredToken.orEmpty()))
             .setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)
@@ -297,26 +351,25 @@ object MobileRegistration {
         WorkManager.getInstance(appContext).enqueueUniqueWork(WORK_NAME, policy, request)
     }
 
-    internal suspend fun performSync(context: Context, registeredFid: String?): MobileRegistrationReport = withContext(Dispatchers.IO) {
+    internal suspend fun performSync(context: Context, registeredToken: String?): MobileRegistrationReport = withContext(Dispatchers.IO) {
         val installationId = PreferencesSettingsStore(context).getOrCreateInstallationId()
         val hosts = SecureHostStore(context).load().snapshot.hosts
         val settings = PreferencesSettingsStore(context)
         val enabled = settings.loadNotificationHostIds()
         val gateway = HermesHttpGateway()
-        var installationFid = registeredFid?.trim()?.takeIf(String::isNotEmpty)
-        var fidFailure: Exception? = null
-        if (hosts.any { it.id in enabled } && installationFid == null) {
+        var messagingToken = registeredToken?.trim()?.takeIf(String::isNotEmpty)
+        var tokenFailure: Exception? = null
+        if (hosts.any { it.id in enabled } && messagingToken == null) {
             try {
                 if (FirebaseApp.getApps(context).isEmpty()) {
                     throw PermanentMobileRegistrationException(
                         "Firebase is not configured in this Hermes Mobile build.",
                     )
                 }
-                awaitRegistration()
-                installationFid = awaitInstallationFid()
+                messagingToken = awaitMessagingToken()
             } catch (cause: Exception) {
                 if (cause is CancellationException) throw cause
-                fidFailure = cause
+                tokenFailure = cause
             }
         }
         val appVersion = runCatching {
@@ -325,14 +378,14 @@ object MobileRegistration {
         val report = syncMobileRegistrationHosts(hosts, enabled) { host, action ->
             when (action) {
                 MobileRegistrationAction.Register -> {
-                    fidFailure?.let { throw it }
-                    val fid = installationFid ?: throw PermanentMobileRegistrationException(
-                        "Firebase did not provide an installation id.",
+                    tokenFailure?.let { throw it }
+                    val token = messagingToken ?: throw PermanentMobileRegistrationException(
+                        "Firebase did not provide a messaging token.",
                     )
                     gateway.registerMobileDevice(
                         host = host,
                         installationId = installationId,
-                        token = fid,
+                        token = token,
                         appVersion = appVersion,
                         overlayEnabled = settings.loadOverlayEnabled(),
                     )
@@ -351,38 +404,23 @@ object MobileRegistration {
         report
     }
 
-    private suspend fun awaitRegistration(): Unit = suspendCancellableCoroutine { continuation ->
-        FirebaseMessaging.getInstance().register().addOnCompleteListener { registration ->
+    private suspend fun awaitMessagingToken(): String = suspendCancellableCoroutine { continuation ->
+        FirebaseMessaging.getInstance().token.addOnCompleteListener { installation ->
             if (!continuation.isActive) return@addOnCompleteListener
-            if (registration.isSuccessful) {
-                continuation.resume(Unit)
+            val token = installation.result?.trim().orEmpty()
+            if (installation.isSuccessful && token.isNotEmpty()) {
+                continuation.resume(token)
             } else {
                 continuation.resumeWith(
                     Result.failure(
-                        registration.exception ?: IllegalStateException("Firebase did not explain why registration failed."),
+                        installation.exception ?: IllegalStateException("Firebase did not return a messaging token."),
                     ),
                 )
             }
         }
     }
 
-    private suspend fun awaitInstallationFid(): String = suspendCancellableCoroutine { continuation ->
-        FirebaseInstallations.getInstance().id.addOnCompleteListener { installation ->
-            if (!continuation.isActive) return@addOnCompleteListener
-            val fid = installation.result?.trim().orEmpty()
-            if (installation.isSuccessful && fid.isNotEmpty()) {
-                continuation.resume(fid)
-            } else {
-                continuation.resumeWith(
-                    Result.failure(
-                        installation.exception ?: IllegalStateException("Firebase did not return an installation id."),
-                    ),
-                )
-            }
-        }
-    }
-
-    internal const val FID_INPUT_KEY = "registered_fid"
+    internal const val TOKEN_INPUT_KEY = "registered_token"
     private const val WORK_NAME = "hermes-mobile-registration"
     private const val WORK_TAG = "mobile-registration"
     private const val TAG = "MobileRegistration"
@@ -400,7 +438,7 @@ class MobileRegistrationWorker(
         val report = try {
             MobileRegistration.performSync(
                 context = applicationContext,
-                registeredFid = inputData.getString(MobileRegistration.FID_INPUT_KEY),
+                registeredToken = inputData.getString(MobileRegistration.TOKEN_INPUT_KEY),
             )
         } catch (cause: CancellationException) {
             throw cause
@@ -439,16 +477,13 @@ class MobileRegistrationWorker(
 class HermesMessagingService : FirebaseMessagingService() {
     override fun onRegistered(installationId: String) {
         super.onRegistered(installationId)
-        MobileRegistration.enqueueRegisteredFid(applicationContext, installationId)
+        MobileRegistration.enqueueRetry(applicationContext)
     }
 
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onNewToken(token: String) {
         super.onNewToken(token)
-        // The mobile endpoint targets Firebase Installation IDs. A legacy
-        // token refresh therefore requests a fresh FID callback instead of
-        // accidentally uploading the token in the `fid` field.
-        MobileRegistration.enqueueRetry(applicationContext)
+        MobileRegistration.enqueueRegisteredToken(applicationContext, token)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -461,43 +496,51 @@ class HermesMessagingService : FirebaseMessagingService() {
                 settings.loadRunStatus(runId).isNullOrBlank() -> settings.saveRunStatus(runId, "Working on the task…")
             }
         }
-        if (event.requiresAttention) {
-            settings.markAttention(
-                AttentionItem(
-                    hostId = event.hostProfileId,
-                    sessionId = event.sessionId,
-                    title = event.title,
-                    state = event.state,
-                ),
-            )
-        }
         HermesNotificationCoordinator(applicationContext).post(event)
-        HermesOverlayService.onPush(applicationContext, event)
+        if (message.priority == RemoteMessage.PRIORITY_HIGH && event.isActive) {
+            HermesOverlayService.onPush(applicationContext, event)
+        }
     }
 }
 
 class HermesNotificationCoordinator(private val context: Context) {
     private val manager = context.getSystemService(NotificationManager::class.java)
+    private val notificationManager = NotificationManagerCompat.from(context)
+    private val settings = PreferencesSettingsStore(context.applicationContext)
 
     fun post(event: MobilePushEvent) {
         createChannels()
+        val activity = record(event)
         if (Build.VERSION.SDK_INT >= 33 && ActivityCompat.checkSelfPermission(
                 context, Manifest.permission.POST_NOTIFICATIONS
             ) != PackageManager.PERMISSION_GRANTED
         ) return
 
+        postGroupSummary()
+        if (event.isTerminal) {
+            notificationManager.cancel(
+                mobileNotificationTag(event, NotificationLane.Active),
+                mobileNotificationId(event.hostProfileId, event.sessionId, event.runId),
+            )
+        }
+        if (notificationLane(event) == NotificationLane.Active) {
+            return
+        }
+
         val isJob = event.event.startsWith("job.")
         val openIntent = if (isJob) jobsIntent(context) else sessionIntent(context, event.hostProfileId, event.sessionId)
+        openIntent.data = notificationUri("open", event.hostProfileId, event.sessionId, event.runId)
         val contentPending = PendingIntent.getActivity(
-            context, event.sessionId.hashCode(), openIntent,
+            context, mobileNotificationId(event.hostProfileId, event.sessionId, event.runId), openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val copy = mobileNotificationCopy(event)
-        val builder = NotificationCompat.Builder(context, RUN_CHANNEL)
-            .setSmallIcon(R.drawable.ic_hermes_notification)
+        val lane = notificationLane(event)
+        val builder = NotificationCompat.Builder(context, channelFor(lane))
+            .setSmallIcon(iconFor(lane))
             .setContentTitle(copy.title)
             .setContentText(copy.text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(copy.text).setSummaryText("Hermes Remote"))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(copy.text).setSummaryText("Hermes · ${event.title}"))
             .setCategory(copy.category)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(event.isTerminal)
@@ -507,7 +550,13 @@ class HermesNotificationCoordinator(private val context: Context) {
             .setColor(0xFF1B1B1B.toInt())
             .setGroup(NOTIFICATION_GROUP)
             .setContentIntent(contentPending)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicNotification(copy.title))
+            .setNumber(activityUnreadCount(settings.loadAttentionItems()))
             .addAction(0, if (event.event == "approval.required") "Review" else "Open", contentPending)
+        if (event.event != "approval.required") {
+            builder.setDeleteIntent(activityActionPendingIntent(ACTION_DISMISS, event, activity.identity()))
+        }
         if (!isJob) {
             builder.setShortcutId(shortcutId(event))
         }
@@ -516,8 +565,9 @@ class HermesNotificationCoordinator(private val context: Context) {
             publishShortcut(event)
             val bubblePending = PendingIntent.getActivity(
                 context,
-                event.sessionId.hashCode() xor 0xBABB1E,
+                mobileNotificationId(event.hostProfileId, event.sessionId, event.runId) xor 0xBABB1E,
                 Intent(context, BubbleActivity::class.java).apply {
+                    data = notificationUri("bubble", event.hostProfileId, event.sessionId, event.runId)
                     putExtra(EXTRA_HOST_ID, event.hostProfileId)
                     putExtra(EXTRA_SESSION_ID, event.sessionId)
                     putExtra(EXTRA_SESSION_TITLE, event.title)
@@ -531,30 +581,180 @@ class HermesNotificationCoordinator(private val context: Context) {
                 ).setDesiredHeight(420).build()
             )
         }
-        val notificationManager = NotificationManagerCompat.from(context)
-        if (event.isTerminal && event.activeCount == 0) {
-            notificationManager.cancel(WORK_NOTIFICATION_ID)
-        }
-        val notificationId = if (!event.isTerminal && event.event != "approval.required" && !isJob) {
-            WORK_NOTIFICATION_ID
-        } else {
-            event.sessionId.hashCode()
-        }
-        notificationManager.notify(notificationId, builder.build())
+        notificationManager.notify(
+            mobileNotificationTag(event),
+            mobileNotificationId(event.hostProfileId, event.sessionId, event.runId),
+            builder.build(),
+        )
     }
 
-    private fun createChannels() {
+    fun createChannels() {
         if (Build.VERSION.SDK_INT < 26) return
-        manager.createNotificationChannel(
-            NotificationChannel(RUN_CHANNEL, "Hermes runs", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "Active session, approval, failure, and completion status"
-                if (Build.VERSION.SDK_INT >= 29) setAllowBubbles(true)
-            }
-        )
-        manager.createNotificationChannel(
-            NotificationChannel(OVERLAY_CHANNEL, "Active session overlay", NotificationManager.IMPORTANCE_LOW)
+        manager.createNotificationChannels(
+            listOf(
+                NotificationChannel(ACTIVE_CHANNEL, "Active Work", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "Silent ongoing Hermes work status"
+                    setShowBadge(false)
+                },
+                NotificationChannel(ACTION_CHANNEL, "Action Needed", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "Approvals and failures that need attention"
+                    setShowBadge(true)
+                    if (Build.VERSION.SDK_INT >= 29) setAllowBubbles(true)
+                },
+                NotificationChannel(RESULTS_CHANNEL, "Results", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                    description = "Completed Hermes work"
+                    setShowBadge(true)
+                },
+                NotificationChannel(OVERLAY_SERVICE_CHANNEL, "Active session overlay", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "Android-required status while the floating overlay is active"
+                    setShowBadge(false)
+                },
+            ),
         )
     }
+
+    fun refreshSummary() {
+        createChannels()
+        if (Build.VERSION.SDK_INT < 33 || ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            postGroupSummary()
+        }
+    }
+
+    private fun record(event: MobilePushEvent): ActivityEntry {
+        if (event.isTerminal) {
+            settings.saveAttentionItems(
+                settings.loadAttentionItems().map { item ->
+                    val sameRun = item.hostId == event.hostProfileId &&
+                        item.sessionId == event.sessionId &&
+                        (event.runId == null || item.runId == event.runId)
+                    if (sameRun && item.event == "approval.required") item.copy(read = true) else item
+                },
+            )
+        }
+        val activity = ActivityEntry(
+                hostId = event.hostProfileId,
+                sessionId = event.sessionId,
+                title = event.title,
+                state = event.state,
+                runId = event.runId,
+                event = event.event,
+                eventId = event.eventId,
+                latestStatus = event.latestStatus,
+                updatedAtMillis = event.updatedAtMillis ?: System.currentTimeMillis(),
+                tasksCompleted = event.tasksCompleted,
+                tasksTotal = event.tasksTotal,
+                activeSubagents = event.activeSubagents,
+                errorCategory = event.errorCategory,
+            )
+        settings.recordActivity(activity)
+        return activity
+    }
+
+    private fun postGroupSummary() {
+        if (Build.VERSION.SDK_INT >= 33 && ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return
+        val all = settings.loadAttentionItems()
+        val unread = all.filter { it.requiresAttention && !it.read }
+        if (unread.isEmpty()) {
+            notificationManager.cancel(GROUP_SUMMARY_ID)
+            return
+        }
+        val lines = buildList {
+            unread.take(5).forEach { add("${it.title} · ${attentionLabel(it.state)}") }
+        }
+        val title = "${unread.size} Hermes update${if (unread.size == 1) "" else "s"} to review"
+        val style = NotificationCompat.InboxStyle().setBigContentTitle(title)
+        lines.forEach(style::addLine)
+        val target = unread.first()
+        val openIntent = sessionIntent(context, target.hostId, target.sessionId).apply {
+            data = notificationUri("summary", target.hostId, target.sessionId, target.runId)
+        }
+        val pending = PendingIntent.getActivity(
+            context,
+            GROUP_SUMMARY_ID,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val builder = NotificationCompat.Builder(context, RESULTS_CHANNEL)
+            .setSmallIcon(R.drawable.ic_hermes_working)
+            .setContentTitle(title)
+            .setContentText(lines.firstOrNull() ?: "Open Hermes Mobile")
+            .setStyle(style)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(false)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setGroup(NOTIFICATION_GROUP)
+            .setGroupSummary(true)
+            .setContentIntent(pending)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicNotification("Hermes has an update"))
+        notificationManager.notify(GROUP_SUMMARY_ID, builder.build())
+    }
+
+    private fun publicNotification(title: String) = NotificationCompat.Builder(context, ACTIVE_CHANNEL)
+        .setSmallIcon(R.drawable.ic_hermes_notification)
+        .setContentTitle(title)
+        .setContentText("Open Hermes Mobile for details")
+        .build()
+
+    private fun activityActionPendingIntent(action: String, event: MobilePushEvent, entryId: String? = null): PendingIntent {
+        val intent = Intent(context, MobileNotificationActionReceiver::class.java).apply {
+            this.action = action
+            data = notificationUri(action, event.hostProfileId, event.sessionId, event.runId, entryId)
+            putExtra(EXTRA_HOST_ID, event.hostProfileId)
+            putExtra(EXTRA_SESSION_ID, event.sessionId)
+            putExtra(EXTRA_RUN_ID, event.runId)
+            putExtra(EXTRA_ACTIVITY_ID, entryId)
+        }
+        return PendingIntent.getBroadcast(
+            context,
+            mobileNotificationId(event.hostProfileId, event.sessionId, event.runId) xor action.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    }
+
+    private fun channelFor(lane: NotificationLane): String = when (lane) {
+        NotificationLane.Active -> ACTIVE_CHANNEL
+        NotificationLane.Action -> ACTION_CHANNEL
+        NotificationLane.Result -> RESULTS_CHANNEL
+    }
+
+    private fun iconFor(lane: NotificationLane): Int = when (lane) {
+        NotificationLane.Active -> R.drawable.ic_hermes_working
+        NotificationLane.Action -> R.drawable.ic_hermes_attention
+        NotificationLane.Result -> R.drawable.ic_hermes_done
+    }
+
+    private fun mobileNotificationTag(
+        event: MobilePushEvent,
+        lane: NotificationLane = notificationLane(event),
+    ): String = "${lane.name.lowercase()}:${event.hostProfileId}:${event.sessionId}:${event.runId.orEmpty()}".take(180)
+
+    private fun notificationUri(
+        action: String,
+        hostId: String,
+        sessionId: String,
+        runId: String?,
+        entryId: String? = null,
+    ): Uri = Uri.Builder()
+        .scheme("hermes-mobile")
+        .authority("notification")
+        .appendPath(action)
+        .appendPath(hostId)
+        .appendPath(sessionId)
+        .appendPath(runId.orEmpty())
+        .appendPath(entryId.orEmpty())
+        .build()
 
     private fun publishShortcut(event: MobilePushEvent) {
         if (Build.VERSION.SDK_INT < 29) return
@@ -596,15 +796,26 @@ class HermesNotificationCoordinator(private val context: Context) {
     private fun shortcutId(event: MobilePushEvent) = "hermes-${event.hostProfileId}-${event.sessionId}".take(120)
 
     companion object {
-        const val RUN_CHANNEL = "hermes_runs"
-        const val OVERLAY_CHANNEL = "hermes_overlay"
-        const val WORK_CHANNEL = "hermes_active_work"
-        const val WORK_NOTIFICATION_ID = 9042
+        const val ACTIVE_CHANNEL = "hermes_active_work_v2"
+        const val ACTION_CHANNEL = "hermes_action_needed_v2"
+        const val RESULTS_CHANNEL = "hermes_results_v2"
+        const val OVERLAY_SERVICE_CHANNEL = "hermes_overlay_service_v3"
+        const val GROUP_SUMMARY_ID = 9043
+        const val OVERLAY_SERVICE_NOTIFICATION_ID = 9044
         const val NOTIFICATION_GROUP = "hermes_session_updates"
         const val EXTRA_HOST_ID = "host_id"
         const val EXTRA_SESSION_ID = "session_id"
+        const val EXTRA_RUN_ID = "run_id"
+        const val EXTRA_ACTIVITY_ID = "activity_id"
         const val EXTRA_SESSION_TITLE = "session_title"
         const val EXTRA_SCREEN = "screen"
+        const val ACTION_STOP = "au.com.chrismckechnie.hermesmobile.NOTIFICATION_STOP"
+        const val ACTION_DISMISS = "au.com.chrismckechnie.hermesmobile.NOTIFICATION_DISMISS"
+
+        @Deprecated("Use ACTIVE_CHANNEL") const val WORK_CHANNEL = ACTIVE_CHANNEL
+        @Deprecated("Use OVERLAY_SERVICE_CHANNEL") const val OVERLAY_CHANNEL = OVERLAY_SERVICE_CHANNEL
+        @Deprecated("Use ACTION_CHANNEL or RESULTS_CHANNEL") const val RUN_CHANNEL = ACTION_CHANNEL
+        @Deprecated("Use GROUP_SUMMARY_ID") const val WORK_NOTIFICATION_ID = GROUP_SUMMARY_ID
 
         fun sessionIntent(context: Context, hostId: String, sessionId: String) =
             Intent(context, MainActivity::class.java).apply {
@@ -619,6 +830,63 @@ class HermesNotificationCoordinator(private val context: Context) {
             putExtra(EXTRA_SCREEN, "jobs")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
+    }
+}
+
+class MobileNotificationActionReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val hostId = intent.getStringExtra(HermesNotificationCoordinator.EXTRA_HOST_ID).orEmpty()
+        val sessionId = intent.getStringExtra(HermesNotificationCoordinator.EXTRA_SESSION_ID).orEmpty()
+        when (intent.action) {
+            HermesNotificationCoordinator.ACTION_DISMISS -> if (hostId.isNotBlank()) {
+                PreferencesSettingsStore(context).markActivityRead(
+                    hostId,
+                    sessionId.takeIf(String::isNotBlank),
+                    intent.getStringExtra(HermesNotificationCoordinator.EXTRA_ACTIVITY_ID),
+                )
+                HermesNotificationCoordinator(context.applicationContext).refreshSummary()
+            }
+
+            HermesNotificationCoordinator.ACTION_STOP -> {
+                val runId = intent.getStringExtra(HermesNotificationCoordinator.EXTRA_RUN_ID).orEmpty()
+                if (hostId.isBlank() || runId.isBlank()) return
+                val request = OneTimeWorkRequestBuilder<NotificationStopWorker>()
+                    .setInputData(workDataOf("host_id" to hostId, "run_id" to runId))
+                    .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                    .build()
+                WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
+                    "notification-stop-${mobileNotificationId(hostId, sessionId, runId)}",
+                    ExistingWorkPolicy.KEEP,
+                    request,
+                )
+            }
+        }
+    }
+}
+
+class NotificationStopWorker(appContext: Context, parameters: WorkerParameters) : CoroutineWorker(appContext, parameters) {
+    override suspend fun doWork(): Result {
+        val hostId = inputData.getString("host_id").orEmpty()
+        val runId = inputData.getString("run_id").orEmpty()
+        val host = SecureHostStore(applicationContext).load().snapshot.hosts.firstOrNull { it.id == hostId }
+            ?: return Result.failure()
+        val settings = PreferencesSettingsStore(applicationContext)
+        settings.saveRunStatus(runId, "Stopping…")
+        return runCatching { HermesHttpGateway().stopRun(host, runId) }.fold(
+            onSuccess = {
+                settings.saveRunStatus(runId, "Stop requested")
+                Result.success()
+            },
+            onFailure = { error ->
+                val permanent = (error as? HermesApiException)?.statusCode in 400..499
+                if (permanent || runAttemptCount >= 2) {
+                    settings.saveRunStatus(runId, "Could not stop the run")
+                    Result.failure()
+                } else {
+                    Result.retry()
+                }
+            },
+        )
     }
 }
 
@@ -676,20 +944,35 @@ internal data class MobileNotificationCopy(
     val silent: Boolean,
 )
 
+internal enum class NotificationLane { Active, Action, Result }
+
+internal fun notificationLane(event: MobilePushEvent): NotificationLane = when (event.event) {
+    "approval.required", "session.failed", "job.failed" -> NotificationLane.Action
+    "session.completed", "session.cancelled", "job.completed" -> NotificationLane.Result
+    "notification.test" -> NotificationLane.Result
+    else -> NotificationLane.Active
+}
+
 internal fun mobileNotificationCopy(event: MobilePushEvent): MobileNotificationCopy = MobileNotificationCopy(
     title = when (event.event) {
         "approval.required" -> "Hermes needs your approval"
         "session.failed", "job.failed" -> "Hermes hit an issue"
         "session.cancelled" -> "Hermes stopped"
         "session.completed", "job.completed" -> "Hermes finished"
+        "notification.test" -> "Hermes notifications are working"
         else -> "Hermes is working"
     },
-    text = event.title,
+    text = buildList {
+        add(event.title)
+        event.latestStatus?.takeIf { !it.equals(event.title, ignoreCase = true) }?.let(::add)
+        if (event.tasksTotal > 0) add("${event.tasksCompleted.coerceAtMost(event.tasksTotal)}/${event.tasksTotal} tasks")
+        if (event.activeSubagents > 0) add("${event.activeSubagents} active subagent${if (event.activeSubagents == 1) "" else "s"}")
+    }.joinToString(" · "),
     category = when {
         event.event == "approval.required" -> NotificationCompat.CATEGORY_MESSAGE
-        event.isTerminal -> NotificationCompat.CATEGORY_STATUS
+        event.isTerminal || event.event == "notification.test" -> NotificationCompat.CATEGORY_STATUS
         else -> NotificationCompat.CATEGORY_PROGRESS
     },
-    ongoing = !event.isTerminal,
-    silent = event.event !in setOf("approval.required", "session.failed", "job.failed"),
+    ongoing = !event.isTerminal && event.event != "notification.test",
+    silent = notificationLane(event) == NotificationLane.Active,
 )

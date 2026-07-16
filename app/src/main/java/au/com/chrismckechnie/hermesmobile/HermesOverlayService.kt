@@ -56,7 +56,6 @@ class HermesOverlayService : Service() {
     private var sessions = emptyList<OverlaySession>()
     private var localRunHints = emptyMap<String, LocalRunHint>()
     private var appInForeground = false
-    private val serviceStartedAt = System.currentTimeMillis()
     private val positionPreferences by lazy { getSharedPreferences("hermes_overlay_position", MODE_PRIVATE) }
     private val visibilityPreferences by lazy { getSharedPreferences(VISIBILITY_PREFERENCES, MODE_PRIVATE) }
     private val diagnostics: AppDiagnostics get() = AppDiagnosticsRegistry.recorder
@@ -83,6 +82,10 @@ class HermesOverlayService : Service() {
             pollJob = scope.launch {
                 var consecutiveFailures = 0
                 while (true) {
+                    if (appInForeground) {
+                        delay(POLL_INTERVAL_MS)
+                        continue
+                    }
                     when (refreshSessionsSafely()) {
                         RefreshOutcome.Success -> {
                             consecutiveFailures = 0
@@ -117,7 +120,9 @@ class HermesOverlayService : Service() {
             val settings = PreferencesSettingsStore(applicationContext)
             val enabled = settings.loadMonitoredHostIds()
             val hosts = SecureHostStore(applicationContext).load().snapshot.hosts.filter { it.id in enabled }
-            val attention = settings.loadAttentionItems().filter { it.hostId in hosts.map(HostProfile::id) }
+            val attention = settings.loadAttentionItems().filter {
+                !it.read && it.hostId in hosts.map(HostProfile::id)
+            }
             val gateway = HermesHttpGateway()
             val hints = (localRunHints.values + settings.loadRunCheckpoints().map { checkpoint ->
                 LocalRunHint(checkpoint.hostId, checkpoint.sessionId, checkpoint.runId, "Hermes task")
@@ -193,7 +198,27 @@ class HermesOverlayService : Service() {
                         },
                     )
                 }
-            OverlayRefreshSnapshot(active, hadFailures, hosts.isNotEmpty())
+            val outcomes = attention.mapNotNull { item ->
+                if (active.any { it.host.id == item.hostId && it.session.sessionId == item.sessionId }) return@mapNotNull null
+                val host = hosts.firstOrNull { it.id == item.hostId } ?: return@mapNotNull null
+                OverlaySession(
+                    host = host,
+                    session = HermesActiveSession(
+                        sessionId = item.sessionId,
+                        runId = item.runId,
+                        title = item.title,
+                        state = item.state,
+                        surface = "notification",
+                    ),
+                    latestStatus = item.latestStatus ?: attentionLabel(item.state),
+                    attention = item,
+                )
+            }
+            OverlayRefreshSnapshot(
+                (active + outcomes).distinctBy { it.host.id to it.session.sessionId },
+                hadFailures,
+                hosts.isNotEmpty(),
+            )
         }
 
         val sessionsChanged = sessions != refresh.sessions
@@ -229,7 +254,7 @@ class HermesOverlayService : Service() {
         diagnostics.recordPhase(DiagnosticPhase.OverlayPromote)
         ServiceCompat.startForeground(
             this,
-            HermesNotificationCoordinator.WORK_NOTIFICATION_ID,
+            HermesNotificationCoordinator.OVERLAY_SERVICE_NOTIFICATION_ID,
             foregroundNotification(active),
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
@@ -261,24 +286,24 @@ class HermesOverlayService : Service() {
         }.apply {
             clipToOutline = true
             elevation = 8.dp.toFloat()
-            background = roundedBackground(Color.WHITE, 16.dp.toFloat())
+            background = roundedBackground(Color.WHITE, 13.dp.toFloat())
             contentDescription = activeSessionDescription(sessions.size)
             setOnClickListener { if (panel == null) showPanel() else hidePanel() }
             addView(ImageView(context).apply {
                 setImageResource(R.drawable.hermes_official)
                 scaleType = ImageView.ScaleType.CENTER_CROP
             }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-            val badge = overlayText("", 10f, Color.WHITE, bold = true).apply {
+            val badge = overlayText("", 9f, Color.WHITE, bold = true).apply {
                 gravity = Gravity.CENTER
-                minWidth = 20.dp
-                minHeight = 20.dp
-                setPadding(4.dp, 0, 4.dp, 0)
-                background = roundedBackground(0xFFC94747.toInt(), 10.dp.toFloat())
+                minWidth = 16.dp
+                minHeight = 16.dp
+                setPadding(3.dp, 0, 3.dp, 0)
+                background = roundedBackground(0xFFC94747.toInt(), 8.dp.toFloat())
                 elevation = 10.dp.toFloat()
             }
-            addView(badge, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 20.dp, Gravity.TOP or Gravity.END).apply {
-                topMargin = (-4).dp
-                marginEnd = (-4).dp
+            addView(badge, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, 16.dp, Gravity.TOP or Gravity.END).apply {
+                topMargin = (-2).dp
+                marginEnd = (-2).dp
             })
             chipBadge = badge
         }
@@ -339,14 +364,21 @@ class HermesOverlayService : Service() {
     }
 
     private fun updateChipBadge() {
-        val attentionCount = sessions.count { it.attention != null }
+        val attention = sessions.mapNotNull(OverlaySession::attention)
+        val attentionCount = attention.size
         chip?.contentDescription = activeSessionDescription(sessions.size, attentionCount)
         chipBadge?.apply {
             visibility = if (attentionCount == 0) View.GONE else View.VISIBLE
-            text = when {
-                attentionCount > 9 -> "9+"
-                else -> attentionCount.toString()
-            }
+            val presentation = overlayAttentionBadge(attention)
+            text = presentation.text
+            background = roundedBackground(
+                when (presentation.kind) {
+                    OverlayBadgeKind.Approval -> 0xFFE39A3B.toInt()
+                    OverlayBadgeKind.Error -> 0xFFC94747.toInt()
+                    OverlayBadgeKind.Done -> 0xFF3A9B63.toInt()
+                },
+                8.dp.toFloat(),
+            )
         }
     }
 
@@ -609,17 +641,6 @@ class HermesOverlayService : Service() {
 
     private fun foregroundNotification(active: List<OverlaySession>): android.app.Notification {
         val first = active.firstOrNull()
-        val working = active.filter { it.session.runId != null || it.attention == null }
-        val copy = if (working.isNotEmpty()) {
-            activeWorkCopy(working.map { it.host.name to it.session })
-        } else {
-            ActiveWorkCopy(
-                title = "Hermes has ${active.size} update${if (active.size == 1) "" else "s"}",
-                text = first?.session?.title ?: "Open Hermes Mobile to review",
-                summary = first?.host?.name,
-                count = active.size,
-            )
-        }
         val openIntent = first?.let {
             HermesNotificationCoordinator.sessionIntent(this, it.host.id, it.session.sessionId)
         } ?: Intent(this, MainActivity::class.java)
@@ -629,33 +650,31 @@ class HermesOverlayService : Service() {
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        return NotificationCompat.Builder(this, HermesNotificationCoordinator.WORK_CHANNEL)
+        return NotificationCompat.Builder(this, HermesNotificationCoordinator.OVERLAY_SERVICE_CHANNEL)
             .setSmallIcon(R.drawable.ic_hermes_notification)
-            .setContentTitle(copy.title)
-            .setContentText(copy.text)
-            .setSubText(copy.summary)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(copy.text).setSummaryText(copy.summary))
+            .setContentTitle("Hermes overlay active")
+            .setContentText("Tap to open Hermes Mobile")
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setColor(0xFF1B1B1B.toInt())
-            .setWhen(serviceStartedAt)
-            .setUsesChronometer(working.isNotEmpty())
-            .setContentInfo(copy.count.takeIf { it > 1 }?.toString())
+            .setShowWhen(false)
             .setContentIntent(pending)
-            .addAction(0, "Open", pending)
             .build()
     }
 
     private fun createForegroundChannel() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(
-                HermesNotificationCoordinator.WORK_CHANNEL,
+                HermesNotificationCoordinator.OVERLAY_SERVICE_CHANNEL,
                 "Hermes active work",
-                NotificationManager.IMPORTANCE_LOW,
-            ).apply { description = "Ongoing status while Hermes is actively working" }
+                NotificationManager.IMPORTANCE_MIN,
+            ).apply {
+                description = "Android-required status while the optional floating overlay is active"
+                setShowBadge(false)
+            }
         )
     }
 
@@ -690,10 +709,10 @@ class HermesOverlayService : Service() {
     private val Int.dp: Int get() = (this * resources.displayMetrics.density).toInt()
 
     companion object {
-        private const val CHIP_SIZE_DP = 56
+        private const val CHIP_SIZE_DP = 44
         private const val OVERLAY_MARGIN_DP = 12
         private const val PANEL_GAP_DP = 8
-        private const val DISMISS_TARGET_SIZE_DP = 68
+        private const val DISMISS_TARGET_SIZE_DP = 60
         private const val DISMISS_TARGET_BOTTOM_MARGIN_DP = 28
         private const val POLL_INTERVAL_MS = 5_000L
         private const val EXTRA_RUN_ID = "active_run_id"
@@ -782,6 +801,26 @@ private data class LocalRunHint(val hostId: String, val sessionId: String, val r
 internal data class OverlayPoint(val x: Int, val y: Int)
 
 internal data class OverlayFetchResult<T>(val items: List<T>, val failed: Boolean)
+
+internal enum class OverlayBadgeKind { Approval, Error, Done }
+
+internal data class OverlayBadgePresentation(val text: String, val kind: OverlayBadgeKind)
+
+internal fun overlayAttentionBadge(attention: List<ActivityEntry>): OverlayBadgePresentation {
+    val latest = attention.maxByOrNull(ActivityEntry::updatedAtMillis)
+    val approval = latest?.event == "approval.required" ||
+        latest?.state?.lowercase() in setOf("waiting_for_approval", "approval_required")
+    val failed = latest?.event in setOf("session.failed", "job.failed") ||
+        latest?.state?.lowercase() in setOf("failed", "error")
+    return OverlayBadgePresentation(
+        text = if (attention.size > 1) attention.size.coerceAtMost(9).toString() else if (approval || failed) "!" else "✓",
+        kind = when {
+            approval -> OverlayBadgeKind.Approval
+            failed -> OverlayBadgeKind.Error
+            else -> OverlayBadgeKind.Done
+        },
+    )
+}
 
 internal fun <T> overlayFetchOrPrevious(fetch: Result<List<T>>, previous: List<T>): OverlayFetchResult<T> =
     fetch.fold(

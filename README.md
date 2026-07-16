@@ -123,13 +123,12 @@ Push delivery is opt-in per saved host under **Settings → Notifications**. The
 same section enables the optional Android draw-over-other-apps session overlay.
 Notifications contain status and the session title only; prompts, responses,
 tool output, commands, and credentials are never included in FCM payloads.
-Runs started in Hermes Mobile also show an ongoing local work notification;
-this does not require Firebase. The overlay is seeded from the local run and
+Hermes Mobile posts notifications when work needs attention or reaches an
+outcome instead of keeping a separate ongoing work notification. The overlay
+is seeded from the local run and
 then reconciled against `/v1/active-sessions`, avoiding first-poll races. The
-overlay contains responsive active work only, so completed, stalled, and
-unresponsive sessions cannot linger there; terminal outcomes remain available
-through Android notifications. Approval requests remain visible while their
-session is active.
+overlay contains active work plus unread approval, completion, and failure
+flags. Opening the related session clears its unread state.
 
 Dictation uses the Android device's installed speech recognizer. Its privacy
 and network behavior are controlled by that provider; some recognizers send
@@ -151,10 +150,20 @@ Firebase is deliberately user-owned:
      project_id: your-firebase-project-id
    ```
 
+With a Hermes host that advertises `hermes.mobile` 1.2, run `hermes mobile
+pair` after enabling the block. Scan the printed QR code with the phone's
+camera and open the Hermes link. The app exchanges the five-minute, single-use
+grant for a revocable device credential; the host's master API key is never
+placed in the QR code. Use `hermes mobile pair --url https://host.example` when
+automatic LAN address discovery is not appropriate. Settings can send a
+targeted test notification after registration succeeds.
+
 Without `google-services.json`, remote device registration and push delivery
 remain inactive. Local working status still functions. Notification, Bubble,
 and overlay permissions remain user-controlled. The overlay only runs as a
 visible foreground service while opted-in hosts report active sessions.
+Android requires a quiet foreground-service notification while the optional
+floating overlay is active; disabling the overlay removes that system entry.
 
 ## Permissions and transport security
 
@@ -164,7 +173,7 @@ HTTPS is required by default. Android's network policy permits cleartext so that
 
 ## Build
 
-Requirements: JDK 17 and Android SDK 35.
+Requirements: JDK 17 and Android SDK 36.
 
 ```bash
 ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug

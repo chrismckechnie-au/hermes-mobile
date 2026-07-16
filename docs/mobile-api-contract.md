@@ -99,7 +99,7 @@ files, 320 characters per path, and 20,000 diff characters per file; it marks
 the result partial when the host or client truncates it. Hosts should omit
 `diff` when policy does not permit exposing source changes.
 
-## Proposed `hermes.mobile` 1.1 extension
+## Experimental `hermes.mobile` 1.2 extension
 
 Everything in this section is a **draft upstream requirement and is not yet a
 stock Hermes API**. A future host should advertise it under a namespaced entry
@@ -109,7 +109,7 @@ so existing flat capability consumers continue to work:
 {
   "extensions": {
     "hermes.mobile": {
-      "version": "1.1",
+      "version": "1.2",
       "features": {
         "active_run_list": true,
         "event_replay": true,
@@ -119,7 +119,12 @@ so existing flat capability consumers continue to work:
         "push_wake_registration": true,
         "complete_model_inventory": true,
         "session_activity_history": true,
-        "session_activity_stream": true
+        "session_activity_stream": true,
+        "push_status_v2": true,
+        "push_self_test": true,
+        "paired_device_admin": true,
+        "jobs_admin": true,
+        "job_run_history": true
       },
       "endpoints": {}
     }
@@ -131,7 +136,7 @@ The version is `MAJOR.MINOR`. Clients may use an equal major version and must
 feature-negotiate minor additions. Unknown fields and unknown optional features
 must be ignored.
 
-The 1.0 behavior target is:
+The 1.x behavior target is:
 
 1. **Active run list.** A read-only authenticated endpoint returns every
    nonterminal run visible to the device, with stable run and session IDs,

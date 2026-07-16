@@ -49,14 +49,14 @@ if (releasePackagingRequested) {
 
 android {
     namespace = "au.com.chrismckechnie.hermesmobile"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "au.com.chrismckechnie.hermesmobile"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 33
-        versionName = "0.4.15"
+        targetSdk = 36
+        versionCode = 34
+        versionName = "0.5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -106,7 +106,7 @@ dependencies {
     implementation("androidx.work:work-runtime:2.11.2")
     implementation("androidx.profileinstaller:profileinstaller:1.4.1")
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
-    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.core:core-ktx:1.18.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-process:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")

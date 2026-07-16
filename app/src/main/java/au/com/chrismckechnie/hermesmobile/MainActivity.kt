@@ -94,11 +94,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        viewModel.refreshActivityHistory()
+        HermesNotificationCoordinator(applicationContext).refreshSummary()
         refreshPermissionHealth()
         configureMobileBackground(viewModel.state.value)
     }
 
     private fun handleIntent(intent: Intent?) {
+        intent?.dataString?.takeIf { it.startsWith("hermes://pair?") }?.let { pairingUri ->
+            viewModel.offerPairing(pairingUri)
+            intent.data = null
+            return
+        }
         if (intent?.getStringExtra(HermesNotificationCoordinator.EXTRA_SCREEN) == "jobs") {
             viewModel.selectScreen(DeckScreen.Jobs)
             return

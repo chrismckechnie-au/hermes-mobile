@@ -562,4 +562,33 @@ class HermesHttpGatewayTest {
         assertEquals("/api/sessions/session-1/fork", request.path)
         assertEquals("session-2", child.id)
     }
+
+    @Test
+    fun `pairing exchange is unauthenticated and returns scoped token`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"object":"hermes.mobile_pairing","device_id":"device-1","token":"hmob_secret"}""",
+        ))
+
+        val result = gateway.exchangeMobilePairing(
+            MobilePairingRequest(server.url("/").toString().removeSuffix("/"), "grant-1"),
+            installationId = "phone-1",
+            deviceName = "Hermes Mobile",
+        )
+        val request = server.takeRequest()
+
+        assertEquals("/v1/mobile/pairing/exchange", request.path)
+        assertEquals(null, request.getHeader("Authorization"))
+        assertEquals("grant-1", JSONObject(request.body.readUtf8()).getString("grant"))
+        assertEquals("hmob_secret", result.token)
+    }
+
+    @Test
+    fun `ordinary json response is bounded`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("x".repeat(4 * 1024 * 1024 + 1)))
+
+        val error = runCatching { gateway.listModels(profile) }.exceptionOrNull()
+
+        assertTrue(error is HermesApiException)
+        assertTrue(error?.message.orEmpty().contains("too large"))
+    }
 }
