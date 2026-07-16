@@ -1989,20 +1989,16 @@ private fun ReasoningCard(item: ChatUiItem.Reasoning) {
 
 @Composable
 private fun ActivityHistoryCard(item: ChatUiItem.Activity) {
-    val latest = item.turns.lastOrNull()
     val activeCount = item.turns.count { !it.terminal }
+    val latest = item.turns.lastOrNull { !it.terminal } ?: item.turns.lastOrNull()
     var expanded by remember(item.id, activeCount > 0) { mutableStateOf(activeCount > 0) }
-    val label = when {
-        activeCount > 0 -> "$activeCount active work trace${if (activeCount == 1) "" else "s"}"
-        item.turns.size == 1 -> "Hermes work trace"
-        else -> "${item.turns.size} Hermes work traces"
-    }
+    val label = activityTraceLabel(item.turns)
     Card(
         modifier = Modifier
             .fillMaxWidth(0.9f)
             .heightIn(min = 48.dp)
             .semantics {
-                contentDescription = if (expanded) "Collapse Hermes work trace" else "Expand Hermes work trace"
+                contentDescription = if (expanded) "Collapse work details" else "Expand work details"
                 role = Role.Button
                 stateDescription = if (expanded) "Expanded" else "Collapsed"
             }
@@ -2020,12 +2016,14 @@ private fun ActivityHistoryCard(item: ChatUiItem.Activity) {
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
                     Text(label, style = T.Label)
-                    Text(
-                        latest?.latestStatus ?: "Host-provided Desktop activity",
-                        style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    if (activeCount > 0) {
+                        Text(
+                            latest?.latestStatus ?: "Working…",
+                            style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 if (activeCount > 0) {
                     CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
@@ -2042,12 +2040,22 @@ private fun ActivityHistoryCard(item: ChatUiItem.Activity) {
                     Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    item.turns.asReversed().forEach { turn -> ActivityTurnTrace(turn) }
+                    visibleActivityTurns(item.turns).forEach { turn -> ActivityTurnTrace(turn) }
                 }
             }
         }
     }
 }
+
+internal fun activityTraceLabel(turns: List<SessionActivityTurn>): String {
+    val active = turns.filterNot(SessionActivityTurn::terminal)
+    val steps = (active.ifEmpty { turns }).sumOf { it.tools.size }
+    val title = if (active.isEmpty()) "Work completed" else "Hermes is working"
+    return if (steps == 0) title else "$title · $steps step${if (steps == 1) "" else "s"}"
+}
+
+internal fun visibleActivityTurns(turns: List<SessionActivityTurn>): List<SessionActivityTurn> =
+    turns.filterNot(SessionActivityTurn::terminal).ifEmpty { turns }.asReversed()
 
 @Composable
 private fun ActivityTurnTrace(turn: SessionActivityTurn) {
@@ -2060,7 +2068,7 @@ private fun ActivityTurnTrace(turn: SessionActivityTurn) {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                if (turn.terminal) "COMPLETED TRACE" else "LIVE TRACE",
+                if (turn.terminal) "WORK DETAILS" else "CURRENT WORK",
                 style = T.MicroBold.copy(color = if (turn.terminal) T.Muted else T.Tool, letterSpacing = 0.4.sp),
             )
             Spacer(Modifier.width(7.dp))
@@ -2069,7 +2077,7 @@ private fun ActivityTurnTrace(turn: SessionActivityTurn) {
         turn.reasoning.takeLast(5).forEach { update ->
             Text(update, style = T.BodyMuted.copy(fontSize = 11.sp, lineHeight = 15.sp))
         }
-        turn.tools.takeLast(8).forEach { tool -> ToolActivityRow(tool) }
+        visibleActivityTools(turn).takeLast(8).forEach { tool -> ToolActivityRow(tool) }
         val summary = buildList {
             if (turn.tasks.isNotEmpty()) add(taskProgressLabel(turn.tasks))
             if (turn.subagents.isNotEmpty()) add("${turn.subagents.values.count(HermesSubagent::isWorking)} subagents active")
@@ -2078,6 +2086,9 @@ private fun ActivityTurnTrace(turn: SessionActivityTurn) {
         if (summary.isNotBlank()) Text(summary, style = T.Micro.copy(color = T.Tool, letterSpacing = 0.sp))
     }
 }
+
+internal fun visibleActivityTools(turn: SessionActivityTurn): List<ChatUiItem.Tool> =
+    if (turn.terminal) turn.tools else turn.tools.filter { it.running || it.failed }
 
 @Composable
 private fun MarkdownText(text: String, modifier: Modifier = Modifier) {

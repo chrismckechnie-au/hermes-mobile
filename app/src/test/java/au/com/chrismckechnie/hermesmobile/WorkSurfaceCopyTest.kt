@@ -97,6 +97,28 @@ class WorkSurfaceCopyTest {
     }
 
     @Test
+    fun `activity trace uses plain outcome copy and hides completed history while work is live`() {
+        val completed = SessionActivityTurn(
+            turnId = "turn-1",
+            tools = listOf(ChatUiItem.Tool("tool-1", "terminal", "done", running = false)),
+            terminal = true,
+        )
+        val active = SessionActivityTurn(
+            turnId = "turn-2",
+            tools = listOf(
+                ChatUiItem.Tool("tool-2", "terminal", "done", running = false),
+                ChatUiItem.Tool("tool-3", "search", "working", running = true),
+            ),
+        )
+
+        assertEquals("Work completed · 1 step", activityTraceLabel(listOf(completed)))
+        assertEquals("Hermes is working · 2 steps", activityTraceLabel(listOf(completed, active)))
+        assertEquals(listOf("turn-2"), visibleActivityTurns(listOf(completed, active)).map { it.turnId })
+        assertEquals(listOf("tool-3"), visibleActivityTools(active).map { it.id })
+        assertEquals(listOf("tool-1"), visibleActivityTools(completed).map { it.id })
+    }
+
+    @Test
     fun `consecutive tool prompts become one expandable activity group`() {
         val timeline = groupChatTimeline(
             listOf(
