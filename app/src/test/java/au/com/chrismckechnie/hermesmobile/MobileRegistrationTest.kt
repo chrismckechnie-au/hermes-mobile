@@ -1,5 +1,6 @@
 package au.com.chrismckechnie.hermesmobile
 
+import com.google.android.gms.tasks.Tasks
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -174,6 +175,16 @@ class MobileRegistrationTest {
             MobileRegistrationWorkDecision.Success,
             decideMobileRegistrationWork(MobileRegistrationReport(emptySet(), emptyList()), runAttemptCount = 0),
         )
+    }
+
+    @Test
+    fun `failed Firebase token task returns its failure without reading the result`() {
+        val failure = IllegalStateException("API disabled")
+
+        val result = Tasks.forException<String>(failure).messagingTokenResult()
+
+        assertTrue(result.isFailure)
+        assertEquals(failure, result.exceptionOrNull())
     }
 
     private fun host(id: String) = HostProfile(
