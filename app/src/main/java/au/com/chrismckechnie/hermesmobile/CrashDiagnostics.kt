@@ -12,6 +12,7 @@ import java.time.Instant
 
 enum class DiagnosticPhase(val value: String) {
     AppStart("app_start"),
+    AppReady("app_ready"),
     SendValidate("send_validate"),
     SessionCreate("session_create"),
     HistoryLoad("history_load"),
@@ -87,6 +88,10 @@ data class ProcessExitDiagnostic(
     val lastPhase: String?,
 )
 
+internal fun shouldUseSafeStartup(exit: ProcessExitDiagnostic?): Boolean =
+    exit?.lastPhase == DiagnosticPhase.AppStart.value &&
+        exit.reason in setOf("anr", "crash", "native_crash", "initialization_failure")
+
 internal fun formatProcessExitDiagnostic(
     diagnostic: ProcessExitDiagnostic,
     appVersion: String,
@@ -111,6 +116,7 @@ interface AppDiagnostics {
     fun recordPhase(phase: DiagnosticPhase, context: DiagnosticContext = DiagnosticContext())
     fun recordFailure(phase: DiagnosticPhase, error: Throwable)
     fun latestExit(): ProcessExitDiagnostic?
+    fun consumeSafeStartup(): Boolean = false
 }
 
 internal object NoOpAppDiagnostics : AppDiagnostics {
@@ -119,6 +125,7 @@ internal object NoOpAppDiagnostics : AppDiagnostics {
     override fun recordPhase(phase: DiagnosticPhase, context: DiagnosticContext) = Unit
     override fun recordFailure(phase: DiagnosticPhase, error: Throwable) = Unit
     override fun latestExit(): ProcessExitDiagnostic? = null
+    override fun consumeSafeStartup(): Boolean = false
 }
 
 internal object AppDiagnosticsRegistry {
@@ -175,6 +182,13 @@ private class AndroidAppDiagnostics(context: Context) : AppDiagnostics {
     override fun latestExit(): ProcessExitDiagnostic? = preferences.getString(KEY_LAST_EXIT, null)
         ?.let(::decodeExitDiagnostic)
 
+    override fun consumeSafeStartup(): Boolean {
+        val exit = latestExit()?.takeIf(::shouldUseSafeStartup) ?: return false
+        if (exit.timestampMillis <= preferences.getLong(KEY_SAFE_STARTUP_CONSUMED_TIMESTAMP, 0L)) return false
+        preferences.edit().putLong(KEY_SAFE_STARTUP_CONSUMED_TIMESTAMP, exit.timestampMillis).commit()
+        return true
+    }
+
     private fun capturePreviousExit() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         val activityManager = appContext.getSystemService(ActivityManager::class.java) ?: return
@@ -208,6 +222,7 @@ private class AndroidAppDiagnostics(context: Context) : AppDiagnostics {
         const val KEY_LAST_FAILURE_CATEGORY = "last_failure_category"
         const val KEY_LAST_EXIT = "last_exit"
         const val KEY_LAST_EXIT_TIMESTAMP = "last_exit_timestamp"
+        const val KEY_SAFE_STARTUP_CONSUMED_TIMESTAMP = "safe_startup_consumed_timestamp"
     }
 }
 
