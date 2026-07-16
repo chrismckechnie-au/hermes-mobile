@@ -89,8 +89,7 @@ data class ProcessExitDiagnostic(
 )
 
 internal fun shouldUseSafeStartup(exit: ProcessExitDiagnostic?): Boolean =
-    exit?.lastPhase == DiagnosticPhase.AppStart.value &&
-        exit.reason in setOf("anr", "crash", "native_crash", "initialization_failure")
+    exit?.reason in setOf("anr", "crash", "native_crash", "initialization_failure")
 
 internal fun formatProcessExitDiagnostic(
     diagnostic: ProcessExitDiagnostic,

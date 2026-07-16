@@ -100,10 +100,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        viewModel.refreshActivityHistory()
-        HermesNotificationCoordinator(applicationContext).refreshSummary()
         refreshPermissionHealth()
-        configureMobileBackground(viewModel.state.value)
+        if (safeStartup) {
+            HermesOverlayService.stop(applicationContext)
+        } else {
+            viewModel.refreshActivityHistory()
+            HermesNotificationCoordinator(applicationContext).refreshSummary()
+            configureMobileBackground(viewModel.state.value)
+        }
     }
 
     private fun handleIntent(intent: Intent?) {
