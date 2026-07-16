@@ -4,9 +4,13 @@ import android.app.Application
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.work.Configuration
 
 /** Keeps the draw-over-apps surface out of Hermes Mobile itself. */
-class HermesMobileApplication : Application(), DefaultLifecycleObserver {
+class HermesMobileApplication : Application(), DefaultLifecycleObserver, Configuration.Provider {
+    override val workManagerConfiguration: Configuration
+        get() = Configuration.Builder().build()
+
     override fun onCreate() {
         super<Application>.onCreate()
         AppDiagnosticsRegistry.initialize(this)

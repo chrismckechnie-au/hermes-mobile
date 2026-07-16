@@ -156,7 +156,6 @@ private class AndroidAppDiagnostics(context: Context) : AppDiagnostics {
             .commit()
         Thread {
             capturePreviousExit(previousPhase)
-            setCollectionEnabled(settingsStore.loadCrashReportingEnabled())
         }.start()
     }
 
@@ -248,7 +247,7 @@ private class AndroidAppDiagnostics(context: Context) : AppDiagnostics {
         const val KEY_LAST_EXIT_TIMESTAMP = "last_exit_timestamp"
         const val KEY_STARTUP_IN_PROGRESS = "startup_in_progress"
         const val KEY_SAFE_STARTUP_PENDING = "safe_startup_pending"
-        const val KEY_EMERGENCY_RECOVERY_SHOWN = "emergency_recovery_shown"
+        const val KEY_EMERGENCY_RECOVERY_SHOWN = "emergency_recovery_shown_v2"
     }
 }
 

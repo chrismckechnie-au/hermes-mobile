@@ -166,7 +166,6 @@ import com.composables.icons.lucide.Trash2
 import com.composables.icons.lucide.Wifi
 import com.composables.icons.lucide.X
 import com.composables.icons.lucide.Zap
-import com.google.firebase.FirebaseApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -3336,7 +3335,7 @@ private fun SettingsScreen(
     var showLicenses by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    val firebaseConfigured = remember(context) { FirebaseApp.getApps(context).isNotEmpty() }
+    val firebaseConfigured = remember(context) { FirebaseBootstrap.isConfigured(context) }
     val previousExit = remember { AppDiagnosticsRegistry.recorder.latestExit() }
     val appVersion = remember(context) {
         context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty().ifBlank { "Unknown" }

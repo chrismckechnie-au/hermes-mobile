@@ -45,6 +45,14 @@ import java.time.Instant
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
+internal object FirebaseBootstrap {
+    fun initialize(context: Context): Boolean =
+        FirebaseApp.getApps(context).isNotEmpty() || FirebaseApp.initializeApp(context) != null
+
+    fun isConfigured(context: Context): Boolean =
+        context.resources.getIdentifier("google_app_id", "string", context.packageName) != 0
+}
+
 enum class MobileErrorCategory(val wireValue: String) {
     HostOffline("host_offline"),
     ApprovalTimeout("approval_timeout"),
@@ -362,7 +370,7 @@ object MobileRegistration {
         var tokenFailure: Exception? = null
         if (hosts.any { it.id in enabled } && messagingToken == null) {
             try {
-                if (FirebaseApp.getApps(context).isEmpty()) {
+                if (!FirebaseBootstrap.initialize(context)) {
                     throw PermanentMobileRegistrationException(
                         "Firebase is not configured in this Hermes Mobile build.",
                     )
@@ -476,6 +484,11 @@ class MobileRegistrationWorker(
 }
 
 class HermesMessagingService : FirebaseMessagingService() {
+    override fun onCreate() {
+        FirebaseBootstrap.initialize(applicationContext)
+        super.onCreate()
+    }
+
     override fun onRegistered(installationId: String) {
         super.onRegistered(installationId)
         MobileRegistration.enqueueRetry(applicationContext)
