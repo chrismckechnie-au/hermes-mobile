@@ -2,6 +2,7 @@ package au.com.chrismckechnie.hermesmobile
 
 import android.Manifest
 import android.content.Intent
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
@@ -63,7 +64,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
+        super.onCreate(if (safeStartup) null else savedInstanceState)
         // Transparent bars; icon shade follows the system dark-mode setting
         // (matches the palette HermesMobileApp picks). No platform contrast
         // scrim over the three-button nav bar (API 29+).
@@ -93,10 +94,11 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.padding(vertical = 16.dp),
                         )
                         Button(onClick = {
+                            applicationContext.clearCrashProneRuntimeState()
                             AppDiagnosticsRegistry.recorder.recordPhase(DiagnosticPhase.AppStart)
                             recoveryAccepted = true
                         }) {
-                            Text("Open Hermes safely")
+                            Text("Reset runtime and open")
                         }
                     }
                 }
@@ -259,5 +261,16 @@ class MainActivity : ComponentActivity() {
     private companion object {
         const val PERMISSION_HEALTH_PREFERENCES = "permission_health"
         const val KEY_NOTIFICATION_AUTO_REQUESTED = "notification_auto_requested"
+    }
+}
+
+internal fun Context.clearCrashProneRuntimeState() {
+    HermesOverlayService.stop(this)
+    listOf(
+        "hermes_mobile_settings",
+        "hermes_overlay_position",
+        "hermes_overlay_visibility",
+    ).forEach { name ->
+        getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
     }
 }
