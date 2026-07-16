@@ -3481,9 +3481,9 @@ private fun SettingsScreen(
                     val registration = registrationByHost[host.id]
                     val registrationText = when {
                         !enabled && registration?.pending == true -> "Removing remote push…"
-                        !enabled -> "Remote push disabled"
                         registration?.pending == true -> "Remote push: Pending"
                         !registration?.errorMessage.isNullOrBlank() -> "Remote push: Failed"
+                        !enabled -> "Remote push disabled"
                         registration?.registered == true -> "Remote push: Registered"
                         else -> "Remote push: Preparing registration…"
                     }
