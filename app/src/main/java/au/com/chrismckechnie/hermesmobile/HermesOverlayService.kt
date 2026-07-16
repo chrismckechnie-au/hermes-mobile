@@ -709,7 +709,7 @@ class HermesOverlayService : Service() {
     private val Int.dp: Int get() = (this * resources.displayMetrics.density).toInt()
 
     companion object {
-        private const val CHIP_SIZE_DP = 44
+        private const val CHIP_SIZE_DP = 48
         private const val OVERLAY_MARGIN_DP = 12
         private const val PANEL_GAP_DP = 8
         private const val DISMISS_TARGET_SIZE_DP = 60

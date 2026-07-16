@@ -3876,9 +3876,7 @@ private fun HostPickerSheet(
         apiKey.isNotBlank() ||
         allowHttp != (editing?.allowInsecureHttp ?: false)
     val requestDismiss = {
-        if (state.hosts.isNotEmpty()) {
-            if (dirty) confirmDiscard = true else onDismiss()
-        }
+        if (dirty) confirmDiscard = true else onDismiss()
     }
     val submit = {
         if (validation.isValid) onSave(editing?.id, name, baseUrl, apiKey, allowHttp)
@@ -3897,7 +3895,7 @@ private fun HostPickerSheet(
                     Text(if (state.hosts.isEmpty()) "Connect Hermes" else "Choose a host", style = T.SheetTitle)
                     Text("Switch between desktop and server instances without reconfiguring the app.", style = T.BodyMuted, modifier = Modifier.padding(top = 5.dp))
                 }
-                if (state.hosts.isNotEmpty()) IconButton(onClick = requestDismiss, modifier = Modifier.size(T.ControlMin)) { Icon(Lucide.X, "Close host picker", tint = T.Muted) }
+                IconButton(onClick = requestDismiss, modifier = Modifier.size(T.ControlMin)) { Icon(Lucide.X, "Close host picker", tint = T.Muted) }
             }
 
             if (state.hosts.isNotEmpty()) {

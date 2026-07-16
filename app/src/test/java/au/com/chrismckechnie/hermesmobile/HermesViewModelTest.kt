@@ -350,6 +350,15 @@ class HermesViewModelTest {
         assertTrue(viewModel.state.value.errorMessage.orEmpty().contains("unlocked"))
     }
 
+    @Test
+    fun `host picker can close without saved hosts`() = runVmTest {
+        val (viewModel, _) = buildViewModel(store = FakeHostStore(HostSnapshot()))
+
+        assertTrue(viewModel.state.value.showHostPicker)
+        viewModel.hideHostPicker()
+        assertFalse(viewModel.state.value.showHostPicker)
+    }
+
     private fun runVmTest(block: suspend TestScope.() -> Unit) =
         kotlinx.coroutines.test.runTest(dispatcher) { block() }
 
