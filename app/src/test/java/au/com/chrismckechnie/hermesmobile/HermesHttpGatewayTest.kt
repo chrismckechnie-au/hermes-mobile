@@ -503,7 +503,8 @@ class HermesHttpGatewayTest {
         assertEquals("PUT", request.method)
         assertEquals("/v1/mobile/devices/install-1", request.path)
         assertEquals("host-1", body.getString("host_profile_id"))
-        assertEquals("token-1", body.getString("fid"))
+        assertEquals("token-1", body.getString("token"))
+        assertFalse(body.has("fid"))
         assertTrue(body.getJSONObject("capabilities").getBoolean("overlay"))
     }
 
