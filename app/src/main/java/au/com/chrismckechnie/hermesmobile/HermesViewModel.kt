@@ -819,6 +819,7 @@ class HermesViewModel(
     private val settingsStore: SettingsStore = InMemorySettingsStore(),
     private val diagnostics: AppDiagnostics = NoOpAppDiagnostics,
     private val activityPollingEnabled: Boolean = false,
+    private val safeStartup: Boolean = false,
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(
         HermesUiState(
@@ -1033,39 +1034,49 @@ class HermesViewModel(
             hosts = snapshot.hosts,
             activeHostId = selected,
             showHostPicker = snapshot.hosts.isEmpty(),
-            connectionPhase = if (selected == null) HostConnectionPhase.NoHost else HostConnectionPhase.Connecting,
-            sessionsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
-            jobsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
-            skillsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
-            toolsetsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
-            modelsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
+            connectionPhase = when {
+                selected == null -> HostConnectionPhase.NoHost
+                safeStartup -> HostConnectionPhase.Failed
+                else -> HostConnectionPhase.Connecting
+            },
+            sessionsResource = if (selected == null || safeStartup) ResourceState.Empty() else ResourceState.Loading,
+            jobsResource = if (selected == null || safeStartup) ResourceState.Empty() else ResourceState.Loading,
+            skillsResource = if (selected == null || safeStartup) ResourceState.Empty() else ResourceState.Loading,
+            toolsetsResource = if (selected == null || safeStartup) ResourceState.Empty() else ResourceState.Loading,
+            modelsResource = if (selected == null || safeStartup) ResourceState.Empty() else ResourceState.Loading,
             themeMode = settingsStore.loadThemeMode(),
-            notificationHostIds = settingsStore.loadNotificationHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
-            monitoredHostIds = settingsStore.loadMonitoredHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
-            overlayEnabled = settingsStore.loadOverlayEnabled(),
+            notificationHostIds = if (safeStartup) emptySet() else settingsStore.loadNotificationHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
+            monitoredHostIds = if (safeStartup) emptySet() else settingsStore.loadMonitoredHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
+            overlayEnabled = !safeStartup && settingsStore.loadOverlayEnabled(),
             crashReportingEnabled = settingsStore.loadCrashReportingEnabled(),
             activityEntries = settingsStore.loadAttentionItems(),
             unknownOutcomes = recoveredUnknownOutcomes,
             queuedInterrupts = recoveredQueuedInterrupts,
             composerDrafts = restoredDrafts.composerDrafts,
             newSessionDrafts = restoredDrafts.newSessionDrafts,
-            errorMessage = if (loadResult.unlockFailed) {
-                "Saved hosts could not be unlocked on this device (Keystore key changed). Re-add your host and API key."
-            } else null,
+            errorMessage = when {
+                loadResult.unlockFailed ->
+                    "Saved hosts could not be unlocked on this device (Keystore key changed). Re-add your host and API key."
+                safeStartup ->
+                    "Startup recovery paused after the previous crash. Tap Retry to reconnect safely."
+                else -> null
+            },
         )
-        if (selected != null) connect(selected)
-        recoveredUnknownOutcomes.forEach { (key, outcome) ->
-            if (!outcome.evidence && !outcome.timedOut) {
-                snapshot.hosts.firstOrNull { it.id == key.hostId }?.let { host -> watchUnknownOutcome(host, key) }
+        if (!safeStartup) {
+            if (selected != null) connect(selected)
+            recoveredUnknownOutcomes.forEach { (key, outcome) ->
+                if (!outcome.evidence && !outcome.timedOut) {
+                    snapshot.hosts.firstOrNull { it.id == key.hostId }?.let { host -> watchUnknownOutcome(host, key) }
+                }
             }
-        }
-        recoverRunAfterProcessDeath(snapshot)
-        if (activityPollingEnabled) {
-            viewModelScope.launch {
-                while (true) {
-                    refreshHostActivity()
-                    reconcileActiveRuns()
-                    delay(if (mutableState.value.activeRuns.isEmpty()) 30_000L else 5_000L)
+            recoverRunAfterProcessDeath(snapshot)
+            if (activityPollingEnabled) {
+                viewModelScope.launch {
+                    while (true) {
+                        refreshHostActivity()
+                        reconcileActiveRuns()
+                        delay(if (mutableState.value.activeRuns.isEmpty()) 30_000L else 5_000L)
+                    }
                 }
             }
         }
@@ -3257,7 +3268,7 @@ class HermesViewModel(
         private const val KEY_RUN_SESSION = "run.sessionId"
         private const val KEY_RUN_ID = "run.runId"
 
-        val Factory: ViewModelProvider.Factory = viewModelFactory {
+        fun factory(safeStartup: Boolean = false): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val application = checkNotNull(this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY])
                 HermesViewModel(
@@ -3267,8 +3278,11 @@ class HermesViewModel(
                     settingsStore = PreferencesSettingsStore(application),
                     diagnostics = AppDiagnosticsRegistry.recorder,
                     activityPollingEnabled = true,
+                    safeStartup = safeStartup,
                 )
             }
         }
+
+        val Factory: ViewModelProvider.Factory = factory()
     }
 }

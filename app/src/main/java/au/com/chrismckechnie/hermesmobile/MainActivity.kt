@@ -23,7 +23,10 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 class MainActivity : ComponentActivity() {
-    private val viewModel: HermesViewModel by viewModels { HermesViewModel.Factory }
+    private val safeStartup by lazy {
+        AppDiagnosticsRegistry.recorder.consumeSafeStartup()
+    }
+    private val viewModel: HermesViewModel by viewModels { HermesViewModel.factory(safeStartup) }
     private var permissionHealth by mutableStateOf(
         PermissionHealth(
             notifications = notificationPermissionStatus(
@@ -63,6 +66,9 @@ class MainActivity : ComponentActivity() {
         refreshPermissionHealth()
         setContent {
             val state by viewModel.state.collectAsStateWithLifecycle()
+            LaunchedEffect(Unit) {
+                AppDiagnosticsRegistry.recorder.recordPhase(DiagnosticPhase.AppReady)
+            }
             LaunchedEffect(state.monitoredHostIds, state.overlayEnabled, state.activeRuns.keys) {
                 configureMobileBackground(state)
             }

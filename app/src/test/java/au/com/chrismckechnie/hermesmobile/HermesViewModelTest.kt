@@ -308,8 +308,9 @@ class HermesViewModelTest {
         store: FakeHostStore = FakeHostStore(HostSnapshot(listOf(hostA, hostB), "h1")),
         settingsStore: SettingsStore = FakeSettingsStore(ThemeMode.System),
         diagnostics: AppDiagnostics = NoOpAppDiagnostics,
+        safeStartup: Boolean = false,
     ): Pair<HermesViewModel, FakeGateway> {
-        val viewModel = HermesViewModel(gateway, store, savedState, settingsStore, diagnostics)
+        val viewModel = HermesViewModel(gateway, store, savedState, settingsStore, diagnostics, safeStartup = safeStartup)
         advanceUntilIdle()
         return viewModel to gateway
     }
@@ -348,6 +349,22 @@ class HermesViewModelTest {
         val (viewModel, _) = buildViewModel(store = store)
 
         assertTrue(viewModel.state.value.errorMessage.orEmpty().contains("unlocked"))
+    }
+
+    @Test
+    fun `safe startup pauses automatic recovery until retry`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System)
+        val (viewModel, gateway) = buildViewModel(settingsStore = settings, safeStartup = true)
+
+        assertEquals(HostConnectionPhase.Failed, viewModel.state.value.connectionPhase)
+        assertTrue(viewModel.state.value.errorMessage.orEmpty().contains("recovery paused"))
+        assertEquals(0, gateway.jobsCalls)
+
+        viewModel.retryConnection()
+        advanceUntilIdle()
+
+        assertEquals(HostConnectionPhase.Connected, viewModel.state.value.connectionPhase)
+        assertEquals(1, gateway.jobsCalls)
     }
 
     @Test
