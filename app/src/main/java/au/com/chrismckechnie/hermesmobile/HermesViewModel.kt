@@ -192,15 +192,27 @@ data class SessionKey(
 internal fun sortSessionsByActivity(
     sessions: List<HermesSession>,
     activityUpdatedAt: Map<String, Long> = emptyMap(),
-): List<HermesSession> = sessions.sortedWith(
-    compareByDescending<HermesSession> { session ->
-        maxOf(
-            sessionActivityMillis(session.lastActive),
-            activityUpdatedAt[session.id]?.let(::epochValueMillis) ?: Long.MIN_VALUE,
-        )
+): List<HermesSession> = normalizeSessions(sessions)
+    .sortedWith(
+        compareByDescending<HermesSession> { session ->
+            maxOf(
+                sessionActivityMillis(session.lastActive),
+                activityUpdatedAt[session.id]?.let(::epochValueMillis) ?: Long.MIN_VALUE,
+            )
+        }
+            .thenBy { it.title.orEmpty().lowercase() },
+    )
+
+internal fun normalizeSessions(sessions: List<HermesSession>): List<HermesSession> {
+    val latestById = linkedMapOf<String, HermesSession>()
+    sessions.forEach { session ->
+        val existing = latestById[session.id]
+        if (existing == null || sessionActivityMillis(session.lastActive) >= sessionActivityMillis(existing.lastActive)) {
+            latestById[session.id] = session
+        }
     }
-        .thenBy { it.title.orEmpty().lowercase() },
-)
+    return latestById.values.toList()
+}
 
 /** Filters only the sessions already loaded from the selected host. */
 internal fun filterSessions(
@@ -578,6 +590,7 @@ data class HermesUiState(
     val hostUpdateStarting: Boolean = false,
     val sessionsResource: ResourceState<List<HermesSession>> = ResourceState.Empty(),
     val sessionsHasMore: Boolean = false,
+    val sessionsNextOffset: Int = 0,
     val sessionsLoadingMore: Boolean = false,
     val sessionsLoadMoreError: String? = null,
     val activeSessionId: String? = null,
@@ -617,7 +630,7 @@ data class HermesUiState(
     val overlayEnabled: Boolean = false,
     val crashReportingEnabled: Boolean = false,
 ) {
-    val sessions: List<HermesSession> get() = sessionsResource.itemsOrEmpty()
+    val sessions: List<HermesSession> get() = normalizeSessions(sessionsResource.itemsOrEmpty())
     val messages: List<ChatUiItem> get() = transcriptResource.itemsOrEmpty()
     val jobs: List<HermesJob> get() = jobsResource.itemsOrEmpty()
     val skills: List<HermesSkill> get() = skillsResource.itemsOrEmpty()
@@ -959,9 +972,11 @@ class HermesViewModel(
             activeSessionId = if (activeHostId == oldKey.hostId && activeSessionId == oldKey.sessionId) newKey.sessionId else activeSessionId,
             pendingSessionTarget = if (pendingSessionTarget == oldKey) newKey else pendingSessionTarget,
             sessionsResource = if (activeHostId == oldKey.hostId) {
-                sessionsResource.withItems(sessions.map { session ->
-                    if (session.id == oldKey.sessionId) session.copy(id = newKey.sessionId) else session
-                }.distinctBy(HermesSession::id))
+                sessionsResource.withItems(
+                    normalizeSessions(sessions.map { session ->
+                        if (session.id == oldKey.sessionId) session.copy(id = newKey.sessionId) else session
+                    }),
+                )
             } else {
                 sessionsResource
             },
@@ -1117,6 +1132,7 @@ class HermesViewModel(
                     hostUpdate = null,
                     sessionsResource = listOf(placeholder).asResourceState(),
                     sessionsHasMore = false,
+                    sessionsNextOffset = 0,
                     sessionsLoadingMore = false,
                     sessionsLoadMoreError = null,
                     activeSessionId = sessionId,
@@ -1236,6 +1252,7 @@ class HermesViewModel(
                 activeHostSessions = it.activeHostSessions.filterKeys { key -> key.hostId != profile.id },
                 sessionsResource = ResourceState.Loading,
                 sessionsHasMore = false,
+                sessionsNextOffset = 0,
                 sessionsLoadingMore = false,
                 sessionsLoadMoreError = null,
                 activeSessionId = null,
@@ -1269,6 +1286,7 @@ class HermesViewModel(
                 hostUpdateStarting = false,
                 sessionsResource = ResourceState.Loading,
                 sessionsHasMore = false,
+                sessionsNextOffset = 0,
                 sessionsLoadingMore = false,
                 sessionsLoadMoreError = null,
                 activeSessionId = null,
@@ -1329,6 +1347,7 @@ class HermesViewModel(
                     hostUpdateStarting = false,
                     sessionsResource = if (selected == null) ResourceState.Empty() else ResourceState.Loading,
                     sessionsHasMore = false,
+                    sessionsNextOffset = 0,
                     sessionsLoadingMore = false,
                     sessionsLoadMoreError = null,
                     activeSessionId = null,
@@ -1424,6 +1443,7 @@ class HermesViewModel(
                         sessionsResource = sessionPage?.sessions?.asResourceState()
                             ?: state.sessionsResource.refreshError(friendlyMessage(checkNotNull(sessions.exceptionOrNull()))),
                         sessionsHasMore = sessionPage?.hasMore ?: state.sessionsHasMore,
+                        sessionsNextOffset = sessionPage?.sessions?.size ?: state.sessionsNextOffset,
                         jobsResource = jobs?.fold(
                             onSuccess = { it.asResourceState() },
                             onFailure = { error ->
@@ -1443,15 +1463,16 @@ class HermesViewModel(
         if (!snapshot.sessionsHasMore || snapshot.sessionsLoadingMore || snapshot.sessionsRefreshing) return
         mutableState.update { it.copy(sessionsLoadingMore = true, sessionsLoadMoreError = null) }
         viewModelScope.launch {
-            runCatching { gateway.listSessions(host, offset = snapshot.sessions.size) }
+            runCatching { gateway.listSessions(host, offset = snapshot.sessionsNextOffset) }
                 .onSuccess { page ->
                     if (mutableState.value.activeHostId == host.id) {
                         mutableState.update { state ->
                             state.copy(
                                 sessionsResource = state.sessionsResource.withItems(
-                                    (state.sessions + page.sessions).distinctBy(HermesSession::id),
+                                    state.sessionsResource.itemsOrEmpty() + page.sessions,
                                 ),
                                 sessionsHasMore = page.hasMore,
+                                sessionsNextOffset = state.sessionsNextOffset + page.sessions.size,
                                 sessionsLoadingMore = false,
                                 sessionsLoadMoreError = null,
                             )
@@ -2802,6 +2823,7 @@ class HermesViewModel(
                 connectionPhase = HostConnectionPhase.Connecting,
                 sessionsResource = if (preservePendingSession) state.sessionsResource else ResourceState.Loading,
                 sessionsHasMore = false,
+                sessionsNextOffset = 0,
                 sessionsLoadingMore = false,
                 sessionsLoadMoreError = null,
                 jobsResource = ResourceState.Loading,
@@ -2854,8 +2876,7 @@ class HermesViewModel(
                     val pendingSession = pendingTarget?.let { target ->
                         state.sessions.firstOrNull { it.id == target.sessionId }
                     }
-                    val connectedSessions = (loaded.sessions.sessions + listOfNotNull(pendingSession))
-                        .distinctBy(HermesSession::id)
+                    val connectedSessions = loaded.sessions.sessions + listOfNotNull(pendingSession)
                     val availableModels = loaded.models.loadedItemsOrNull()
                     val connectedActiveSessionId = pendingTarget?.sessionId
                         ?: state.activeSessionId?.takeIf { id -> connectedSessions.any { session -> session.id == id } }
@@ -2867,6 +2888,7 @@ class HermesViewModel(
                         hostUpdateStarting = false,
                         sessionsResource = connectedSessions.asResourceState(),
                         sessionsHasMore = loaded.sessions.hasMore,
+                        sessionsNextOffset = loaded.sessions.sessions.size,
                         sessionsLoadingMore = false,
                         sessionsLoadMoreError = null,
                         jobsResource = loaded.jobs,
@@ -3046,6 +3068,7 @@ class HermesViewModel(
                         sessionsResource = sessionPage?.sessions?.asResourceState()
                             ?: state.sessionsResource.refreshError(friendlyMessage(checkNotNull(sessions.exceptionOrNull()))),
                         sessionsHasMore = sessionPage?.hasMore ?: state.sessionsHasMore,
+                        sessionsNextOffset = sessionPage?.sessions?.size ?: state.sessionsNextOffset,
                         jobsResource = jobs?.fold(
                             onSuccess = { it.asResourceState() },
                             onFailure = { error ->

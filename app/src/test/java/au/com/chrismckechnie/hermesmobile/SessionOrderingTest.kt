@@ -38,6 +38,29 @@ class SessionOrderingTest {
     }
 
     @Test
+    fun `duplicate session ids keep the latest host record`() {
+        val sessions = listOf(
+            session("duplicate", "1700000000"),
+            session("other", "1800000000"),
+            session("duplicate", "1900000000").copy(title = "Refreshed title"),
+            session("tie", "1600000000").copy(title = "Old tie"),
+            session("tie", "1600000000").copy(title = "Refreshed tie"),
+        )
+
+        assertEquals(
+            listOf("Refreshed title", "other", "Refreshed tie"),
+            sortSessionsByActivity(sessions).map(HermesSession::title),
+        )
+        assertEquals(
+            "Refreshed title",
+            HermesUiState(
+                sessionsResource = ResourceState.Data(sessions),
+                activeSessionId = "duplicate",
+            ).activeSession?.title,
+        )
+    }
+
+    @Test
     fun `supports seconds milliseconds and ISO activity timestamps`() {
         assertEquals(1_700_000_000_000, sessionActivityMillis("1700000000"))
         assertEquals(1_700_000_000_123, sessionActivityMillis("1700000000123"))

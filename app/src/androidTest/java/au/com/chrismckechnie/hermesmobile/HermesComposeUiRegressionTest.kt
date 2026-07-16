@@ -147,6 +147,21 @@ class HermesComposeUiRegressionTest {
         assertTrue("Screenshot height must be non-zero", screenshot.height > 0)
     }
 
+    @Test
+    fun sessionsScreen_toleratesDuplicateIdsDuringHostRefresh() {
+        val duplicateSessions = listOf(
+            SESSION,
+            SESSION.copy(title = "Release verification refresh", lastActive = "2026-07-16T02:00:00Z"),
+        )
+        setAppContent(
+            baseState(DeckScreen.Sessions).copy(
+                sessionsResource = ResourceState.Data(duplicateSessions),
+            ),
+        )
+
+        composeRule.onNodeWithText("Release verification refresh").assertIsDisplayed()
+    }
+
     private fun setAppContent(
         state: HermesUiState,
         width: Int? = null,
