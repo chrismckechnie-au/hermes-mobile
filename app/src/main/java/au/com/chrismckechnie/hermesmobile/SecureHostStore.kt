@@ -69,6 +69,75 @@ object MobileRegistrationStatusCodec {
     }.getOrDefault(emptyList())
 }
 
+/** JSON storage for bounded, locally sanitized terminal Run summaries. */
+object CompletedActivityDigestCodec {
+    fun encode(digests: List<CompletedActivityDigest>): String = JSONArray().apply {
+        boundedActivityDigests(digests).forEach { digest ->
+            put(JSONObject().apply {
+                put("hostId", digest.hostId)
+                put("sessionId", digest.sessionId)
+                put("runId", digest.runId)
+                put("outcome", digest.outcome.name)
+                put("completedAtMillis", digest.completedAtMillis)
+                put("milestones", JSONArray(digest.milestones.takeLast(3).map { it.take(180) }))
+                put("tools", JSONArray().apply {
+                    digest.tools.take(80).forEach { tool ->
+                        put(JSONObject().apply {
+                            put("name", tool.name.take(120))
+                            put("preview", safeActivityPreview(tool.preview) ?: JSONObject.NULL)
+                            put("failed", tool.failed)
+                            tool.durationSeconds?.takeIf { it >= 0.0 }?.let { put("durationSeconds", it) }
+                        })
+                    }
+                })
+            })
+        }
+    }.toString()
+
+    fun decode(raw: String): List<CompletedActivityDigest> = runCatching {
+        val array = JSONArray(raw)
+        buildList {
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val hostId = item.optString("hostId").trim()
+                val sessionId = item.optString("sessionId").trim()
+                val runId = item.optString("runId").trim()
+                val outcome = item.optString("outcome")
+                    .let { name -> ActivityOutcome.entries.firstOrNull { it.name == name } }
+                    ?: continue
+                val completedAtMillis = item.optLong("completedAtMillis").takeIf { it > 0L } ?: continue
+                if (hostId.isBlank() || sessionId.isBlank() || runId.isBlank()) continue
+                val milestones = item.optJSONArray("milestones")?.let { values ->
+                    buildList {
+                        for (milestoneIndex in 0 until values.length()) {
+                            values.optString(milestoneIndex).trim().takeIf(String::isNotBlank)?.let { add(it.take(180)) }
+                        }
+                    }.takeLast(3)
+                }.orEmpty()
+                val tools = item.optJSONArray("tools")?.let { values ->
+                    buildList {
+                        for (toolIndex in 0 until values.length()) {
+                            val tool = values.optJSONObject(toolIndex) ?: continue
+                            val name = tool.optString("name").trim().take(120)
+                            if (name.isBlank()) continue
+                            add(
+                                CompletedToolDigest(
+                                    name = name,
+                                    preview = safeActivityPreview(tool.optNullableString("preview")),
+                                    failed = tool.optBoolean("failed"),
+                                    durationSeconds = tool.optDouble("durationSeconds")
+                                        .takeIf { tool.has("durationSeconds") && it >= 0.0 },
+                                ),
+                            )
+                        }
+                    }.take(80)
+                }.orEmpty()
+                add(CompletedActivityDigest(hostId, sessionId, runId, milestones, tools, outcome, completedAtMillis))
+            }
+        }.let(::boundedActivityDigests)
+    }.getOrDefault(emptyList())
+}
+
 private fun JSONObject.optLongOrNull(name: String): Long? =
     if (has(name) && !isNull(name)) optLong(name) else null
 
@@ -160,6 +229,26 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
 
     override fun saveThemeMode(mode: ThemeMode) {
         preferences.edit().putString("theme_mode", mode.name).apply()
+    }
+
+    override fun loadChatActivityLayout(): ChatActivityLayout =
+        preferences.getString("chat_activity_layout", null)
+            ?.let { value -> ChatActivityLayout.entries.firstOrNull { it.name == value } }
+            ?: ChatActivityLayout.Grouped
+
+    override fun saveChatActivityLayout(layout: ChatActivityLayout) {
+        preferences.edit().putString("chat_activity_layout", layout.name).apply()
+    }
+
+    override fun loadCompletedActivityDigests(): List<CompletedActivityDigest> =
+        preferences.getString(COMPLETED_ACTIVITY_DIGESTS_KEY, null)
+            ?.let(CompletedActivityDigestCodec::decode)
+            .orEmpty()
+
+    override fun saveCompletedActivityDigests(digests: List<CompletedActivityDigest>) {
+        preferences.edit()
+            .putString(COMPLETED_ACTIVITY_DIGESTS_KEY, CompletedActivityDigestCodec.encode(digests))
+            .apply()
     }
 
     override fun loadRunCheckpoints(): List<RunCheckpoint> {
@@ -419,6 +508,7 @@ class PreferencesSettingsStore(context: Context) : SettingsStore {
         const val UNKNOWN_OUTCOMES_KEY = "unknown_outcomes_v1"
         const val QUEUED_INTERRUPTS_KEY = "queued_interrupts_v1"
         const val MOBILE_REGISTRATION_STATUSES_KEY = "mobile_registration_statuses_v1"
+        const val COMPLETED_ACTIVITY_DIGESTS_KEY = "completed_activity_digests_v1"
     }
 }
 

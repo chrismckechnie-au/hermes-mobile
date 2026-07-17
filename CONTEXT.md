@@ -18,6 +18,8 @@ Glossary of the ubiquitous language for Hermes Mobile. Terms only — no impleme
 
 **Default permissions** — leaving the run permission mode unset so the selected Hermes host applies its configured approval policy; `full-access` is isolated to one run and is shown only when the host advertises support.
 
+**Chat activity layout** — a global Chat preference that controls whether tool activity is grouped by turn or segmented when Hermes changes between a meaningful status/reasoning update and a tool batch. It affects presentation only; the Hermes host and transcript are unchanged.
+
 **Run** — one submitted agent turn created through `/v1/runs`; its events, approvals, cancellation, and terminal status are tracked independently of navigation.
 
 **Session** — a conversation thread that exists on the Hermes host, listed and resumed from the mobile client.

@@ -31,6 +31,10 @@ enum class ThemeMode { System, Dark, Light }
 interface SettingsStore {
     fun loadThemeMode(): ThemeMode
     fun saveThemeMode(mode: ThemeMode)
+    fun loadChatActivityLayout(): ChatActivityLayout = ChatActivityLayout.Grouped
+    fun saveChatActivityLayout(layout: ChatActivityLayout) = Unit
+    fun loadCompletedActivityDigests(): List<CompletedActivityDigest> = emptyList()
+    fun saveCompletedActivityDigests(digests: List<CompletedActivityDigest>) = Unit
     /**
      * All host-owned Runs that still need recovery after Android tears down the
      * process. The singular methods remain as a migration seam for existing
@@ -80,6 +84,8 @@ interface SettingsStore {
 
 private class InMemorySettingsStore : SettingsStore {
     private var mode = ThemeMode.System
+    private var activityLayout = ChatActivityLayout.Grouped
+    private var completedActivityDigests = emptyList<CompletedActivityDigest>()
     private var checkpoints = emptyList<RunCheckpoint>()
     private val runStatuses = mutableMapOf<String, String>()
     private var unknownOutcomeRecords = emptyList<UnknownOutcomeRecord>()
@@ -92,6 +98,12 @@ private class InMemorySettingsStore : SettingsStore {
     override fun loadThemeMode(): ThemeMode = mode
     override fun saveThemeMode(mode: ThemeMode) {
         this.mode = mode
+    }
+    override fun loadChatActivityLayout(): ChatActivityLayout = activityLayout
+    override fun saveChatActivityLayout(layout: ChatActivityLayout) { activityLayout = layout }
+    override fun loadCompletedActivityDigests(): List<CompletedActivityDigest> = completedActivityDigests
+    override fun saveCompletedActivityDigests(digests: List<CompletedActivityDigest>) {
+        completedActivityDigests = boundedActivityDigests(digests)
     }
     override fun loadRunCheckpoints(): List<RunCheckpoint> = checkpoints
     override fun saveRunCheckpoints(checkpoints: List<RunCheckpoint>) { this.checkpoints = checkpoints.distinct() }
@@ -369,6 +381,7 @@ sealed interface ChatUiItem {
     data class User(
         override val id: String,
         val text: String,
+        val lifecycle: PromptLifecycle? = null,
     ) : ChatUiItem
 
     data class Assistant(
@@ -400,6 +413,13 @@ sealed interface ChatUiItem {
     data class Activity(
         override val id: String,
         val turns: List<SessionActivityTurn>,
+    ) : ChatUiItem
+
+    /** Local, sanitized terminal Run summary retained when host activity is unavailable. */
+    data class CompletedActivity(
+        override val id: String,
+        val digest: CompletedActivityDigest,
+        val showTools: Boolean,
     ) : ChatUiItem
 
     data class Approval(
@@ -450,6 +470,20 @@ internal fun mergeStoredAndLiveTail(
     return storedMessages + reconciledTail
 }
 
+internal fun withInferredPromptLifecycles(items: List<ChatUiItem>): List<ChatUiItem> =
+    items.mapIndexed { index, item ->
+        val user = item as? ChatUiItem.User ?: return@mapIndexed item
+        val nextUser = items.subList(index + 1, items.size).indexOfFirst { it is ChatUiItem.User }
+            .let { relative -> if (relative < 0) items.size else index + 1 + relative }
+        val following = items.subList(index + 1, nextUser)
+        val inferred = when {
+            following.any { it is ChatUiItem.Approval } -> PromptLifecycle.Approval
+            following.filterIsInstance<ChatUiItem.Assistant>().any { it.text.isNotBlank() } -> PromptLifecycle.Completed
+            else -> user.lifecycle
+        }
+        if (inferred == user.lifecycle) user else user.copy(lifecycle = inferred)
+    }
+
 /**
  * Immutable coordinates of the Run in flight. Holds the authenticated Host
  * snapshot so Stop/approval/reconciliation keep working even if the profile
@@ -475,25 +509,30 @@ data class ActiveRun(
     val reconcilingTranscript: Boolean = false,
     val terminalUnsynced: Boolean = false,
     val lastEventId: Long? = null,
+    val terminalOutcome: ActivityOutcome? = null,
 ) {
     val ref: RunRef get() = RunRef(host.id, sessionId, runId)
 
     override fun toString(): String = "ActiveRun(runId=$runId, sessionId=$sessionId)"
 }
 
-internal fun safeRunStatusText(event: HermesRunEvent): String = when (event) {
+internal fun safeRunStatusText(event: HermesRunEvent): String? = when (event) {
     is HermesRunEvent.ReasoningAvailable -> event.text
         .trim()
         .replace(Regex("\\s+"), " ")
         .take(180)
-        .ifBlank { "Reviewing the next step…" }
-    is HermesRunEvent.ToolStarted -> "Using ${safeToolLabel(event.tool)}…"
+        .takeIf(::isUsefulProgressUpdate)
+    is HermesRunEvent.ToolStarted -> null
     is HermesRunEvent.ToolCompleted -> if (event.failed) {
         "A tool needs attention…"
     } else {
-        "Continuing after ${safeToolLabel(event.tool)}…"
+        null
     }
-    is HermesRunEvent.TasksUpdated -> "Updated the task plan…"
+    is HermesRunEvent.TasksUpdated -> event.tasks.takeIf { it.isNotEmpty() }?.let { tasks ->
+        val active = tasks.firstOrNull { it.status == "in_progress" }?.content
+            ?.trim()?.replace(Regex("\\s+"), " ")?.take(120)
+        listOfNotNull(active, taskProgressLabel(tasks)).joinToString(" · ")
+    }
     is HermesRunEvent.SubagentUpdated -> event.subagent.activity
         ?.trim()
         ?.replace(Regex("\\s+"), " ")
@@ -513,19 +552,36 @@ internal fun safeRunStatusText(event: HermesRunEvent): String = when (event) {
     HermesRunEvent.Cancelled -> "The task was stopped"
 }
 
-private fun safeToolLabel(tool: String): String = tool
-    .replace('_', ' ')
-    .replace('-', ' ')
-    .filter { it.isLetterOrDigit() || it.isWhitespace() }
-    .trim()
-    .replace(Regex("\\s+"), " ")
-    .take(60)
-    .ifBlank { "a tool" }
-
 internal fun appendSafeStatus(history: List<String>, status: String): List<String> {
     val clean = status.trim().replace(Regex("\\s+"), " ").take(180)
     if (clean.isBlank() || history.lastOrNull() == clean) return history
     return (history + clean).takeLast(10)
+}
+
+enum class PromptLifecycle(val emoji: String) {
+    Working("👀"),
+    Approval("⚠️"),
+    Completed("✅"),
+    Failed("❌"),
+    Cancelled("❌"),
+}
+
+internal fun isUsefulProgressUpdate(text: String): Boolean {
+    val normalized = text.trim().lowercase().trimEnd('.', '…').trim()
+    if (normalized in setOf(
+            "starting task",
+            "finishing the task",
+            "finishing transcript sync",
+            "writing the response",
+            "checked the workspace",
+        )
+    ) return false
+    val lifecycleTail = when {
+        normalized.startsWith("using ") -> normalized.removePrefix("using ")
+        normalized.startsWith("continuing after ") -> normalized.removePrefix("continuing after ")
+        else -> return normalized.isNotBlank()
+    }.trimEnd('.', '…').trim()
+    return lifecycleTail.split(Regex("\\s+")).size > 3
 }
 
 /** A submitRun whose response was lost: the Host may or may not be executing the turn. */
@@ -622,6 +678,8 @@ data class HermesUiState(
     val confirmDeleteSessionId: String? = null,
     val errorMessage: String? = null,
     val themeMode: ThemeMode = ThemeMode.System,
+    val chatActivityLayout: ChatActivityLayout = ChatActivityLayout.Grouped,
+    val completedActivityDigests: List<CompletedActivityDigest> = emptyList(),
     val notificationHostIds: Set<String> = emptySet(),
     val monitoredHostIds: Set<String> = emptySet(),
     val overlayEnabled: Boolean = false,
@@ -732,7 +790,7 @@ data class HermesUiState(
             val storedMessages = messages.withRunUsage(activeSessionKey?.let(runUsageByMessage::get).orEmpty())
             val run = activeRun
             if (run == null || run.sessionId != activeSessionId) {
-                val key = activeSessionKey ?: return storedMessages
+                val key = activeSessionKey ?: return withInferredPromptLifecycles(storedMessages)
                 val durableTurns = sessionActivity[key]?.turns.orEmpty()
                 val withDurableActivity = if (durableTurns.isEmpty()) storedMessages else {
                     storedMessages + ChatUiItem.Activity(
@@ -740,28 +798,47 @@ data class HermesUiState(
                         turns = durableTurns,
                     )
                 }
+                val hostRunIds = durableTurns.map(SessionActivityTurn::turnId).toSet()
+                val hostAlreadySuppliesTools = durableTurns.any { it.tools.isNotEmpty() } ||
+                    storedMessages.any { it is ChatUiItem.Tool }
+                val withLocalActivity = withDurableActivity + completedActivityDigests
+                    .asSequence()
+                    .filter { digest ->
+                        digest.hostId == key.hostId &&
+                            digest.sessionId == key.sessionId &&
+                            digest.runId !in hostRunIds
+                    }
+                    .sortedBy(CompletedActivityDigest::completedAtMillis)
+                    .map { digest ->
+                        ChatUiItem.CompletedActivity(
+                            id = "local-activity:${digest.hostId}:${digest.sessionId}:${digest.runId}",
+                            digest = digest,
+                            showTools = !hostAlreadySuppliesTools,
+                        )
+                    }
+                    .toList()
                 val activity = activeHostSessions[key]
                     ?.takeUnless(HermesActiveSession::isStalledActivity)
-                    ?: return withDurableActivity
+                    ?: return withInferredPromptLifecycles(withLocalActivity)
                 val updates = (activity.statusHistory + listOfNotNull(activity.latestStatus))
                     .map { it.trim() }
-                    .filter(String::isNotBlank)
+                    .filter(::isUsefulProgressUpdate)
                     .distinct()
                     .takeLast(12)
-                return if (updates.isEmpty()) withDurableActivity else withDurableActivity + ChatUiItem.Reasoning(
+                return withInferredPromptLifecycles(if (updates.isEmpty()) withLocalActivity else withLocalActivity + ChatUiItem.Reasoning(
                     id = "host-activity:${key.hostId}:${key.sessionId}",
                     updates = updates,
-                )
+                ))
             }
             val tail = mergeStoredAndLiveTail(storedMessages, run.tail, run.baselineMessageCount)
-            return if (run.awaitingApproval && !run.approvalDetailsLost) {
+            return withInferredPromptLifecycles(if (run.awaitingApproval && !run.approvalDetailsLost) {
                 tail + ChatUiItem.Approval(
                     id = "approval:${run.runId}",
                     runRef = run.ref,
                     command = run.approvalCommand,
                     submitting = run.approvalSubmitting,
                 )
-            } else tail
+            } else tail)
         }
 
     /** Run banner is shown whenever the Run's Session is not the visible chat. */
@@ -1055,6 +1132,10 @@ class HermesViewModel(
             toolsetsResource = if (selected == null || safeStartup) ResourceState.Empty() else ResourceState.Loading,
             modelsResource = if (selected == null || safeStartup) ResourceState.Empty() else ResourceState.Loading,
             themeMode = settingsStore.loadThemeMode(),
+            chatActivityLayout = settingsStore.loadChatActivityLayout(),
+            completedActivityDigests = if (safeStartup) emptyList() else boundedActivityDigests(
+                settingsStore.loadCompletedActivityDigests(),
+            ),
             notificationHostIds = if (safeStartup) emptySet() else settingsStore.loadNotificationHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
             monitoredHostIds = if (safeStartup) emptySet() else settingsStore.loadMonitoredHostIds().intersect(snapshot.hosts.map { it.id }.toSet()),
             overlayEnabled = !safeStartup && settingsStore.loadOverlayEnabled(),
@@ -1095,6 +1176,11 @@ class HermesViewModel(
     fun setThemeMode(mode: ThemeMode) {
         settingsStore.saveThemeMode(mode)
         mutableState.update { it.copy(themeMode = mode) }
+    }
+
+    fun setChatActivityLayout(layout: ChatActivityLayout) {
+        settingsStore.saveChatActivityLayout(layout)
+        mutableState.update { it.copy(chatActivityLayout = layout) }
     }
 
     fun setHostNotificationsEnabled(hostId: String, enabled: Boolean) {
@@ -2286,7 +2372,7 @@ class HermesViewModel(
                     },
                     assistantId = assistantId,
                     tail = listOf(
-                        ChatUiItem.User(UUID.randomUUID().toString(), text),
+                        ChatUiItem.User(UUID.randomUUID().toString(), text, lifecycle = PromptLifecycle.Working),
                         ChatUiItem.Assistant(
                             id = assistantId,
                             text = "",
@@ -2389,19 +2475,20 @@ class HermesViewModel(
             if (existing == null || existing.runId != run.runId) return@update state
             if (eventId != null && eventId <= (existing.lastEventId ?: 0L)) return@update state
             applied = true
+            val statusTail = if (safeStatus == null) existing.tail else existing.tail.map { item ->
+                if (item is ChatUiItem.Assistant && item.id == existing.assistantId) {
+                    item.copy(
+                        safeStatus = safeStatus,
+                        safeStatusHistory = appendSafeStatus(item.safeStatusHistory, safeStatus),
+                    )
+                } else {
+                    item
+                }
+            }
             val current = existing.copy(
                 lastEventId = maxOf(existing.lastEventId ?: 0L, eventId ?: 0L)
                     .takeIf { it > 0L },
-                tail = existing.tail.map { item ->
-                    if (item is ChatUiItem.Assistant && item.id == existing.assistantId) {
-                        item.copy(
-                            safeStatus = safeStatus,
-                            safeStatusHistory = appendSafeStatus(item.safeStatusHistory, safeStatus),
-                        )
-                    } else {
-                        item
-                    }
-                },
+                tail = statusTail,
             )
             when (event) {
                 is HermesRunEvent.MessageDelta -> state.copy(
@@ -2411,7 +2498,8 @@ class HermesViewModel(
                 )
                 is HermesRunEvent.ReasoningAvailable -> {
                     val text = event.text.trim().take(MAX_REASONING_UPDATE_LENGTH)
-                    if (text.isBlank()) state else state.withRun(key, current.copy(tail = upsertReasoning(current, text)))
+                    if (!isUsefulProgressUpdate(text)) state
+                    else state.withRun(key, current.copy(tail = upsertReasoning(current, text)))
                 }
                 is HermesRunEvent.ToolStarted -> state.withRun(key, current.copy(tail = insertBeforeAssistant(current, ChatUiItem.Tool(
                         id = "${current.runId}:${event.tool}:${current.tail.size}",
@@ -2454,7 +2542,7 @@ class HermesViewModel(
                 )
                 is HermesRunEvent.Completed -> {
                     terminal = true
-                    state.withRun(key, current.copy(tail = current.tail.map { item ->
+                    state.withRun(key, current.copy(terminalOutcome = ActivityOutcome.Completed, tail = current.tail.map { item ->
                         if (item is ChatUiItem.Assistant && item.id == current.assistantId) {
                             item.copy(
                                 text = event.output.ifBlank { item.text },
@@ -2466,16 +2554,28 @@ class HermesViewModel(
                 }
                 is HermesRunEvent.Failed -> {
                     terminal = true
-                    state.withRun(key, current).copy(errorMessage = event.error)
+                    state.withRun(
+                        key,
+                        current.copy(
+                            terminalOutcome = ActivityOutcome.Failed,
+                            tail = current.tail.withPromptLifecycle(PromptLifecycle.Failed),
+                        ),
+                    ).copy(errorMessage = event.error)
                 }
                 HermesRunEvent.Cancelled -> {
                     terminal = true
-                    state.withRun(key, current)
+                    state.withRun(
+                        key,
+                        current.copy(
+                            terminalOutcome = ActivityOutcome.Cancelled,
+                            tail = current.tail.withPromptLifecycle(PromptLifecycle.Cancelled),
+                        ),
+                    )
                 }
             }
         }
         if (!applied) return false
-        updateRunStatus(run.runId, safeStatus)
+        safeStatus?.let { updateRunStatus(run.runId, it) }
         if (eventId != null) {
             mutableState.value.activeRuns[key]
                 ?.takeIf { it.runId == run.runId }
@@ -2488,10 +2588,60 @@ class HermesViewModel(
         if (settingsStore.loadRunStatus(runId) != status) settingsStore.saveRunStatus(runId, status)
     }
 
+    private fun completedActivityDigest(run: ActiveRun, nowMillis: Long = System.currentTimeMillis()): CompletedActivityDigest? {
+        val milestones = buildList {
+            run.tail.filterIsInstance<ChatUiItem.Reasoning>()
+                .flatMap(ChatUiItem.Reasoning::updates)
+                .forEach(::add)
+            run.tail.filterIsInstance<ChatUiItem.Assistant>()
+                .flatMap(ChatUiItem.Assistant::safeStatusHistory)
+                .forEach(::add)
+        }
+            .map { it.trim().replace(Regex("\\s+"), " ").take(180) }
+            .filter(::isUsefulProgressUpdate)
+            .distinct()
+            .takeLast(3)
+        val tools = run.tail.filterIsInstance<ChatUiItem.Tool>().map { tool ->
+            CompletedToolDigest(
+                name = tool.name.take(120),
+                preview = safeActivityPreview(tool.preview),
+                failed = tool.failed,
+                durationSeconds = tool.durationSeconds,
+            )
+        }
+        if (milestones.isEmpty() && tools.isEmpty()) return null
+        return CompletedActivityDigest(
+            hostId = run.host.id,
+            sessionId = run.sessionId,
+            runId = run.runId,
+            milestones = milestones,
+            tools = tools,
+            outcome = run.terminalOutcome ?: ActivityOutcome.Completed,
+            completedAtMillis = nowMillis,
+        )
+    }
+
+    private fun retainCompletedActivity(digest: CompletedActivityDigest) {
+        mutableState.update { state ->
+            state.copy(
+                completedActivityDigests = boundedActivityDigests(
+                    state.completedActivityDigests.filterNot {
+                        it.hostId == digest.hostId && it.sessionId == digest.sessionId && it.runId == digest.runId
+                    } + digest,
+                ),
+            )
+        }
+        settingsStore.saveCompletedActivityDigests(mutableState.value.completedActivityDigests)
+    }
+
     private fun insertBeforeAssistant(run: ActiveRun, item: ChatUiItem): List<ChatUiItem> {
         val index = run.tail.indexOfLast { it is ChatUiItem.Assistant && it.id == run.assistantId }
         return if (index < 0) run.tail + item
         else run.tail.subList(0, index) + item + run.tail.subList(index, run.tail.size)
+    }
+
+    private fun List<ChatUiItem>.withPromptLifecycle(lifecycle: PromptLifecycle): List<ChatUiItem> = map { item ->
+        if (item is ChatUiItem.User) item.copy(lifecycle = lifecycle) else item
     }
 
     private fun upsertReasoning(run: ActiveRun, text: String): List<ChatUiItem> {
@@ -2541,6 +2691,7 @@ class HermesViewModel(
         val key = run.key()
         val current = mutableState.value.activeRuns[key]
         if (current?.runId != run.runId || current.reconcilingTranscript) return
+        completedActivityDigest(current)?.let(::retainCompletedActivity)
         diagnostics.recordPhase(DiagnosticPhase.RunTerminal)
         clearPendingFollowUpChoice(run)
         mutableState.update { state ->

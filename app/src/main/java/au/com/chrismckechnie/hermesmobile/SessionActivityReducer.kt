@@ -51,7 +51,7 @@ private fun reduceTurn(
     turn: SessionActivityTurn,
     event: HermesSessionActivityEvent,
 ): SessionActivityTurn {
-    val status = event.status?.trim()?.takeIf(String::isNotBlank) ?: turn.latestStatus
+    val status = event.status?.trim()?.takeIf(::isUsefulProgressUpdate)
     val timestamp = event.timestampSeconds ?: turn.updatedAtSeconds
     return when (event.type) {
         "message.start" -> turn.copy(
@@ -85,14 +85,14 @@ private fun reduceTurn(
                     running = true,
                 ),
             ),
-            latestStatus = status ?: "Using ${event.toolName?.compactActivityText() ?: "a tool"}…",
+            latestStatus = status ?: turn.latestStatus ?: "Working…",
             updatedAtSeconds = timestamp,
         )
         "tool.complete" -> turn.copy(
             tools = completeActivityTool(turn.tools, event),
             tasks = event.tasks.takeIf { it.isNotEmpty() } ?: turn.tasks,
             workspaceUpdate = event.workspaceUpdate?.mergeWith(turn.workspaceUpdate) ?: turn.workspaceUpdate,
-            latestStatus = status ?: "Continuing after ${event.toolName?.compactActivityText() ?: "a tool"}…",
+            latestStatus = status ?: turn.latestStatus ?: "Working…",
             updatedAtSeconds = timestamp,
         )
         "tasks.updated" -> turn.copy(
@@ -123,14 +123,14 @@ private fun reduceTurn(
                 terminal = true,
                 updatedAtSeconds = timestamp,
             )
-            else -> turn.copy(latestStatus = status, updatedAtSeconds = timestamp)
+            else -> turn.copy(latestStatus = status ?: turn.latestStatus, updatedAtSeconds = timestamp)
         }
     }
 }
 
 private fun appendActivityText(existing: List<String>, raw: String?): List<String> {
     val text = raw?.compactActivityText() ?: return existing
-    if (text.isBlank() || existing.lastOrNull() == text) return existing
+    if (!isUsefulProgressUpdate(text) || existing.lastOrNull() == text) return existing
     return (existing + text).takeLast(MAX_ACTIVITY_REASONING)
 }
 

@@ -242,6 +242,7 @@ private class FakeHostStore(
 
 private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsStore {
     var savedMode: ThemeMode? = null
+    var chatActivityLayout = ChatActivityLayout.Grouped
     var checkpoints = emptyList<RunCheckpoint>()
     var checkpoint: RunCheckpoint?
         get() = checkpoints.firstOrNull()
@@ -257,6 +258,8 @@ private class FakeSettingsStore(private val initialMode: ThemeMode) : SettingsSt
     override fun saveThemeMode(mode: ThemeMode) {
         savedMode = mode
     }
+    override fun loadChatActivityLayout(): ChatActivityLayout = chatActivityLayout
+    override fun saveChatActivityLayout(layout: ChatActivityLayout) { chatActivityLayout = layout }
     override fun loadRunCheckpoints(): List<RunCheckpoint> = checkpoints
     override fun saveRunCheckpoints(checkpoints: List<RunCheckpoint>) { this.checkpoints = checkpoints.distinct() }
     override fun loadRunCheckpoint(): RunCheckpoint? = checkpoint
@@ -1083,7 +1086,7 @@ class HermesViewModelTest {
         advanceUntilIdle()
 
         val activity = viewModel.state.value.displayedMessages.filterIsInstance<ChatUiItem.Reasoning>().single()
-        assertEquals(listOf("Reviewing the request…", "Using terminal…"), activity.updates)
+        assertEquals(listOf("Reviewing the request…"), activity.updates)
     }
 
     @Test
@@ -1373,7 +1376,7 @@ class HermesViewModelTest {
     }
 
     @Test
-    fun `live assistant status starts immediately and only uses safe tool metadata`() = runVmTest {
+    fun `live assistant status keeps meaningful progress and leaves tool chatter to the tool card`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
         viewModel.selectSession("s1")
         advanceUntilIdle()
@@ -1389,9 +1392,16 @@ class HermesViewModelTest {
         gateway.events.send(HermesRunEvent.ToolStarted("terminal", "secret command payload"))
         advanceUntilIdle()
         assistant = viewModel.state.value.activeRun!!.tail.filterIsInstance<ChatUiItem.Assistant>().single()
-        assertEquals("Using terminal…", assistant.safeStatus)
+        assertEquals("Starting task…", assistant.safeStatus)
         assertFalse(assistant.safeStatus.orEmpty().contains("secret command payload"))
-        assertEquals(listOf("Starting task…", "Using terminal…"), assistant.safeStatusHistory)
+        assertEquals(listOf("Starting task…"), assistant.safeStatusHistory)
+
+        gateway.events.send(HermesRunEvent.ReasoningAvailable("Checking the test results"))
+        gateway.events.send(HermesRunEvent.ToolCompleted("terminal", failed = false))
+        advanceUntilIdle()
+        assistant = viewModel.state.value.activeRun!!.tail.filterIsInstance<ChatUiItem.Assistant>().single()
+        assertEquals("Checking the test results", assistant.safeStatus)
+        assertEquals(listOf("Starting task…", "Checking the test results"), assistant.safeStatusHistory)
         assertEquals(
             "Host-provided progress",
             safeRunStatusText(HermesRunEvent.ReasoningAvailable("Host-provided progress")),
@@ -1411,6 +1421,36 @@ class HermesViewModelTest {
         assertEquals(10, history.size)
         assertEquals("Step 2", history.first())
         assertEquals("Step 11", history.last())
+    }
+
+    @Test
+    fun `chat activity layout loads from settings and saves changes`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System).apply {
+            chatActivityLayout = ChatActivityLayout.Chronological
+        }
+        val (viewModel, _) = buildViewModel(settingsStore = settings)
+
+        assertEquals(ChatActivityLayout.Chronological, viewModel.state.value.chatActivityLayout)
+
+        viewModel.setChatActivityLayout(ChatActivityLayout.Grouped)
+
+        assertEquals(ChatActivityLayout.Grouped, settings.chatActivityLayout)
+        assertEquals(ChatActivityLayout.Grouped, viewModel.state.value.chatActivityLayout)
+    }
+
+    @Test
+    fun `generic tool lifecycle statuses are not useful progress`() {
+        assertFalse(isUsefulProgressUpdate("Using process…"))
+        assertFalse(isUsefulProgressUpdate("Continuing after terminal"))
+        assertTrue(isUsefulProgressUpdate("Checking the failing tests"))
+        assertTrue(isUsefulProgressUpdate("Using the test results to verify the fix"))
+        assertTrue(isUsefulProgressUpdate("Continuing after the approval with deployment"))
+        assertEquals(
+            "Run the focused tests · 0 / 1 tasks",
+            safeRunStatusText(HermesRunEvent.TasksUpdated(listOf(
+                HermesTask("test", "Run the focused tests", "in_progress"),
+            ))),
+        )
     }
 
     @Test
