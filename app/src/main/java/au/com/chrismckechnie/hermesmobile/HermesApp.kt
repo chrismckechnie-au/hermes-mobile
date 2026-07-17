@@ -1877,7 +1877,7 @@ private fun AssistantMessage(
         Column(Modifier.weight(1f)) {
             if (text.isBlank() && streaming) {
                 LiveWorkingBubble(
-                    status = safeStatus ?: "Hermes is working…",
+                    status = safeStatus ?: "Run is still active · wait or send a follow-up",
                     updates = safeStatusHistory,
                 )
             } else {
@@ -2011,6 +2011,7 @@ private fun ActivityHistoryCard(item: ChatUiItem.Activity) {
                 current = turn.latestStatus ?: turn.reasoning.lastOrNull() ?: "Hermes activity",
                 milestones = visibleReasoningUpdates(turn).takeLast(3),
                 active = !turn.terminal,
+                nextStep = activeWorkNextStep(turn),
             )
             turn.tools.takeIf { it.isNotEmpty() }?.let { tools -> ToolActivityGroup(tools) }
         }
@@ -2060,8 +2061,14 @@ private fun ActivityStatusCard(
     milestones: List<String>,
     active: Boolean,
     attention: Boolean = false,
+    nextStep: String? = null,
 ) {
-    val expandable = milestones.isNotEmpty()
+    val detailRows = milestones
+        .map(String::trim)
+        .filter(::isUsefulProgressUpdate)
+        .distinct()
+        .takeLast(3)
+    val expandable = detailRows.isNotEmpty()
     var expanded by remember(id, active, attention) { mutableStateOf(expandable && (active || attention)) }
     val action = if (expanded) "Collapse work status" else "Expand work status"
     Card(
@@ -2102,12 +2109,19 @@ private fun ActivityStatusCard(
                     Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.padding(start = 7.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
                 }
             }
+            nextStep?.let { step ->
+                Text(
+                    step,
+                    style = T.Micro.copy(color = T.CreamSoft, letterSpacing = 0.sp),
+                    modifier = Modifier.padding(start = 34.dp, end = 12.dp, bottom = 7.dp),
+                )
+            }
             AnimatedVisibility(visible = expandable && expanded) {
                 Column(
                     Modifier.fillMaxWidth().padding(start = 34.dp, end = 12.dp, bottom = 9.dp),
                     verticalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
-                    milestones.forEach { milestone ->
+                    detailRows.forEach { milestone ->
                         Text(milestone, style = T.BodyMuted.copy(fontSize = 11.sp, lineHeight = 15.sp))
                     }
                 }
@@ -2130,7 +2144,19 @@ internal fun visibleActivityTools(turn: SessionActivityTurn): List<ChatUiItem.To
     if (turn.terminal) turn.tools else turn.tools.filter { it.running || it.failed }
 
 internal fun visibleReasoningUpdates(turn: SessionActivityTurn): List<String> =
-    turn.reasoning.filterNot { it == turn.latestStatus }.takeLast(5)
+    turn.reasoning
+        .filterNot { it == turn.latestStatus }
+        .map(String::trim)
+        .filter(::isUsefulProgressUpdate)
+        .distinct()
+        .takeLast(5)
+
+internal fun activeWorkNextStep(turn: SessionActivityTurn): String? {
+    if (turn.terminal || turn.tools.any(ChatUiItem.Tool::running)) return null
+    val activeTask = turn.tasks.firstOrNull { it.status == "in_progress" }
+        ?.content?.trim()?.takeIf(String::isNotBlank)
+    return activeTask?.let { "Next: $it" } ?: "Run is still active · wait or send a follow-up"
+}
 
 @Composable
 private fun MarkdownText(text: String, modifier: Modifier = Modifier) {
@@ -3003,6 +3029,8 @@ private fun LiveWorkingBubble(status: String, updates: List<String>) {
     val headline = status.takeIf(::isUsefulProgressUpdate)
         ?: previousUpdates.lastOrNull()
         ?: "Hermes is working…"
+    val nextStep = "Run is still active · wait or send a follow-up"
+        .takeIf { previousUpdates.isEmpty() && headline != it }
     val expandable = previousUpdates.isNotEmpty()
     var expanded by remember { mutableStateOf(expandable) }
     LaunchedEffect(previousUpdates.size) {
@@ -3051,6 +3079,13 @@ private fun LiveWorkingBubble(status: String, updates: List<String>) {
                     modifier = Modifier.size(15.dp).rotate(if (expanded) 180f else 0f),
                 )
             }
+        }
+        nextStep?.let { step ->
+            Text(
+                step,
+                style = T.Micro.copy(color = T.CreamSoft, letterSpacing = 0.sp),
+                modifier = Modifier.padding(start = 32.dp, end = 10.dp, bottom = 7.dp),
+            )
         }
         AnimatedVisibility(visible = expandable && expanded) {
             Column(
