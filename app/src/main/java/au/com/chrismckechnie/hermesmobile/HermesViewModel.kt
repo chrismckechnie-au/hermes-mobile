@@ -381,7 +381,6 @@ sealed interface ChatUiItem {
     data class User(
         override val id: String,
         val text: String,
-        val lifecycle: PromptLifecycle? = null,
     ) : ChatUiItem
 
     data class Assistant(
@@ -470,20 +469,6 @@ internal fun mergeStoredAndLiveTail(
     return storedMessages + reconciledTail
 }
 
-internal fun withInferredPromptLifecycles(items: List<ChatUiItem>): List<ChatUiItem> =
-    items.mapIndexed { index, item ->
-        val user = item as? ChatUiItem.User ?: return@mapIndexed item
-        val nextUser = items.subList(index + 1, items.size).indexOfFirst { it is ChatUiItem.User }
-            .let { relative -> if (relative < 0) items.size else index + 1 + relative }
-        val following = items.subList(index + 1, nextUser)
-        val inferred = when {
-            following.any { it is ChatUiItem.Approval } -> PromptLifecycle.Approval
-            following.filterIsInstance<ChatUiItem.Assistant>().any { it.text.isNotBlank() } -> PromptLifecycle.Completed
-            else -> user.lifecycle
-        }
-        if (inferred == user.lifecycle) user else user.copy(lifecycle = inferred)
-    }
-
 /**
  * Immutable coordinates of the Run in flight. Holds the authenticated Host
  * snapshot so Stop/approval/reconciliation keep working even if the profile
@@ -556,14 +541,6 @@ internal fun appendSafeStatus(history: List<String>, status: String): List<Strin
     val clean = status.trim().replace(Regex("\\s+"), " ").take(180)
     if (clean.isBlank() || history.lastOrNull() == clean) return history
     return (history + clean).takeLast(10)
-}
-
-enum class PromptLifecycle(val emoji: String) {
-    Working("👀"),
-    Approval("⚠️"),
-    Completed("✅"),
-    Failed("❌"),
-    Cancelled("❌"),
 }
 
 internal fun isUsefulProgressUpdate(text: String): Boolean {
@@ -790,7 +767,7 @@ data class HermesUiState(
             val storedMessages = messages.withRunUsage(activeSessionKey?.let(runUsageByMessage::get).orEmpty())
             val run = activeRun
             if (run == null || run.sessionId != activeSessionId) {
-                val key = activeSessionKey ?: return withInferredPromptLifecycles(storedMessages)
+                val key = activeSessionKey ?: return storedMessages
                 val durableTurns = sessionActivity[key]?.turns.orEmpty()
                 val withDurableActivity = if (durableTurns.isEmpty()) storedMessages else {
                     storedMessages + ChatUiItem.Activity(
@@ -819,26 +796,26 @@ data class HermesUiState(
                     .toList()
                 val activity = activeHostSessions[key]
                     ?.takeUnless(HermesActiveSession::isStalledActivity)
-                    ?: return withInferredPromptLifecycles(withLocalActivity)
+                    ?: return withLocalActivity
                 val updates = (activity.statusHistory + listOfNotNull(activity.latestStatus))
                     .map { it.trim() }
                     .filter(::isUsefulProgressUpdate)
                     .distinct()
                     .takeLast(12)
-                return withInferredPromptLifecycles(if (updates.isEmpty()) withLocalActivity else withLocalActivity + ChatUiItem.Reasoning(
+                return if (updates.isEmpty()) withLocalActivity else withLocalActivity + ChatUiItem.Reasoning(
                     id = "host-activity:${key.hostId}:${key.sessionId}",
                     updates = updates,
-                ))
+                )
             }
             val tail = mergeStoredAndLiveTail(storedMessages, run.tail, run.baselineMessageCount)
-            return withInferredPromptLifecycles(if (run.awaitingApproval && !run.approvalDetailsLost) {
+            return if (run.awaitingApproval && !run.approvalDetailsLost) {
                 tail + ChatUiItem.Approval(
                     id = "approval:${run.runId}",
                     runRef = run.ref,
                     command = run.approvalCommand,
                     submitting = run.approvalSubmitting,
                 )
-            } else tail)
+            } else tail
         }
 
     /** Run banner is shown whenever the Run's Session is not the visible chat. */
@@ -2372,7 +2349,7 @@ class HermesViewModel(
                     },
                     assistantId = assistantId,
                     tail = listOf(
-                        ChatUiItem.User(UUID.randomUUID().toString(), text, lifecycle = PromptLifecycle.Working),
+                        ChatUiItem.User(UUID.randomUUID().toString(), text),
                         ChatUiItem.Assistant(
                             id = assistantId,
                             text = "",
@@ -2554,23 +2531,11 @@ class HermesViewModel(
                 }
                 is HermesRunEvent.Failed -> {
                     terminal = true
-                    state.withRun(
-                        key,
-                        current.copy(
-                            terminalOutcome = ActivityOutcome.Failed,
-                            tail = current.tail.withPromptLifecycle(PromptLifecycle.Failed),
-                        ),
-                    ).copy(errorMessage = event.error)
+                    state.withRun(key, current.copy(terminalOutcome = ActivityOutcome.Failed)).copy(errorMessage = event.error)
                 }
                 HermesRunEvent.Cancelled -> {
                     terminal = true
-                    state.withRun(
-                        key,
-                        current.copy(
-                            terminalOutcome = ActivityOutcome.Cancelled,
-                            tail = current.tail.withPromptLifecycle(PromptLifecycle.Cancelled),
-                        ),
-                    )
+                    state.withRun(key, current.copy(terminalOutcome = ActivityOutcome.Cancelled))
                 }
             }
         }
@@ -2638,10 +2603,6 @@ class HermesViewModel(
         val index = run.tail.indexOfLast { it is ChatUiItem.Assistant && it.id == run.assistantId }
         return if (index < 0) run.tail + item
         else run.tail.subList(0, index) + item + run.tail.subList(index, run.tail.size)
-    }
-
-    private fun List<ChatUiItem>.withPromptLifecycle(lifecycle: PromptLifecycle): List<ChatUiItem> = map { item ->
-        if (item is ChatUiItem.User) item.copy(lifecycle = lifecycle) else item
     }
 
     private fun upsertReasoning(run: ActiveRun, text: String): List<ChatUiItem> {

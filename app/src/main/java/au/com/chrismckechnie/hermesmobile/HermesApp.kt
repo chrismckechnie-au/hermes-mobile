@@ -607,7 +607,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     items(timelineItems, key = { it.id }) { timelineItem ->
                         when (timelineItem) {
                             is ChatTimelineItem.Message -> when (val item = timelineItem.item) {
-                                is ChatUiItem.User -> UserBubble(item.text, item.lifecycle)
+                                is ChatUiItem.User -> UserBubble(item.text)
                                 is ChatUiItem.Assistant -> AssistantMessage(
                                     item.text,
                                     item.streaming,
@@ -1822,7 +1822,7 @@ private fun EmptyConversation(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun UserBubble(text: String, lifecycle: PromptLifecycle?) {
+private fun UserBubble(text: String) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     var actionsOpen by remember(text) { mutableStateOf(false) }
@@ -1830,13 +1830,6 @@ private fun UserBubble(text: String, lifecycle: PromptLifecycle?) {
     // wrap within the row width minus the start inset.
     Box(Modifier.fillMaxWidth().padding(start = 48.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            lifecycle?.let {
-                Text(
-                    it.emoji,
-                    fontSize = 12.sp,
-                    modifier = Modifier.align(Alignment.CenterVertically).padding(end = 6.dp),
-                )
-            }
             Text(
                 text,
                 style = T.Body.copy(color = T.OnAccent),
@@ -1941,20 +1934,25 @@ private fun shareTranscript(context: Context, transcript: String) {
 
 @Composable
 private fun ReasoningCard(item: ChatUiItem.Reasoning) {
-    var expanded by remember(item.id) { mutableStateOf(true) }
     val latest = item.updates.lastOrNull().orEmpty()
     val previous = item.updates.filterNot { it == latest }.takeLast(3)
+    val expandable = previous.isNotEmpty()
+    var expanded by remember(item.id) { mutableStateOf(expandable) }
     val action = if (expanded) "Collapse Hermes activity" else "Expand Hermes activity"
     Card(
         modifier = Modifier
             .fillMaxWidth(0.86f)
             .heightIn(min = 48.dp)
-            .semantics {
-                contentDescription = action
-                role = Role.Button
-                stateDescription = if (expanded) "Expanded" else "Collapsed"
-            }
-            .clickable { expanded = !expanded },
+            .then(
+                if (expandable) Modifier
+                    .semantics {
+                        contentDescription = action
+                        role = Role.Button
+                        stateDescription = if (expanded) "Expanded" else "Collapsed"
+                    }
+                    .clickable { expanded = !expanded }
+                else Modifier,
+            ),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
         border = BorderStroke(1.dp, T.Cream.copy(alpha = 0.12f)),
@@ -1977,15 +1975,17 @@ private fun ReasoningCard(item: ChatUiItem.Reasoning) {
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.width(5.dp))
-            Icon(
-                Lucide.ChevronDown,
-                null,
-                tint = T.Muted,
-                modifier = Modifier.size(15.dp).rotate(if (expanded) 180f else 0f),
-            )
+            if (expandable) {
+                Spacer(Modifier.width(5.dp))
+                Icon(
+                    Lucide.ChevronDown,
+                    null,
+                    tint = T.Muted,
+                    modifier = Modifier.size(15.dp).rotate(if (expanded) 180f else 0f),
+                )
+            }
         }
-        AnimatedVisibility(visible = expanded) {
+        AnimatedVisibility(visible = expandable && expanded) {
             Column(
                 Modifier.fillMaxWidth().padding(start = 38.dp, end = 9.dp, bottom = 7.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
@@ -2061,18 +2061,23 @@ private fun ActivityStatusCard(
     active: Boolean,
     attention: Boolean = false,
 ) {
-    var expanded by remember(id, active, attention) { mutableStateOf(active || attention) }
+    val expandable = milestones.isNotEmpty()
+    var expanded by remember(id, active, attention) { mutableStateOf(expandable && (active || attention)) }
     val action = if (expanded) "Collapse work status" else "Expand work status"
     Card(
         modifier = Modifier
             .fillMaxWidth(0.9f)
             .heightIn(min = 48.dp)
-            .semantics {
-                contentDescription = action
-                role = Role.Button
-                stateDescription = if (expanded) "Expanded" else "Collapsed"
-            }
-            .clickable { expanded = !expanded },
+            .then(
+                if (expandable) Modifier
+                    .semantics {
+                        contentDescription = action
+                        role = Role.Button
+                        stateDescription = if (expanded) "Expanded" else "Collapsed"
+                    }
+                    .clickable { expanded = !expanded }
+                else Modifier,
+            ),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
         border = BorderStroke(1.dp, when {
@@ -2093,9 +2098,11 @@ private fun ActivityStatusCard(
                     Text(current, style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 if (active) CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
-                Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.padding(start = 7.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
+                if (expandable) {
+                    Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.padding(start = 7.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
+                }
             }
-            AnimatedVisibility(visible = expanded && milestones.isNotEmpty()) {
+            AnimatedVisibility(visible = expandable && expanded) {
                 Column(
                     Modifier.fillMaxWidth().padding(start = 34.dp, end = 12.dp, bottom = 9.dp),
                     verticalArrangement = Arrangement.spacedBy(3.dp),
@@ -2273,9 +2280,6 @@ private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>, forceExpanded: Boole
     val running = tools.any(ChatUiItem.Tool::running)
     val rows = condensedToolActivity(tools)
     val visibleRows = if (running) rows.takeLast(4) else rows
-    LaunchedEffect(running, requiresAttention) {
-        if (running || requiresAttention) expanded = true else expanded = false
-    }
     val action = if (expanded) "Collapse tool activity" else "Expand tool activity"
     Card(
         modifier = Modifier
@@ -2999,7 +3003,8 @@ private fun LiveWorkingBubble(status: String, updates: List<String>) {
     val headline = status.takeIf(::isUsefulProgressUpdate)
         ?: previousUpdates.lastOrNull()
         ?: "Hermes is working…"
-    var expanded by remember { mutableStateOf(previousUpdates.isNotEmpty()) }
+    val expandable = previousUpdates.isNotEmpty()
+    var expanded by remember { mutableStateOf(expandable) }
     LaunchedEffect(previousUpdates.size) {
         if (!manuallyCollapsed && previousUpdates.isNotEmpty()) expanded = true
     }
@@ -3008,15 +3013,19 @@ private fun LiveWorkingBubble(status: String, updates: List<String>) {
         modifier = Modifier
             .fillMaxWidth(0.9f)
             .heightIn(min = 48.dp)
-            .semantics {
-                contentDescription = action
-                role = Role.Button
-                stateDescription = if (expanded) "Expanded" else "Collapsed"
-            }
-            .clickable {
-                expanded = !expanded
-                manuallyCollapsed = !expanded
-            },
+            .then(
+                if (expandable) Modifier
+                    .semantics {
+                        contentDescription = action
+                        role = Role.Button
+                        stateDescription = if (expanded) "Expanded" else "Collapsed"
+                    }
+                    .clickable {
+                        expanded = !expanded
+                        manuallyCollapsed = !expanded
+                    }
+                else Modifier,
+            ),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow),
         border = BorderStroke(1.dp, T.Cream.copy(alpha = 0.16f)),
@@ -3034,14 +3043,16 @@ private fun LiveWorkingBubble(status: String, updates: List<String>) {
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            Icon(
-                Lucide.ChevronDown,
-                null,
-                tint = T.Muted,
-                modifier = Modifier.size(15.dp).rotate(if (expanded) 180f else 0f),
-            )
+            if (expandable) {
+                Icon(
+                    Lucide.ChevronDown,
+                    null,
+                    tint = T.Muted,
+                    modifier = Modifier.size(15.dp).rotate(if (expanded) 180f else 0f),
+                )
+            }
         }
-        AnimatedVisibility(visible = expanded) {
+        AnimatedVisibility(visible = expandable && expanded) {
             Column(
                 modifier = Modifier.padding(start = 32.dp, end = 10.dp, bottom = 9.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),

@@ -165,6 +165,22 @@ class WorkSurfaceCopyTest {
     }
 
     @Test
+    fun `tool activity group keeps its key after more than four calls`() {
+        val timeline = groupChatTimeline(
+            listOf(
+                ChatUiItem.User("user-1", "Check the build"),
+                *(1..5).map { number ->
+                    ChatUiItem.Tool("tool-$number", "terminal", "step $number", running = number == 5)
+                }.toTypedArray(),
+            ),
+        )
+
+        val group = timeline.single { it is ChatTimelineItem.ToolGroup } as ChatTimelineItem.ToolGroup
+        assertEquals("tools:tool-1", group.id)
+        assertEquals(5, group.tools.size)
+    }
+
+    @Test
     fun `chronological layout starts a new tool card after a meaningful status`() {
         val timeline = groupChatTimeline(
             listOf(
@@ -194,20 +210,6 @@ class WorkSurfaceCopyTest {
         assertEquals("token=[redacted]", safeActivityPreview("token=very-secret-value"))
         assertEquals("authorization=[redacted]", safeActivityPreview("authorization: Bearer very-secret-value"))
         assertEquals("--api-key [redacted]", safeActivityPreview("--api-key very-secret-value"))
-    }
-
-    @Test
-    fun `historical user prompts only gain a success badge when a response exists`() {
-        val decorated = withInferredPromptLifecycles(
-            listOf(
-                ChatUiItem.User("user-1", "Finished request"),
-                ChatUiItem.Assistant("assistant-1", "Done"),
-                ChatUiItem.User("user-2", "Still working"),
-            ),
-        )
-
-        assertEquals(PromptLifecycle.Completed, (decorated[0] as ChatUiItem.User).lifecycle)
-        assertEquals(null, (decorated[2] as ChatUiItem.User).lifecycle)
     }
 
     @Test
