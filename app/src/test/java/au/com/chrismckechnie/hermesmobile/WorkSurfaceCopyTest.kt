@@ -180,6 +180,31 @@ class WorkSurfaceCopyTest {
     }
 
     @Test
+    fun `late tool records stay above the agent reply`() {
+        val timeline = groupChatTimeline(
+            listOf(
+                ChatUiItem.User("user-1", "Check the build"),
+                ChatUiItem.Assistant("assistant-1", "The build passed."),
+                ChatUiItem.Tool("tool-1", "terminal", "./gradlew test", running = false),
+            ),
+        )
+
+        assertTrue(timeline[1] is ChatTimelineItem.ToolGroup)
+        assertEquals("assistant-1", (timeline[2] as ChatTimelineItem.Message).item.id)
+
+        val chronological = groupChatTimeline(
+            listOf(
+                ChatUiItem.User("user-1", "Check the build"),
+                ChatUiItem.Assistant("assistant-1", "The build passed."),
+                ChatUiItem.Tool("tool-1", "terminal", "./gradlew test", running = false),
+            ),
+            ChatActivityLayout.Chronological,
+        )
+        assertTrue(chronological[1] is ChatTimelineItem.ToolGroup)
+        assertEquals("assistant-1", (chronological[2] as ChatTimelineItem.Message).item.id)
+    }
+
+    @Test
     fun `tool activity group keeps its key after more than four calls`() {
         val timeline = groupChatTimeline(
             listOf(

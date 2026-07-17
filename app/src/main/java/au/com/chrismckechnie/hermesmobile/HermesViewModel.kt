@@ -426,6 +426,7 @@ sealed interface ChatUiItem {
         val runRef: RunRef,
         val command: String?,
         val submitting: Boolean,
+        val detailsUnavailable: Boolean = false,
     ) : ChatUiItem
 }
 
@@ -808,12 +809,13 @@ data class HermesUiState(
                 )
             }
             val tail = mergeStoredAndLiveTail(storedMessages, run.tail, run.baselineMessageCount)
-            return if (run.awaitingApproval && !run.approvalDetailsLost) {
+            return if (run.awaitingApproval) {
                 tail + ChatUiItem.Approval(
                     id = "approval:${run.runId}",
                     runRef = run.ref,
                     command = run.approvalCommand,
                     submitting = run.approvalSubmitting,
+                    detailsUnavailable = run.approvalDetailsLost,
                 )
             } else tail
         }
@@ -1849,7 +1851,7 @@ class HermesViewModel(
                         mutableState.update { state ->
                             val current = state.activeRuns[key]
                             if (current?.runId != run.runId) state
-                            else state.withRun(key, current.copy(awaitingApproval = true, approvalDetailsLost = true))
+                            else state.withRun(key, current.withUnavailableApprovalDetails())
                         }
                     }
                 } finally {
@@ -2505,7 +2507,7 @@ class HermesViewModel(
                 is HermesRunEvent.ApprovalRequested -> state.withRun(key,
                     // One actionable card per Run: a second request keeps the
                     // first card until it resolves (host queue is FIFO).
-                    if (current.awaitingApproval) current
+                    if (current.awaitingApproval && !current.approvalDetailsLost) current
                     else current.copy(
                         awaitingApproval = true,
                         approvalCommand = event.command,
@@ -2551,6 +2553,24 @@ class HermesViewModel(
 
     private fun updateRunStatus(runId: String, status: String) {
         if (settingsStore.loadRunStatus(runId) != status) settingsStore.saveRunStatus(runId, status)
+    }
+
+    private fun ActiveRun.withUnavailableApprovalDetails(): ActiveRun {
+        if (awaitingApproval && !approvalDetailsLost) return this
+        return copy(
+            awaitingApproval = true,
+            approvalDetailsLost = true,
+            tail = tail.map { item ->
+                if (item is ChatUiItem.Assistant && item.id == assistantId) {
+                    item.copy(
+                        safeStatus = "Approval details unavailable",
+                        safeStatusHistory = appendSafeStatus(item.safeStatusHistory, "Approval details unavailable"),
+                    )
+                } else {
+                    item
+                }
+            },
+        )
     }
 
     private fun completedActivityDigest(run: ActiveRun, nowMillis: Long = System.currentTimeMillis()): CompletedActivityDigest? {
@@ -2640,7 +2660,7 @@ class HermesViewModel(
                 mutableState.update { state ->
                     val current = state.activeRuns[key]
                     if (current?.runId != run.runId) state
-                    else state.withRun(key, current.copy(awaitingApproval = true, approvalDetailsLost = true))
+                    else state.withRun(key, current.withUnavailableApprovalDetails())
                 }
             }
         }
