@@ -2263,6 +2263,7 @@ internal fun groupChatTimeline(
     val pendingTools = mutableListOf<ChatUiItem.Tool>()
     val usedKeys = mutableSetOf<String>()
     var toolGroupIndex: Int? = null
+    var assistantIndex: Int? = null
     fun uniqueKey(base: String): String {
         if (usedKeys.add(base)) return base
         var suffix = 2
@@ -2272,6 +2273,7 @@ internal fun groupChatTimeline(
     fun resetToolGroup() {
         pendingTools.clear()
         toolGroupIndex = null
+        assistantIndex = null
     }
 
     items.forEach { item ->
@@ -2284,8 +2286,10 @@ internal fun groupChatTimeline(
                 pendingTools += item
                 val index = toolGroupIndex
                 if (index == null) {
-                    toolGroupIndex = size
-                    add(ChatTimelineItem.ToolGroup(uniqueKey("tools:${item.id}"), pendingTools.toList()))
+                    val insertionIndex = assistantIndex ?: size
+                    toolGroupIndex = insertionIndex
+                    add(insertionIndex, ChatTimelineItem.ToolGroup(uniqueKey("tools:${item.id}"), pendingTools.toList()))
+                    assistantIndex = assistantIndex?.let { it + 1 }
                 } else {
                     this[index] = (this[index] as ChatTimelineItem.ToolGroup).copy(tools = pendingTools.toList())
                 }
@@ -2293,6 +2297,7 @@ internal fun groupChatTimeline(
             else -> {
                 if (layout == ChatActivityLayout.Chronological) resetToolGroup()
                 add(ChatTimelineItem.Message(item, uniqueKey(item.id)))
+                if (item is ChatUiItem.Assistant) assistantIndex = lastIndex
             }
         }
     }
@@ -2460,7 +2465,11 @@ private fun ApprovalCard(item: ChatUiItem.Approval, viewModel: HermesViewModel) 
                 Icon(Lucide.ShieldCheck, null, tint = T.Warn, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(9.dp))
                 Text(
-                    if (item.submitting) "Sending approval…" else "Approval required",
+                    when {
+                        item.submitting -> "Sending approval…"
+                        item.detailsUnavailable -> "Approval details unavailable"
+                        else -> "Approval required"
+                    },
                     style = T.CardTitle.copy(color = T.Warn),
                     modifier = Modifier.weight(1f),
                 )
@@ -2468,30 +2477,43 @@ private fun ApprovalCard(item: ChatUiItem.Approval, viewModel: HermesViewModel) 
                     CircularProgressIndicator(modifier = Modifier.size(15.dp), color = T.Warn, strokeWidth = 1.5.dp)
                 }
             }
-            item.command?.let {
-                Text(it, style = T.MonoBody.copy(color = T.TextSoft, fontSize = 12.sp), modifier = Modifier.padding(top = 7.dp))
-            }
-            Row(Modifier.padding(top = 11.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                listOf(
-                    Triple("Deny", "deny", T.Error),
-                    Triple("Allow once", "once", T.Cream),
-                    Triple("Allow for run", "session", T.CreamSoft),
-                ).forEach { (label, choice, color) ->
-                    Surface(
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).clickable(
-                            enabled = !item.submitting,
-                            onClick = { viewModel.respondApproval(item.runRef, choice) },
-                        ),
-                        color = if (choice == "once") T.Cream else Color.Transparent,
-                        contentColor = if (choice == "once") T.OnAccent else color,
-                        shape = RoundedCornerShape(13.dp),
-                        border = if (choice == "once") null else BorderStroke(1.dp, color.copy(alpha = 0.5f)),
-                    ) {
-                        Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                label,
-                                style = T.MicroBold.copy(color = if (choice == "once") T.OnAccent else color, letterSpacing = 0.sp),
-                            )
+            if (item.detailsUnavailable) {
+                Text(
+                    "Hermes Mobile could not recover the approval details. Open Hermes desktop to review the request, or stop this run.",
+                    style = T.BodyMuted.copy(color = T.TextSoft),
+                    modifier = Modifier.padding(top = 7.dp),
+                )
+                TextButton(onClick = { viewModel.stopRun(item.runRef) }) {
+                    Icon(Lucide.Square, null, tint = T.Error, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Stop run", style = T.Action.copy(color = T.Error))
+                }
+            } else {
+                item.command?.let {
+                    Text(it, style = T.MonoBody.copy(color = T.TextSoft, fontSize = 12.sp), modifier = Modifier.padding(top = 7.dp))
+                }
+                Row(Modifier.padding(top = 11.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    listOf(
+                        Triple("Deny", "deny", T.Error),
+                        Triple("Allow once", "once", T.Cream),
+                        Triple("Allow for run", "session", T.CreamSoft),
+                    ).forEach { (label, choice, color) ->
+                        Surface(
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp).clickable(
+                                enabled = !item.submitting,
+                                onClick = { viewModel.respondApproval(item.runRef, choice) },
+                            ),
+                            color = if (choice == "once") T.Cream else Color.Transparent,
+                            contentColor = if (choice == "once") T.OnAccent else color,
+                            shape = RoundedCornerShape(13.dp),
+                            border = if (choice == "once") null else BorderStroke(1.dp, color.copy(alpha = 0.5f)),
+                        ) {
+                            Row(horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    label,
+                                    style = T.MicroBold.copy(color = if (choice == "once") T.OnAccent else color, letterSpacing = 0.sp),
+                                )
+                            }
                         }
                     }
                 }
@@ -3030,7 +3052,11 @@ private fun LiveWorkingBubble(status: String, updates: List<String>) {
         ?: previousUpdates.lastOrNull()
         ?: "Hermes is working…"
     val nextStep = "Run is still active · wait or send a follow-up"
-        .takeIf { previousUpdates.isEmpty() && headline != it }
+        .takeIf {
+            previousUpdates.isEmpty() &&
+                headline != it &&
+                headline != "Approval details unavailable"
+        }
     val expandable = previousUpdates.isNotEmpty()
     var expanded by remember { mutableStateOf(expandable) }
     LaunchedEffect(previousUpdates.size) {

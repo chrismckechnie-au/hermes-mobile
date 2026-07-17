@@ -1347,6 +1347,72 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `recovered approval remains visible without unsafe approval actions`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("requires approval")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        gateway.runStatus = HermesRunStatus("run-1", "waiting_for_approval")
+        viewModel.reconcileActiveRuns()
+        runCurrent()
+
+        val card = viewModel.state.value.displayedMessages.filterIsInstance<ChatUiItem.Approval>().single()
+        assertTrue(card.detailsUnavailable)
+        assertNull(card.command)
+        assertEquals(
+            "Approval details unavailable",
+            viewModel.state.value.activeRun!!.tail
+                .filterIsInstance<ChatUiItem.Assistant>()
+                .single()
+                .safeStatus,
+        )
+    }
+
+    @Test
+    fun `reconciliation preserves an approval received from the event stream`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("requires approval")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        gateway.events.send(HermesRunEvent.ApprovalRequested("sensitive command"))
+        advanceUntilIdle()
+        gateway.runStatus = HermesRunStatus("run-1", "waiting_for_approval")
+        viewModel.reconcileActiveRuns()
+        runCurrent()
+
+        val card = viewModel.state.value.displayedMessages.filterIsInstance<ChatUiItem.Approval>().single()
+        assertFalse(card.detailsUnavailable)
+        assertEquals("sensitive command", card.command)
+    }
+
+    @Test
+    fun `approval event restores actions after details were unavailable`() = runVmTest {
+        val (viewModel, gateway) = buildViewModel()
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("requires approval")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+
+        gateway.runStatus = HermesRunStatus("run-1", "waiting_for_approval")
+        viewModel.reconcileActiveRuns()
+        runCurrent()
+
+        gateway.events.send(HermesRunEvent.ApprovalRequested("sensitive command"))
+        advanceUntilIdle()
+
+        val card = viewModel.state.value.displayedMessages.filterIsInstance<ChatUiItem.Approval>().single()
+        assertFalse(card.detailsUnavailable)
+        assertEquals("sensitive command", card.command)
+    }
+
+    @Test
     fun `failed approval response keeps the card until success or conflict`() = runVmTest {
         val (viewModel, gateway) = buildViewModel()
         viewModel.selectSession("s1")
