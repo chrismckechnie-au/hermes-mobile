@@ -130,6 +130,21 @@ class WorkSurfaceCopyTest {
     }
 
     @Test
+    fun `active work says what happens after tool activity ends`() {
+        val waiting = SessionActivityTurn(
+            turnId = "turn-1",
+            tools = listOf(ChatUiItem.Tool("tool-1", "terminal", "done", running = false)),
+        )
+        val planned = waiting.copy(tasks = listOf(HermesTask("task-1", "Review the output", "in_progress")))
+        val runningTool = waiting.copy(tools = listOf(ChatUiItem.Tool("tool-2", "terminal", "running", running = true)))
+
+        assertEquals("Run is still active · wait or send a follow-up", activeWorkNextStep(waiting))
+        assertEquals("Next: Review the output", activeWorkNextStep(planned))
+        assertEquals(null, activeWorkNextStep(runningTool))
+        assertEquals(null, activeWorkNextStep(waiting.copy(terminal = true)))
+    }
+
+    @Test
     fun `consecutive tool prompts become one expandable activity group`() {
         val timeline = groupChatTimeline(
             listOf(
