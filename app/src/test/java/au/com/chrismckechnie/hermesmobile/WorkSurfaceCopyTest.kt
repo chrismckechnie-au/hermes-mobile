@@ -205,6 +205,36 @@ class WorkSurfaceCopyTest {
     }
 
     @Test
+    fun `late activity cards stay above the agent reply`() {
+        val digest = CompletedActivityDigest(
+            hostId = "host-1",
+            sessionId = "session-1",
+            runId = "run-1",
+            milestones = emptyList(),
+            tools = emptyList(),
+            outcome = ActivityOutcome.Completed,
+            completedAtMillis = 1L,
+        )
+        val items = listOf(
+            ChatUiItem.User("user-1", "Check the build"),
+            ChatUiItem.Assistant("assistant-1", "The build passed."),
+            ChatUiItem.Reasoning("reasoning-1", listOf("Checking results")),
+            ChatUiItem.Activity("activity-1", emptyList()),
+            ChatUiItem.CompletedActivity("completed-1", digest, showTools = false),
+            ChatUiItem.Tool("tool-1", "terminal", "./gradlew test", running = false),
+        )
+
+        assertEquals(
+            listOf("user-1", "reasoning-1", "activity-1", "completed-1", "tools:tool-1", "assistant-1"),
+            groupChatTimeline(items).map(ChatTimelineItem::id),
+        )
+        assertEquals(
+            listOf("user-1", "reasoning-1", "activity-1", "completed-1", "tools:tool-1", "assistant-1"),
+            groupChatTimeline(items, ChatActivityLayout.Chronological).map(ChatTimelineItem::id),
+        )
+    }
+
+    @Test
     fun `tool activity group keeps its key after more than four calls`() {
         val timeline = groupChatTimeline(
             listOf(
@@ -250,6 +280,23 @@ class WorkSurfaceCopyTest {
         assertEquals("token=[redacted]", safeActivityPreview("token=very-secret-value"))
         assertEquals("authorization=[redacted]", safeActivityPreview("authorization: Bearer very-secret-value"))
         assertEquals("--api-key [redacted]", safeActivityPreview("--api-key very-secret-value"))
+    }
+
+    @Test
+    fun `visible tool activity stays capped while calls change state`() {
+        val calls = (1..5).map { number ->
+            ChatUiItem.Tool("tool-$number", "terminal", "step $number", running = false)
+        }
+
+        assertEquals(
+            listOf("tool-2", "tool-3", "tool-4", "tool-5"),
+            visibleToolActivity(condensedToolActivity(calls)).map { it.item.id },
+        )
+        assertEquals(
+            listOf("tool-2", "tool-3", "tool-4", "tool-5"),
+            visibleToolActivity(condensedToolActivity(calls.dropLast(1) + calls.last().copy(running = true)))
+                .map { it.item.id },
+        )
     }
 
     @Test
