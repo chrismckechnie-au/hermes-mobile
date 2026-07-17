@@ -2694,7 +2694,7 @@ class HermesViewModel(
         }
         updateRunStatus(run.runId, "Finishing transcript sync…")
 
-        val result = runCatching { gateway.loadMessages(run.host, run.sessionId) }
+        val result = loadTerminalTranscript(run)
         val page = result.getOrNull()
         if (page == null) {
             logRun("transcript sync failed runId=${run.runId}: ${result.exceptionOrNull()?.javaClass?.simpleName}")
@@ -2770,6 +2770,25 @@ class HermesViewModel(
             submitChat(text)
         }
     }
+
+    private suspend fun loadTerminalTranscript(run: ActiveRun): Result<HermesMessagesPage> {
+        var retries = 0
+        var delayMs = TRANSCRIPT_SYNC_RETRY_DELAY_MS
+        while (true) {
+            val result = runCatching { gateway.loadMessages(run.host, run.sessionId) }
+            val error = result.exceptionOrNull() ?: return result
+            if (!error.isTransientTranscriptSyncFailure() || retries >= TRANSCRIPT_SYNC_MAX_RETRIES) return result
+            retries += 1
+            logRun("transcript sync retry $retries runId=${run.runId}: ${error.javaClass.simpleName}")
+            delay(delayMs)
+            delayMs *= 2
+        }
+    }
+
+    private fun Throwable.isTransientTranscriptSyncFailure(): Boolean =
+        this is IOException || this is HermesApiException && (
+            statusCode in setOf(408, 409, 425, 429) || statusCode >= 500
+        )
 
     fun retryRunReconciliation(ref: RunRef) {
         val run = activeRun(ref) ?: return
@@ -3403,6 +3422,8 @@ class HermesViewModel(
         private const val RUN_STREAM_RETRY_DELAY_MS = 500L
         private const val MAX_RUN_STREAM_RETRY_DELAY_MS = 30_000L
         private const val RUN_SUBMIT_RETRY_DELAY_MS = 300L
+        private const val TRANSCRIPT_SYNC_RETRY_DELAY_MS = 1_000L
+        private const val TRANSCRIPT_SYNC_MAX_RETRIES = 3
         private const val SAVED_SESSION_DRAFTS = "composer.sessionDrafts"
         private const val SAVED_NEW_SESSION_DRAFTS = "composer.newSessionDrafts"
         private const val DRAFT_KEY_SEPARATOR = '\u001F'
