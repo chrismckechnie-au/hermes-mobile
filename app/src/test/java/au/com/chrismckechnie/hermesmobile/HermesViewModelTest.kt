@@ -62,6 +62,7 @@ private class FakeGateway : HermesGateway {
     var approvalGate: Channel<Unit>? = null
     var approvalAttempts = 0
     val loadMessageErrors = mutableMapOf<String, Throwable>()
+    val loadMessageFailures = mutableMapOf<String, MutableList<Throwable>>()
     val loadMessageGates = mutableMapOf<String, Channel<Unit>>()
     val listSessionGates = mutableMapOf<String, Channel<Unit>>()
     val listSessionErrorsByHost = mutableMapOf<String, Throwable>()
@@ -131,6 +132,7 @@ private class FakeGateway : HermesGateway {
 
     override suspend fun loadMessages(host: HostProfile, sessionId: String): HermesMessagesPage {
         loadMessageGates[sessionId]?.receive()
+        loadMessageFailures[sessionId]?.removeFirstOrNull()?.let { throw it }
         loadMessageErrors[sessionId]?.let { throw it }
         val resolved = resolvedIds[sessionId] ?: sessionId
         return HermesMessagesPage(resolved, messages[resolved]?.toList() ?: emptyList())
@@ -1726,6 +1728,29 @@ class HermesViewModelTest {
         advanceUntilIdle()
 
         assertTrue(viewModel.state.value.activeRuns.isEmpty())
+        assertNull(settings.checkpoint)
+    }
+
+    @Test
+    fun `terminal transcript sync retries transient host failures`() = runVmTest {
+        val settings = FakeSettingsStore(ThemeMode.System)
+        val (viewModel, gateway) = buildViewModel(settingsStore = settings)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("finish after a transient edge failure")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+        gateway.loadMessageFailures["s1"] = mutableListOf(
+            IOException("transcript not ready"),
+            HermesApiException(520, "edge response"),
+        )
+
+        gateway.events.send(HermesRunEvent.Completed("done"))
+        gateway.events.close()
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.activeRuns.isEmpty())
+        assertNull(viewModel.state.value.errorMessage)
         assertNull(settings.checkpoint)
     }
 
