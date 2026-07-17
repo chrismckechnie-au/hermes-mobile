@@ -2273,13 +2273,21 @@ internal fun groupChatTimeline(
     fun resetToolGroup() {
         pendingTools.clear()
         toolGroupIndex = null
+    }
+    fun resetTurn() {
+        resetToolGroup()
         assistantIndex = null
+    }
+    fun addPassiveActivity(item: ChatUiItem) {
+        val insertionIndex = assistantIndex ?: size
+        add(insertionIndex, ChatTimelineItem.Message(item, uniqueKey(item.id)))
+        assistantIndex = assistantIndex?.plus(1)
     }
 
     items.forEach { item ->
         when (item) {
             is ChatUiItem.User -> {
-                resetToolGroup()
+                resetTurn()
                 add(ChatTimelineItem.Message(item, uniqueKey(item.id)))
             }
             is ChatUiItem.Tool -> {
@@ -2296,8 +2304,16 @@ internal fun groupChatTimeline(
             }
             else -> {
                 if (layout == ChatActivityLayout.Chronological) resetToolGroup()
-                add(ChatTimelineItem.Message(item, uniqueKey(item.id)))
-                if (item is ChatUiItem.Assistant) assistantIndex = lastIndex
+                when (item) {
+                    is ChatUiItem.Reasoning,
+                    is ChatUiItem.Activity,
+                    is ChatUiItem.CompletedActivity,
+                    -> addPassiveActivity(item)
+                    else -> {
+                        add(ChatTimelineItem.Message(item, uniqueKey(item.id)))
+                        if (item is ChatUiItem.Assistant) assistantIndex = lastIndex
+                    }
+                }
             }
         }
     }
@@ -2310,7 +2326,7 @@ private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>, forceExpanded: Boole
     val requiresAttention = tools.any(ChatUiItem.Tool::failed) || forceExpanded
     val running = tools.any(ChatUiItem.Tool::running)
     val rows = condensedToolActivity(tools)
-    val visibleRows = if (running) rows.takeLast(4) else rows
+    val visibleRows = visibleToolActivity(rows)
     val action = if (expanded) "Collapse tool activity" else "Expand tool activity"
     Card(
         modifier = Modifier
@@ -2358,7 +2374,7 @@ private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>, forceExpanded: Boole
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     visibleRows.forEach { tool -> ToolActivityRow(tool.item, tool.repeatCount) }
-                    if (running && rows.size > visibleRows.size) {
+                    if (rows.size > visibleRows.size) {
                         Text("+${rows.size - visibleRows.size} earlier steps", style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp))
                     }
                 }
@@ -2439,6 +2455,8 @@ internal fun condensedToolActivity(tools: List<ChatUiItem.Tool>): List<Condensed
             groups + CondensedToolActivity(tool, 1)
         }
     }
+
+internal fun visibleToolActivity(rows: List<CondensedToolActivity>): List<CondensedToolActivity> = rows.takeLast(4)
 
 private fun toolDurationLabel(durationSeconds: Double?): String = durationSeconds
     ?.takeIf { it >= 0.0 }
