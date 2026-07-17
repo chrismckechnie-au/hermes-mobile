@@ -1755,6 +1755,25 @@ class HermesViewModelTest {
     }
 
     @Test
+    fun `terminal transcript sync exposes persistent host failure detail`() = runVmTest {
+        val diagnostics = FakeAppDiagnostics()
+        val (viewModel, gateway) = buildViewModel(diagnostics = diagnostics)
+        viewModel.selectSession("s1")
+        advanceUntilIdle()
+        viewModel.setComposerText("finish with a large transcript")
+        viewModel.sendMessage()
+        advanceUntilIdle()
+        gateway.loadMessageErrors["s1"] = HermesApiException(200, "Hermes returned a response that was too large.")
+
+        gateway.events.send(HermesRunEvent.Completed("done"))
+        gateway.events.close()
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.errorMessage.orEmpty().contains("too large"))
+        assertEquals(DiagnosticPhase.RunTerminal, diagnostics.failures.single().first)
+    }
+
+    @Test
     fun `durable checkpoint reconciles after Android process recreation`() = runVmTest {
         val settings = FakeSettingsStore(ThemeMode.System).apply {
             checkpoint = RunCheckpoint("h1", "s1", "run-recovered")

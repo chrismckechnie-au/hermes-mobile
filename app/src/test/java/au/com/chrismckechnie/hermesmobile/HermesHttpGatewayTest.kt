@@ -154,6 +154,28 @@ class HermesHttpGatewayTest {
     }
 
     @Test
+    fun `loadMessages accepts transcripts above the ordinary json limit`() = runBlocking {
+        val content = "x".repeat(4 * 1024 * 1024)
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"object":"list","session_id":"session-1","data":[{"id":"m1","role":"assistant","content":"$content"}]}""",
+        ))
+
+        val page = gateway.loadMessages(profile, "session-1")
+
+        assertEquals(content.length, page.messages.single().content.length)
+    }
+
+    @Test
+    fun `loadMessages remains bounded at the transcript json limit`() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("x".repeat(16 * 1024 * 1024 + 1)))
+
+        val error = runCatching { gateway.loadMessages(profile, "session-1") }.exceptionOrNull()
+
+        assertTrue(error is HermesApiException)
+        assertTrue(error?.message.orEmpty().contains("too large"))
+    }
+
+    @Test
     fun `listJobs parses the jobs listing`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("""
             {"jobs":[{"id":"job-1","name":"Daily report","schedule":"0 9 * * *","enabled":false,"deliver":"mobile"}]}
