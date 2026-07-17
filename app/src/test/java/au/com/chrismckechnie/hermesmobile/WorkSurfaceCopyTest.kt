@@ -87,11 +87,11 @@ class WorkSurfaceCopyTest {
     @Test
     fun `tool activity summary remains one compact line`() {
         assertEquals(
-            "terminal · Running tests now",
+            "Running command · Running tests now",
             compactToolSummary(ChatUiItem.Tool("tool-1", "terminal", "Running\n tests now", running = true)),
         )
         assertEquals(
-            "search · Completed",
+            "Searching · Completed",
             compactToolSummary(ChatUiItem.Tool("tool-2", "search", null, running = false)),
         )
     }
@@ -119,6 +119,17 @@ class WorkSurfaceCopyTest {
     }
 
     @Test
+    fun `activity trace does not repeat its headline in the reasoning list`() {
+        val turn = SessionActivityTurn(
+            turnId = "turn-1",
+            reasoning = listOf("Reviewing the request", "Checking the build"),
+            latestStatus = "Checking the build",
+        )
+
+        assertEquals(listOf("Reviewing the request"), visibleReasoningUpdates(turn))
+    }
+
+    @Test
     fun `consecutive tool prompts become one expandable activity group`() {
         val timeline = groupChatTimeline(
             listOf(
@@ -132,7 +143,7 @@ class WorkSurfaceCopyTest {
         assertEquals(3, timeline.size)
         val activity = timeline[1] as ChatTimelineItem.ToolGroup
         assertEquals(listOf("tool-1", "tool-2"), activity.tools.map { it.id })
-        assertEquals("Working · terminal", toolActivitySummary(activity.tools))
+        assertEquals("Working · Running command", toolActivitySummary(activity.tools))
     }
 
     @Test
@@ -151,6 +162,52 @@ class WorkSurfaceCopyTest {
         val activity = timeline[1] as ChatTimelineItem.ToolGroup
         assertEquals(listOf("tool-1", "tool-2"), activity.tools.map { it.id })
         assertTrue(timeline[2] is ChatTimelineItem.Message)
+    }
+
+    @Test
+    fun `chronological layout starts a new tool card after a meaningful status`() {
+        val timeline = groupChatTimeline(
+            listOf(
+                ChatUiItem.User("user-1", "Check the build"),
+                ChatUiItem.Tool("tool-1", "terminal", "./gradlew test", running = false),
+                ChatUiItem.Reasoning("reasoning-1", listOf("Checking results")),
+                ChatUiItem.Tool("tool-2", "search", "Find lint report", running = false),
+                ChatUiItem.Assistant("assistant-1", "The build passed."),
+            ),
+            ChatActivityLayout.Chronological,
+        )
+
+        assertEquals(5, timeline.size)
+        assertEquals(listOf("tool-1"), (timeline[1] as ChatTimelineItem.ToolGroup).tools.map { it.id })
+        assertEquals(listOf("tool-2"), (timeline[3] as ChatTimelineItem.ToolGroup).tools.map { it.id })
+    }
+
+    @Test
+    fun `tool cards condense only matching consecutive calls and redact previews`() {
+        val tools = listOf(
+            ChatUiItem.Tool("tool-1", "terminal", "echo ok", running = false),
+            ChatUiItem.Tool("tool-2", "terminal", "echo ok", running = false),
+            ChatUiItem.Tool("tool-3", "terminal", "echo next", running = false),
+        )
+
+        assertEquals(listOf(2, 1), condensedToolActivity(tools).map(CondensedToolActivity::repeatCount))
+        assertEquals("token=[redacted]", safeActivityPreview("token=very-secret-value"))
+        assertEquals("authorization=[redacted]", safeActivityPreview("authorization: Bearer very-secret-value"))
+        assertEquals("--api-key [redacted]", safeActivityPreview("--api-key very-secret-value"))
+    }
+
+    @Test
+    fun `historical user prompts only gain a success badge when a response exists`() {
+        val decorated = withInferredPromptLifecycles(
+            listOf(
+                ChatUiItem.User("user-1", "Finished request"),
+                ChatUiItem.Assistant("assistant-1", "Done"),
+                ChatUiItem.User("user-2", "Still working"),
+            ),
+        )
+
+        assertEquals(PromptLifecycle.Completed, (decorated[0] as ChatUiItem.User).lifecycle)
+        assertEquals(null, (decorated[2] as ChatUiItem.User).lifecycle)
     }
 
     @Test

@@ -50,6 +50,22 @@ class SessionActivityReducerTest {
         assertTrue(turn.subagents.getValue("sub-1").isWorking)
         assertTrue(turn.terminal)
         assertEquals("Release verified.", turn.assistantText)
+        assertEquals("Completed", turn.latestStatus)
+    }
+
+    @Test
+    fun `tool lifecycle chatter does not replace meaningful activity`() {
+        var state = reduceSessionActivity(SessionActivityState(), event(1, "message.start", userText = "Fix it"))
+        state = reduceSessionActivity(state, event(2, "reasoning.available", text = "Checking the build"))
+        assertEquals("Checking the build", state.latestTurn?.latestStatus)
+
+        state = reduceSessionActivity(state, event(3, "tool.start", toolId = "call-1", toolName = "terminal", status = "Using terminal…"))
+        state = reduceSessionActivity(state, event(4, "tool.complete", toolId = "call-1", toolName = "terminal", status = "Continuing after terminal"))
+        assertEquals("Checking the build", state.latestTurn?.latestStatus)
+
+        state = reduceSessionActivity(state, event(5, "status.error", text = "Tests failed"))
+        assertTrue(state.latestTurn?.terminal == true)
+        assertEquals("The task hit an issue", state.latestTurn?.latestStatus)
     }
 
     private fun event(
@@ -62,6 +78,7 @@ class SessionActivityReducerTest {
         tasks: List<HermesTask> = emptyList(),
         subagent: HermesSubagent? = null,
         workspaceUpdate: HermesWorkspaceUpdate? = null,
+        status: String? = null,
     ) = HermesSessionActivityEvent(
         eventId = id,
         sessionId = "session-1",
@@ -74,5 +91,6 @@ class SessionActivityReducerTest {
         tasks = tasks,
         subagent = subagent,
         workspaceUpdate = workspaceUpdate,
+        status = status,
     )
 }

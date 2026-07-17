@@ -516,7 +516,9 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                 item is ChatUiItem.Assistant && item.text.isNotBlank()
         }
     }
-    val timelineItems = remember(displayedMessages) { groupChatTimeline(displayedMessages) }
+    val timelineItems = remember(displayedMessages, state.chatActivityLayout) {
+        groupChatTimeline(displayedMessages, state.chatActivityLayout)
+    }
     val assistantAvatarIds = remember(displayedMessages) { firstAssistantIdsByTurn(displayedMessages) }
     val lastAssistantLength = (displayedMessages.lastOrNull { it is ChatUiItem.Assistant } as? ChatUiItem.Assistant)?.text?.length ?: 0
     var lastAutoScrollAt by remember { mutableStateOf(0L) }
@@ -605,7 +607,7 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                     items(timelineItems, key = { it.id }) { timelineItem ->
                         when (timelineItem) {
                             is ChatTimelineItem.Message -> when (val item = timelineItem.item) {
-                                is ChatUiItem.User -> UserBubble(item.text)
+                                is ChatUiItem.User -> UserBubble(item.text, item.lifecycle)
                                 is ChatUiItem.Assistant -> AssistantMessage(
                                     item.text,
                                     item.streaming,
@@ -615,11 +617,15 @@ private fun ChatScreen(state: HermesUiState, viewModel: HermesViewModel) {
                                     showAvatar = item.id in assistantAvatarIds,
                                 )
                                 is ChatUiItem.Reasoning -> ReasoningCard(item)
-                                is ChatUiItem.Tool -> ToolActivityGroup(listOf(item))
+                                is ChatUiItem.Tool -> ToolActivityGroup(listOf(item), forceExpanded = state.activeRun?.awaitingApproval == true)
                                 is ChatUiItem.Activity -> ActivityHistoryCard(item)
+                                is ChatUiItem.CompletedActivity -> CompletedActivityCard(item)
                                 is ChatUiItem.Approval -> ApprovalCard(item, viewModel)
                             }
-                            is ChatTimelineItem.ToolGroup -> ToolActivityGroup(timelineItem.tools)
+                            is ChatTimelineItem.ToolGroup -> ToolActivityGroup(
+                                timelineItem.tools,
+                                forceExpanded = state.activeRun?.awaitingApproval == true,
+                            )
                         }
                     }
                 }
@@ -1816,7 +1822,7 @@ private fun EmptyConversation(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun UserBubble(text: String) {
+private fun UserBubble(text: String, lifecycle: PromptLifecycle?) {
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     var actionsOpen by remember(text) { mutableStateOf(false) }
@@ -1824,6 +1830,13 @@ private fun UserBubble(text: String) {
     // wrap within the row width minus the start inset.
     Box(Modifier.fillMaxWidth().padding(start = 48.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            lifecycle?.let {
+                Text(
+                    it.emoji,
+                    fontSize = 12.sp,
+                    modifier = Modifier.align(Alignment.CenterVertically).padding(end = 6.dp),
+                )
+            }
             Text(
                 text,
                 style = T.Body.copy(color = T.OnAccent),
@@ -1930,6 +1943,7 @@ private fun shareTranscript(context: Context, transcript: String) {
 private fun ReasoningCard(item: ChatUiItem.Reasoning) {
     var expanded by remember(item.id) { mutableStateOf(true) }
     val latest = item.updates.lastOrNull().orEmpty()
+    val previous = item.updates.filterNot { it == latest }.takeLast(3)
     val action = if (expanded) "Collapse Hermes activity" else "Expand Hermes activity"
     Card(
         modifier = Modifier
@@ -1957,7 +1971,7 @@ private fun ReasoningCard(item: ChatUiItem.Reasoning) {
             }
             Spacer(Modifier.width(8.dp))
             Text(
-                if (expanded) "Hermes activity" else latest.ifBlank { "Hermes is working…" },
+                latest.ifBlank { "Hermes is working…" },
                 style = if (expanded) T.Label else T.BodyMuted.copy(fontSize = 12.sp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1976,7 +1990,7 @@ private fun ReasoningCard(item: ChatUiItem.Reasoning) {
                 Modifier.fillMaxWidth().padding(start = 38.dp, end = 9.dp, bottom = 7.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                item.updates.takeLast(12).forEach { update ->
+                previous.forEach { update ->
                     Text(
                         update,
                         style = T.BodyMuted.copy(color = T.TextSoft, fontSize = 11.sp, lineHeight = 15.sp),
@@ -1989,58 +2003,106 @@ private fun ReasoningCard(item: ChatUiItem.Reasoning) {
 
 @Composable
 private fun ActivityHistoryCard(item: ChatUiItem.Activity) {
-    val activeCount = item.turns.count { !it.terminal }
-    val latest = item.turns.lastOrNull { !it.terminal } ?: item.turns.lastOrNull()
-    var expanded by remember(item.id, activeCount > 0) { mutableStateOf(activeCount > 0) }
-    val label = activityTraceLabel(item.turns)
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        visibleActivityTurns(item.turns).forEach { turn ->
+            ActivityStatusCard(
+                id = "${item.id}:${turn.turnId}",
+                title = if (turn.terminal) "Work completed" else "Hermes is working",
+                current = turn.latestStatus ?: turn.reasoning.lastOrNull() ?: "Hermes activity",
+                milestones = visibleReasoningUpdates(turn).takeLast(3),
+                active = !turn.terminal,
+            )
+            turn.tools.takeIf { it.isNotEmpty() }?.let { tools -> ToolActivityGroup(tools) }
+        }
+    }
+}
+
+@Composable
+private fun CompletedActivityCard(item: ChatUiItem.CompletedActivity) {
+    val digest = item.digest
+    val title = when (digest.outcome) {
+        ActivityOutcome.Completed -> "Work completed"
+        ActivityOutcome.Failed -> "Work needs attention"
+        ActivityOutcome.Cancelled -> "Work stopped"
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        ActivityStatusCard(
+            id = item.id,
+            title = title,
+            current = digest.milestones.lastOrNull()
+                ?: if (digest.outcome == ActivityOutcome.Completed) "No further progress details" else "Review this run in Hermes",
+            milestones = digest.milestones.dropLast(1).takeLast(3),
+            active = false,
+            attention = digest.outcome != ActivityOutcome.Completed,
+        )
+        digest.tools.takeIf { item.showTools && it.isNotEmpty() }?.let { tools ->
+            ToolActivityGroup(
+                tools.mapIndexed { index, tool ->
+                    ChatUiItem.Tool(
+                        id = "${item.id}:tool:$index",
+                        name = tool.name,
+                        preview = tool.preview,
+                        running = false,
+                        failed = tool.failed,
+                        durationSeconds = tool.durationSeconds,
+                    )
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ActivityStatusCard(
+    id: String,
+    title: String,
+    current: String,
+    milestones: List<String>,
+    active: Boolean,
+    attention: Boolean = false,
+) {
+    var expanded by remember(id, active, attention) { mutableStateOf(active || attention) }
+    val action = if (expanded) "Collapse work status" else "Expand work status"
     Card(
         modifier = Modifier
             .fillMaxWidth(0.9f)
             .heightIn(min = 48.dp)
             .semantics {
-                contentDescription = if (expanded) "Collapse work details" else "Expand work details"
+                contentDescription = action
                 role = Role.Button
                 stateDescription = if (expanded) "Expanded" else "Collapsed"
             }
             .clickable { expanded = !expanded },
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
-        border = BorderStroke(1.dp, if (activeCount > 0) T.Tool.copy(alpha = 0.24f) else T.Line),
+        border = BorderStroke(1.dp, when {
+            attention -> T.Error.copy(alpha = 0.3f)
+            active -> T.Tool.copy(alpha = 0.24f)
+            else -> T.Line
+        }),
     ) {
         Column {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Lucide.ScrollText, null, tint = T.Tool, modifier = Modifier.size(15.dp))
+                Icon(Lucide.ScrollText, null, tint = if (attention) T.Error else T.Tool, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(label, style = T.Label)
-                    if (activeCount > 0) {
-                        Text(
-                            latest?.latestStatus ?: "Working…",
-                            style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+                    Text(title, style = T.Label)
+                    Text(current, style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                if (activeCount > 0) {
-                    CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
-                }
-                Icon(
-                    Lucide.ChevronDown,
-                    null,
-                    tint = T.Muted,
-                    modifier = Modifier.padding(start = 7.dp).size(15.dp).rotate(if (expanded) 180f else 0f),
-                )
+                if (active) CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
+                Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.padding(start = 7.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
             }
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(visible = expanded && milestones.isNotEmpty()) {
                 Column(
-                    Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    Modifier.fillMaxWidth().padding(start = 34.dp, end = 12.dp, bottom = 9.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
-                    visibleActivityTurns(item.turns).forEach { turn -> ActivityTurnTrace(turn) }
+                    milestones.forEach { milestone ->
+                        Text(milestone, style = T.BodyMuted.copy(fontSize = 11.sp, lineHeight = 15.sp))
+                    }
                 }
             }
         }
@@ -2057,38 +2119,11 @@ internal fun activityTraceLabel(turns: List<SessionActivityTurn>): String {
 internal fun visibleActivityTurns(turns: List<SessionActivityTurn>): List<SessionActivityTurn> =
     turns.filterNot(SessionActivityTurn::terminal).ifEmpty { turns }.asReversed()
 
-@Composable
-private fun ActivityTurnTrace(turn: SessionActivityTurn) {
-    Column(
-        Modifier.fillMaxWidth()
-            .clip(RoundedCornerShape(T.RadiusSmall))
-            .background(T.Cream.copy(alpha = 0.045f))
-            .padding(horizontal = 9.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                if (turn.terminal) "WORK DETAILS" else "CURRENT WORK",
-                style = T.MicroBold.copy(color = if (turn.terminal) T.Muted else T.Tool, letterSpacing = 0.4.sp),
-            )
-            Spacer(Modifier.width(7.dp))
-            Text(turn.latestStatus ?: "Hermes activity", style = T.Micro.copy(color = T.TextSoft, letterSpacing = 0.sp))
-        }
-        turn.reasoning.takeLast(5).forEach { update ->
-            Text(update, style = T.BodyMuted.copy(fontSize = 11.sp, lineHeight = 15.sp))
-        }
-        visibleActivityTools(turn).takeLast(8).forEach { tool -> ToolActivityRow(tool) }
-        val summary = buildList {
-            if (turn.tasks.isNotEmpty()) add(taskProgressLabel(turn.tasks))
-            if (turn.subagents.isNotEmpty()) add("${turn.subagents.values.count(HermesSubagent::isWorking)} subagents active")
-            turn.workspaceUpdate?.files?.takeIf { it.isNotEmpty() }?.let { add("${it.size} files changed") }
-        }.joinToString(" · ")
-        if (summary.isNotBlank()) Text(summary, style = T.Micro.copy(color = T.Tool, letterSpacing = 0.sp))
-    }
-}
-
 internal fun visibleActivityTools(turn: SessionActivityTurn): List<ChatUiItem.Tool> =
     if (turn.terminal) turn.tools else turn.tools.filter { it.running || it.failed }
+
+internal fun visibleReasoningUpdates(turn: SessionActivityTurn): List<String> =
+    turn.reasoning.filterNot { it == turn.latestStatus }.takeLast(5)
 
 @Composable
 private fun MarkdownText(text: String, modifier: Modifier = Modifier) {
@@ -2188,7 +2223,10 @@ internal sealed interface ChatTimelineItem {
     ) : ChatTimelineItem
 }
 
-internal fun groupChatTimeline(items: List<ChatUiItem>): List<ChatTimelineItem> = buildList {
+internal fun groupChatTimeline(
+    items: List<ChatUiItem>,
+    layout: ChatActivityLayout = ChatActivityLayout.Grouped,
+): List<ChatTimelineItem> = buildList {
     val pendingTools = mutableListOf<ChatUiItem.Tool>()
     val usedKeys = mutableSetOf<String>()
     var toolGroupIndex: Int? = null
@@ -2219,17 +2257,26 @@ internal fun groupChatTimeline(items: List<ChatUiItem>): List<ChatTimelineItem> 
                     this[index] = (this[index] as ChatTimelineItem.ToolGroup).copy(tools = pendingTools.toList())
                 }
             }
-            else -> add(ChatTimelineItem.Message(item, uniqueKey(item.id)))
+            else -> {
+                if (layout == ChatActivityLayout.Chronological) resetToolGroup()
+                add(ChatTimelineItem.Message(item, uniqueKey(item.id)))
+            }
         }
     }
 }
 
 @Composable
-private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>) {
-    var expanded by remember(tools.first().id) { mutableStateOf(false) }
+private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>, forceExpanded: Boolean = false) {
+    var expanded by remember(tools.first().id) { mutableStateOf(tools.any { it.running || it.failed } || forceExpanded) }
     val latest = tools.last()
+    val requiresAttention = tools.any(ChatUiItem.Tool::failed) || forceExpanded
+    val running = tools.any(ChatUiItem.Tool::running)
+    val rows = condensedToolActivity(tools)
+    val visibleRows = if (running) rows.takeLast(4) else rows
+    LaunchedEffect(running, requiresAttention) {
+        if (running || requiresAttention) expanded = true else expanded = false
+    }
     val action = if (expanded) "Collapse tool activity" else "Expand tool activity"
-    val completed = tools.count { !it.running }
     Card(
         modifier = Modifier
             .fillMaxWidth(0.86f)
@@ -2242,7 +2289,7 @@ private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>) {
             .clickable { expanded = !expanded },
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = T.SurfaceLow.copy(alpha = 0.92f)),
-        border = BorderStroke(1.dp, if (latest.failed) T.Error.copy(alpha = 0.3f) else T.Tool.copy(alpha = 0.16f)),
+        border = BorderStroke(1.dp, if (requiresAttention) T.Error.copy(alpha = 0.3f) else T.Tool.copy(alpha = 0.16f)),
     ) {
         Column {
             Row(
@@ -2253,7 +2300,7 @@ private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>) {
                     Modifier.size(22.dp).clip(RoundedCornerShape(T.RadiusSmall)).background(T.Tool.copy(alpha = 0.08f)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Lucide.Terminal, null, tint = if (latest.failed) T.Error else T.Tool, modifier = Modifier.size(12.dp))
+                    Text(toolPresentation(latest.name).emoji, fontSize = 12.sp)
                 }
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
@@ -2266,8 +2313,8 @@ private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>) {
                     )
                 }
                 Spacer(Modifier.width(5.dp))
-                if (latest.running) CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
-                else Text("$completed/${tools.size}", style = T.MicroBold.copy(color = if (latest.failed) T.Error else T.Tool))
+                if (running) CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.4.dp, color = T.Tool)
+                else Text(if (requiresAttention) "❌" else "✅", style = T.MicroBold.copy(color = if (requiresAttention) T.Error else T.Tool))
                 Icon(Lucide.ChevronDown, null, tint = T.Muted, modifier = Modifier.padding(start = 5.dp).size(15.dp).rotate(if (expanded) 180f else 0f))
             }
             AnimatedVisibility(visible = expanded) {
@@ -2275,7 +2322,10 @@ private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>) {
                     Modifier.fillMaxWidth().padding(start = 38.dp, end = 9.dp, bottom = 7.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    tools.forEach { tool -> ToolActivityRow(tool) }
+                    visibleRows.forEach { tool -> ToolActivityRow(tool.item, tool.repeatCount) }
+                    if (running && rows.size > visibleRows.size) {
+                        Text("+${rows.size - visibleRows.size} earlier steps", style = T.Micro.copy(color = T.Muted, letterSpacing = 0.sp))
+                    }
                 }
             }
         }
@@ -2283,31 +2333,89 @@ private fun ToolActivityGroup(tools: List<ChatUiItem.Tool>) {
 }
 
 @Composable
-private fun ToolActivityRow(item: ChatUiItem.Tool) {
+private fun ToolActivityRow(item: ChatUiItem.Tool, repeatCount: Int = 1) {
+    val presentation = toolPresentation(item.name)
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(compactToolSummary(item), style = T.MonoSmall.copy(color = T.TextSoft), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Text(presentation.emoji, fontSize = 12.sp)
         Spacer(Modifier.width(6.dp))
         Text(
-            if (item.running) "RUNNING" else if (item.failed) "FAILED" else "DONE",
-            style = T.MicroBold.copy(color = if (item.failed) T.Error else T.Tool),
+            compactToolSummary(item) + if (repeatCount > 1) " ×$repeatCount" else "",
+            style = T.BodyMuted.copy(color = T.TextSoft, fontSize = 11.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            when {
+                item.running -> "…"
+                item.failed -> "❌${toolDurationLabel(item.durationSeconds)}"
+                else -> "✅${toolDurationLabel(item.durationSeconds)}"
+            },
+            style = T.MicroBold.copy(color = if (item.failed) T.Error else T.Tool, letterSpacing = 0.sp),
         )
     }
 }
 
 internal fun toolActivitySummary(tools: List<ChatUiItem.Tool>): String {
     val latest = tools.lastOrNull() ?: return "Working…"
-    val latestTool = latest.name.replace('_', ' ').replace('-', ' ')
-    return if (latest.running) "Working · $latestTool" else "${tools.size} tool step${if (tools.size == 1) "" else "s"} completed"
+    val latestTool = toolPresentation(latest.name).label
+    return when {
+        latest.running -> "Working · $latestTool"
+        tools.any(ChatUiItem.Tool::failed) -> "Tool needs attention · $latestTool"
+        else -> "Tools completed · ${tools.size} step${if (tools.size == 1) "" else "s"}${toolDurationSummary(tools)}"
+    }
 }
 
 internal fun compactToolSummary(item: ChatUiItem.Tool): String {
-    val detail = item.preview
-        ?.replace(Regex("\\s+"), " ")
-        ?.trim()
-        ?.takeIf { it.isNotBlank() }
+    val detail = safeActivityPreview(item.preview)
         ?: if (item.running) "Running" else "Completed"
-    return "${item.name} · $detail"
+    return "${toolPresentation(item.name).label} · $detail"
 }
+
+internal data class ToolPresentation(val emoji: String, val label: String)
+
+internal fun toolPresentation(name: String): ToolPresentation {
+    val normalized = name.lowercase().replace('-', '_')
+    return when {
+        normalized.contains("terminal") || normalized.contains("shell") || normalized.contains("command") -> ToolPresentation("💻", "Running command")
+        normalized.contains("process") -> ToolPresentation("⚙️", "Managing process")
+        normalized.contains("web") || normalized.contains("browser") -> ToolPresentation("🌐", "Browsing web")
+        normalized.contains("search") || normalized == "rg" -> ToolPresentation("🔍", "Searching")
+        normalized.contains("read") || normalized.contains("open") -> ToolPresentation("📖", "Reading")
+        normalized.contains("write") || normalized.contains("edit") -> ToolPresentation("✍️", "Writing")
+        normalized.contains("patch") || normalized.contains("apply") -> ToolPresentation("🔧", "Patching")
+        normalized.contains("task") || normalized.contains("plan") -> ToolPresentation("📋", "Updating plan")
+        normalized.contains("skill") -> ToolPresentation("📚", "Running skill")
+        normalized.contains("memory") -> ToolPresentation("🧠", "Updating memory")
+        normalized.contains("image") -> ToolPresentation("🎨", "Creating image")
+        else -> ToolPresentation("⚙️", name.replace('_', ' ').replace('-', ' ').trim().ifBlank { "Using tool" })
+    }
+}
+
+internal data class CondensedToolActivity(val item: ChatUiItem.Tool, val repeatCount: Int)
+
+internal fun condensedToolActivity(tools: List<ChatUiItem.Tool>): List<CondensedToolActivity> =
+    tools.fold(emptyList()) { groups, tool ->
+        val previous = groups.lastOrNull()
+        if (previous != null && previous.item.name == tool.name && safeActivityPreview(previous.item.preview) == safeActivityPreview(tool.preview) && previous.item.failed == tool.failed && previous.item.running == tool.running) {
+            groups.dropLast(1) + previous.copy(repeatCount = previous.repeatCount + 1)
+        } else {
+            groups + CondensedToolActivity(tool, 1)
+        }
+    }
+
+private fun toolDurationLabel(durationSeconds: Double?): String = durationSeconds
+    ?.takeIf { it >= 0.0 }
+    ?.let { " ${if (it < 10) String.format(java.util.Locale.US, "%.1fs", it) else "${it.toInt()}s"}" }
+    .orEmpty()
+
+private fun toolDurationSummary(tools: List<ChatUiItem.Tool>): String = tools
+    .mapNotNull(ChatUiItem.Tool::durationSeconds)
+    .takeIf { it.isNotEmpty() }
+    ?.sum()
+    ?.let { " · ${toolDurationLabel(it).trim()}" }
+    .orEmpty()
 
 @Composable
 private fun ApprovalCard(item: ChatUiItem.Approval, viewModel: HermesViewModel) {
@@ -2884,9 +2992,16 @@ private fun SessionsScreen(state: HermesUiState, viewModel: HermesViewModel) {
 @Composable
 private fun LiveWorkingBubble(status: String, updates: List<String>) {
     var manuallyCollapsed by remember { mutableStateOf(false) }
-    var expanded by remember { mutableStateOf(updates.size > 1) }
-    LaunchedEffect(updates.size) {
-        if (!manuallyCollapsed && updates.size > 1) expanded = true
+    val previousUpdates = updates
+        .filter(::isUsefulProgressUpdate)
+        .filterNot { it == status }
+        .takeLast(3)
+    val headline = status.takeIf(::isUsefulProgressUpdate)
+        ?: previousUpdates.lastOrNull()
+        ?: "Hermes is working…"
+    var expanded by remember { mutableStateOf(previousUpdates.isNotEmpty()) }
+    LaunchedEffect(previousUpdates.size) {
+        if (!manuallyCollapsed && previousUpdates.isNotEmpty()) expanded = true
     }
     val action = if (expanded) "Collapse live Hermes status" else "Expand live Hermes status"
     Card(
@@ -2913,7 +3028,7 @@ private fun LiveWorkingBubble(status: String, updates: List<String>) {
             CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.4.dp, color = T.Cream)
             Spacer(Modifier.width(8.dp))
             Text(
-                status,
+                headline,
                 style = T.BodyMuted.copy(color = T.TextSoft, fontSize = 12.sp),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -2931,14 +3046,11 @@ private fun LiveWorkingBubble(status: String, updates: List<String>) {
                 modifier = Modifier.padding(start = 32.dp, end = 10.dp, bottom = 9.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                updates.takeLast(8).forEach { update ->
+                previousUpdates.forEach { update ->
                     Text(
                         update,
                         style = T.BodyMuted.copy(color = T.Muted, fontSize = 11.sp, lineHeight = 15.sp),
                     )
-                }
-                if (updates.isEmpty()) {
-                    Text(status, style = T.BodyMuted.copy(color = T.Muted, fontSize = 11.sp, lineHeight = 15.sp))
                 }
             }
         }
@@ -3653,6 +3765,37 @@ private fun SettingsScreen(
                     style = T.BodyMuted,
                     modifier = Modifier.padding(top = 9.dp),
                 )
+            }
+        }
+        Text("CHAT", style = T.Micro, modifier = Modifier.padding(top = 14.dp, bottom = 8.dp))
+        Surface(color = T.SurfaceLow, border = BorderStroke(1.dp, T.Line), shape = RoundedCornerShape(T.RadiusCard)) {
+            Column(Modifier.fillMaxWidth().padding(13.dp)) {
+                Text("Activity layout", style = T.Label)
+                Text("Grouped keeps one tool card per turn. Chronological splits cards when Hermes changes activity phase.", style = T.BodyMuted, modifier = Modifier.padding(top = 3.dp))
+                Row(
+                    Modifier.padding(top = 9.dp).selectableGroup(),
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    ChatActivityLayout.entries.forEach { layout ->
+                        val selected = state.chatActivityLayout == layout
+                        Text(
+                            layout.name,
+                            style = T.BodyMuted.copy(
+                                color = if (selected) T.OnAccent else T.Muted,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            ),
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (selected) T.Cream else T.SurfaceTwo)
+                                .selectable(
+                                    selected = selected,
+                                    onClick = { viewModel.setChatActivityLayout(layout) },
+                                    role = Role.RadioButton,
+                                )
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                        )
+                    }
+                }
             }
         }
         Text("HOST", style = T.Micro, modifier = Modifier.padding(top = 14.dp, bottom = 8.dp))
