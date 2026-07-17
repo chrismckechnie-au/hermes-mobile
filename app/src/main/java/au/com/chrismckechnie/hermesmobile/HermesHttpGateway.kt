@@ -134,7 +134,11 @@ class HermesHttpGateway(
     }
 
     override suspend fun loadMessages(host: HostProfile, sessionId: String): HermesMessagesPage = withContext(Dispatchers.IO) {
-        val data = executeJson(host, request(host, endpoint(host, "api", "sessions", sessionId, "messages")))
+        val data = executeJson(
+            host,
+            request(host, endpoint(host, "api", "sessions", sessionId, "messages")),
+            maxBytes = MAX_TRANSCRIPT_JSON_BYTES.toLong(),
+        )
         HermesMessagesPage(
             // The envelope carries the resolved id — a rotated session resolves
             // to its continuation here.
@@ -570,10 +574,10 @@ class HermesHttpGateway(
     private fun endpoint(host: HostProfile, vararg segments: String): HttpUrl =
         segments.fold(host.validated().baseUrl.toHttpUrl().newBuilder()) { builder, segment -> builder.addPathSegment(segment) }.build()
 
-    private fun executeJson(host: HostProfile, request: Request): JSONObject {
+    private fun executeJson(host: HostProfile, request: Request, maxBytes: Long = MAX_JSON_BYTES.toLong()): JSONObject {
         ordinaryClient.newCall(request).execute().use { response ->
             ensureSuccessful(response)
-            val raw = readBoundedBody(response)
+            val raw = readBoundedBody(response, maxBytes)
             if (raw.isBlank()) throw HermesApiException(response.code, "Hermes returned an empty response.")
             return runCatching { JSONObject(raw) }.getOrElse {
                 throw HermesApiException(response.code, "Hermes returned an unreadable response.")
@@ -619,16 +623,16 @@ class HermesHttpGateway(
         )
     }
 
-    private fun readBoundedBody(response: Response): String {
+    private fun readBoundedBody(response: Response, maxBytes: Long = MAX_JSON_BYTES.toLong()): String {
         val source = response.body?.source() ?: return ""
         val sink = Buffer()
         var total = 0L
-        while (total <= MAX_JSON_BYTES) {
-            val read = source.read(sink, minOf(8_192L, MAX_JSON_BYTES + 1L - total))
+        while (total <= maxBytes) {
+            val read = source.read(sink, minOf(8_192L, maxBytes + 1L - total))
             if (read == -1L) break
             total += read
         }
-        if (total > MAX_JSON_BYTES) {
+        if (total > maxBytes) {
             throw HermesApiException(response.code, "Hermes returned a response that was too large.")
         }
         return sink.readUtf8()
@@ -707,6 +711,7 @@ class HermesHttpGateway(
         const val MAX_WORKSPACE_STATUS_LENGTH = 32
         const val MAX_WORKSPACE_DIFF_LENGTH = 20_000
         const val MAX_JSON_BYTES = 4 * 1024 * 1024
+        const val MAX_TRANSCRIPT_JSON_BYTES = 16 * 1024 * 1024
         const val MAX_STREAM_LINE_BYTES = 256 * 1024
         val TASK_STATUSES = setOf("pending", "in_progress", "completed", "cancelled")
         val SUBAGENT_STATUSES = setOf(

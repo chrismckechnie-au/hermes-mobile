@@ -2697,14 +2697,23 @@ class HermesViewModel(
         val result = loadTerminalTranscript(run)
         val page = result.getOrNull()
         if (page == null) {
-            logRun("transcript sync failed runId=${run.runId}: ${result.exceptionOrNull()?.javaClass?.simpleName}")
+            val error = result.exceptionOrNull()
+            logRun("transcript sync failed runId=${run.runId}: ${error?.javaClass?.simpleName}")
+            error?.let { diagnostics.recordFailure(DiagnosticPhase.RunTerminal, it) }
+            val detail = error?.let(::friendlyMessage)
             updateRunStatus(run.runId, "Finished — transcript sync required")
             mutableState.update { state ->
                 val active = state.activeRuns[key]
                 if (active?.runId != run.runId) state else state.withRun(
                     key,
                     active.copy(reconcilingTranscript = false, terminalUnsynced = true),
-                ).copy(errorMessage = "The run finished, but its transcript could not be refreshed. Retry transcript sync.")
+                ).copy(
+                    errorMessage = listOfNotNull(
+                        "The run finished, but its transcript could not be refreshed.",
+                        detail,
+                        "Retry transcript sync.",
+                    ).joinToString(" "),
+                )
             }
             return
         }
