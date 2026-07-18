@@ -490,7 +490,7 @@ class HermesComposeUiRegressionTest {
             lastActive = null,
             messageCount = 1,
         )
-        const val HOST_DESCRIPTION = "Hermes host Local Hermes, online. Opens host picker."
+        const val HOST_DESCRIPTION = "Hermes connection Local Hermes, online. Opens profile and host picker."
         const val ACTIVE_WORK_DESCRIPTION =
             "1 active run · Release verification. Show active work."
         const val ACTIVE_WORK_ITEM_DESCRIPTION =

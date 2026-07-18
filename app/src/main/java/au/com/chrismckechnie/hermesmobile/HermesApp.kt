@@ -411,7 +411,7 @@ private fun CommandHeader(
                 .clickable(onClick = onChooseHost)
                 .padding(start = 12.dp, end = 8.dp, top = 6.dp, bottom = 6.dp)
                 .semantics(mergeDescendants = true) {
-                    contentDescription = "Hermes host $hostName, ${statusText.lowercase()}. Opens host picker."
+                    contentDescription = "Hermes connection $hostName, ${statusText.lowercase()}. Opens profile and host picker."
                 },
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -4422,11 +4422,11 @@ private fun HostPickerSheet(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        if (state.hosts.isEmpty()) "Connect Hermes" else "Choose a host",
+                        if (state.hosts.isEmpty()) "Connect Hermes" else "Choose a profile or host",
                         style = T.SheetTitle,
                         modifier = Modifier.semantics { heading() },
                     )
-                    Text("Switch between desktop and server instances without reconfiguring the app.", style = T.BodyMuted, modifier = Modifier.padding(top = 5.dp))
+                    Text("Save each Hermes profile endpoint, then switch profiles or machines here.", style = T.BodyMuted, modifier = Modifier.padding(top = 5.dp))
                 }
                 IconButton(onClick = requestDismiss, modifier = Modifier.size(T.ControlMin)) {
                     Icon(Lucide.X, "Close host picker", tint = T.Muted)
@@ -4434,7 +4434,7 @@ private fun HostPickerSheet(
             }
 
             if (state.hosts.isNotEmpty()) {
-                Text("SAVED HOSTS", style = T.Micro, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
+                Text("SAVED PROFILES & HOSTS", style = T.Micro, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
                 state.hosts.forEach { host ->
                     SavedHostRow(
                         host = host,
@@ -4455,8 +4455,8 @@ private fun HostPickerSheet(
             HostTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = "Host name",
-                placeholder = "Ubuntu Hermes",
+                label = "Connection name",
+                placeholder = "Coding profile",
                 icon = Lucide.Server,
                 error = validation.name.takeIf { nameTouched || submitAttempted },
                 focusRequester = nameFocus,

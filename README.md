@@ -13,7 +13,7 @@ Hermes Mobile uses Kotlin and Jetpack Compose. It is a client only: the agent, m
 ## Implemented
 
 - Native Command Deck interface for Android, styled in an Apple-inspired dark/light system palette (switchable in Settings) with the official Hermes app icon, Lucide icons, and JetBrains Mono
-- Multiple saved Hermes hosts with quick switching, editing, and confirmed deletion
+- Multiple saved Hermes profile or host connections with quick switching, editing, and confirmed deletion
 - HTTPS by default, with explicit opt-in for private-network HTTP; scheme-downgrade redirects are refused
 - API keys encrypted at rest with Android Keystore (AES-GCM); unlock failures surface a notice instead of silently wiping hosts
 - Capability discovery, host-version display, and authenticated connection status
@@ -108,6 +108,39 @@ In Hermes Mobile, choose **Add a host** and enter:
 - private-network HTTP opt-in only when the connection is protected by a trusted LAN/VPN
 
 Entering a URL ending in `/v1` is also supported; the client normalizes it to the server root. When editing a saved host, leave the API key blank to keep the stored key.
+
+### Use multiple Hermes profiles
+
+Hermes runs each profile as an isolated gateway. Give each profile API server a
+different port, start its gateway, then save each endpoint in Hermes Mobile:
+
+```bash
+hermes profile create coder
+hermes profile create personal
+
+cat >> ~/.hermes/profiles/coder/.env <<'EOF'
+API_SERVER_ENABLED=true
+API_SERVER_HOST=0.0.0.0
+API_SERVER_PORT=8643
+API_SERVER_KEY=replace-with-a-long-random-secret
+EOF
+
+cat >> ~/.hermes/profiles/personal/.env <<'EOF'
+API_SERVER_ENABLED=true
+API_SERVER_HOST=0.0.0.0
+API_SERVER_PORT=8644
+API_SERVER_KEY=replace-with-another-long-random-secret
+EOF
+
+hermes -p coder gateway &
+hermes -p personal gateway &
+```
+
+Use a connection name such as `Coder` or `Personal`, then tap the current
+connection in the app header to switch. Hermes Mobile keeps each profile's
+sessions, runs, jobs, and credentials isolated by its saved endpoint. Current
+Hermes gateways do not expose one API that switches profiles; each running
+profile therefore needs its own URL/port and saved connection.
 
 ## Background runs, notifications, Bubbles, and overlay
 

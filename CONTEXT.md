@@ -6,6 +6,8 @@ Glossary of the ubiquitous language for Hermes Mobile. Terms only — no impleme
 
 **Hermes host** — a user-owned machine (desktop or server) running the Hermes Agent API server. The phone is only a client; the agent, credentials, tools, memory, sessions, and jobs live on the host.
 
+**Hermes profile connection** — a saved API endpoint for one running Hermes profile. Profiles on the same host use different ports and appear alongside connections to other hosts in the header picker.
+
 **Command Deck** — the mobile app's five-screen surface (Chat, Sessions, Jobs, Host, Settings) for operating a connected Hermes host.
 
 **Hermes palette** — the app's Apple-inspired light and dark system palettes, with platform-style grouped surfaces and blue interactive accents.
